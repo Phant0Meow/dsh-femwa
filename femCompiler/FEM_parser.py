@@ -1501,25 +1501,10 @@ def parse_script(text: str, base_dir: str = ".") -> Script:
         elif t == 'flow':
             script.flow = eval_flow(block)
 
-    # 处理 database 路径 —— 基于 user_dir，避免重复拼接
-    if 'database' in script.meta:
-        from femCompiler.FEM_config import get_user_dir   # 可移到文件顶部
-        db_path = script.meta['database']
-        if db_path.startswith('file:"') and db_path.endswith('"'):
-            db_path = db_path[6:-1]
-        elif db_path.startswith("file:'") and db_path.endswith("'"):
-            db_path = db_path[6:-1]
+    # 注：meta.database 解析块已移除——set_db_path 无调用点，该机制从未生效；
+    # 运行时数据库路径统一由 FEM_config.get_db_path() 解析
+    # （get_user_dir()/user_data/memory/Chronica.wor）。
 
-        if not os.path.isabs(db_path):
-            user_dir = os.path.join(get_user_dir(), "user_data")
-            # 防止重复拼接 user_dir 的最后一级目录名
-            last_component = os.path.basename(user_dir.rstrip('/\\'))
-            if last_component and db_path.startswith(last_component + os.sep):
-                db_path = db_path[len(last_component) + 1:]
-            db_path = os.path.join(user_dir, db_path)
-
-        script.meta['database'] = db_path
-        
     owner_val = script.meta.get('owner')
     if owner_val is not None:
         if isinstance(owner_val, (int, float)):
