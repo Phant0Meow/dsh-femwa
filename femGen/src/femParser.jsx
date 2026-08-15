@@ -54,8 +54,6 @@ function stripLineComments(line) {
       continue;
     }
     if (c === '#') {
-      // flow 魔法注释（回边语法）保留：# for loop -> [X] while cond
-      if (/^#\s*for loop\s*->/.test(line)) return line;
       break;
     }
     if (c === '/' && line[i + 1] === '/') break;
@@ -594,7 +592,7 @@ function parseActionBlock(header, cls) {
   // 先标准化 header
   const normalizedHeader = normalizeSymbols(header);
   const hm = normalizedHeader.match(
-    /^action\s+([\w\u4e00-\u9fff]+)\s+(@[\w\u4e00-\u9fff]+)(?:\((@?[\w\u4e00-\u9fff.]+)\))?:$/
+    /^action\s+([\w\u4e00-\u9fff]+)\s+(@[\w\u4e00-\u9fff]+)(?:\((@?[\w\u4e00-\u9fff.]+)\))?(?:\s+as\s*\((@?[\w\u4e00-\u9fff.]+)\))?\s*:\s*$/
   );
   if (!hm)
     throw new Error(
@@ -604,6 +602,7 @@ function parseActionBlock(header, cls) {
     name: hm[1],
     executorType: hm[2].replace('@', ''),
     executorActor: hm[3] || '',
+    asActor: hm[4] || '',
     prompt: '',
     resolve: '',
     scope: '',
@@ -736,11 +735,12 @@ action.outVars = ol.join('\n');
 }
 
 function parseModuleBlock(header, cls) {
-  const hm = header.match(/^module\s+([\w\u4e00-\u9fff]+):$/);
+  const hm = header.match(/^module\s+([\w\u4e00-\u9fff]+)(?:\s*\(([^)]*)\))?\s*:?\s*$/);
   if (!hm)
     throw new Error(`Module 声明格式错误: "${header}"。期望: module Name:`);
   const mod = {
     name: hm[1],
+    params: hm[2] ? hm[2].split(',').map((s) => s.trim()).filter(Boolean) : [],
     meta: {},
     code: [],
     vars: [],
@@ -1092,13 +1092,8 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
     // 跳过 // 注释行
     if (text.startsWith('//')) { i++; continue; }
 
-    // 注释
+    // 注释行（# for loop 魔法注释已废弃，一律跳过）
     if (text.startsWith('#')) {
-      const fm = text.match(/^#\s*for loop\s*->\s*\[(.+?)\]\s+while\s+(.+)$/);
-      if (fm) {
-        if (!currentNode) throw new Error(`第 ${cl.lineNum + 1} 行: for 循环注释缺少上游节点`);
-        addEdge({ srcLabel: currentNode, tgtLabel: fm[1], cond: fm[2], isBack: true });
-      }
       i++;
       continue;
     }

@@ -771,12 +771,8 @@ if (backOuts.length) {
           outs.forEach((e) => walk(e.tgt));
           return;
         }
-        // 纯无条件回边（简单 for 循环）
+        // 纯无条件回边（简单 for 循环）：输出显式边（不再生成 # for loop 注释）
         backOuts.forEach((e) => {
-          const cond = e.cond || 'true';
-          lines.push(
-            `${pfx}# for loop -> ${nm.get(e.tgt)?.label} while ${cond}`
-          );
           lines.push(`${pfx}${node.label} -> ${nm.get(e.tgt)?.label}`);
         });
       }

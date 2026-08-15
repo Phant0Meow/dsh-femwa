@@ -119,6 +119,59 @@ class TestGoblinStructure:
         assert any("battle_round" in n for n in names), f"缺少 battle_round: {names}"
         assert any("damage_report" in n for n in names), f"续行 damage_report 未合并: {names}"
 
+    def test_join_to_chain(self):
+        """join 的 to [X]:ref -> [Y] 链：绑定保留 + 尾边存在。"""
+        script = load("test-if-fork-join.fems")
+        done = script.flow.nodes.get("[DONE]")
+        assert done is not None
+        assert done.action_name == "finish", f"[DONE] 绑定应保留 finish: {getattr(done, 'action_name', None)}"
+        assert any(e.source == "[DONE]" and e.target == "[END]" for e in script.flow.edges), \
+            "[DONE] -> [END] 边应存在"
+
+    def test_prompt_comment_exempt(self):
+        """prompt 多行块内 # 和 // 是内容，注释剥离必须豁免。"""
+        script = load("goblin-v2.fems")
+        p = script.actions["opening"].prompt
+        assert "哥布林" in p  # 正常内容
+        # 构造一个 prompt 内含 # // 的剧本验证豁免
+        from femCompiler.FEM_parser import parse_script
+        text = """meta:
+  session = new
+vars:
+  reply = ""
+action talk @assign:
+  out: reply = "x"
+action speak @ai(@e):
+  prompt: |
+    这是 # 内容
+    斜杠 // 也是内容
+  scope: [@e]
+actors:
+  ai @e = soul:1
+mainflow:
+  [START] -> [T] -> [END]
+  [T]: speak
+"""
+        s = parse_script(text, base_dir=PY)
+        p2 = s.actions["speak"].prompt
+        assert "#" in p2 and "//" in p2, f"prompt 内注释被剥离: {p2!r}"
+
+    def test_double_dash_only_in_flow(self):
+        """-- 只在 flow/mainflow 区等价 ->；vars 字符串值里必须保留。"""
+        script = load("for-repro-declare.fems") if False else None
+        from femCompiler.FEM_parser import parse_script
+        text = """meta:
+  session = new
+vars:
+  note = "a--b"
+mainflow:
+  [START] -- [END]
+"""
+        s = parse_script(text, base_dir=PY)
+        assert s.vars["note"] == "a--b", f"-- 被替换: {s.vars['note']!r}"
+        # flow 区 -- 应等价 ->（[START] -> [END] 连通）
+        assert any(e.source == "[START]" and e.target == "[END]" for e in s.flow.edges)
+
 
 # ── 语法测试剧本（引擎真实语法）──────────────────────────────
 

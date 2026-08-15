@@ -114,9 +114,14 @@ class FEMNormalizer:
         
     def normalize(self, text: str) -> str:
         lines = text.splitlines()
+        # 找出多行文本块区间（prompt: | / showprompt: | / key = |），块内注释豁免
+        prompt_ranges = self._find_multiline_ranges(lines)
         # 去注释、空行
         clean_lines = []
-        for raw_line in lines:
+        for idx, raw_line in enumerate(lines):
+            if any(s <= idx < e for s, e in prompt_ranges):
+                clean_lines.append(raw_line)   # prompt 块内原样保留（# // 是内容）
+                continue
             line = self._remove_comment(raw_line)
             if line.strip() == '':
                 continue
@@ -183,6 +188,33 @@ class FEMNormalizer:
         return result
         
         
+    def _find_multiline_ranges(self, lines: List[str]) -> List[tuple]:
+        """找出多行文本块的行区间 [start, end)：prompt: | / showprompt: | / key = |。
+        块内注释豁免（# 和 // 是文本内容）。"""
+        ranges = []
+        i = 0
+        n = len(lines)
+        while i < n:
+            m = re.match(
+                r'^\s*(?:(?:prompt|showprompt):\s*[|｜]|@?[\w\u4e00-\u9fff]+\s*=\s*[|｜])\s*(?:#.*)?$',
+                lines[i],
+            )
+            if m:
+                base = len(lines[i]) - len(lines[i].lstrip())
+                j = i + 1
+                while j < n:
+                    if not lines[j].strip():
+                        j += 1
+                        continue           # 空行算块内容
+                    if len(lines[j]) - len(lines[j].lstrip()) <= base:
+                        break              # 缩进回到字段层 → 块结束
+                    j += 1
+                ranges.append((i + 1, j))
+                i = j
+                continue
+            i += 1
+        return ranges
+
     def _remove_comment(self, line: str) -> str:
         in_str = False
         quote_char = None
@@ -221,6 +253,17 @@ class FEMNormalizer:
                 # 替换为仅 [node]，保留原有缩进空白
                 leading = part[:len(part) - len(part.lstrip())]
                 new_parts.append(leading + f'[{node_name}]')
+                continue
+
+            # 1.5) to 行：提取 to [node]: ref 绑定（to [DONE]:finish -> [END]）
+            if stripped.startswith('to '):
+                tm = re.match(r'^to\s+\[(\w+)\]\s*:\s*(\S+)', stripped)
+                if tm:
+                    self._definitions[tm.group(1)] = tm.group(2)
+                    leading = part[:len(part) - len(part.lstrip())]
+                    new_parts.append(leading + f'to [{tm.group(1)}]')
+                    continue
+                new_parts.append(part)
                 continue
 
             # 2) 检查是否为控制关键字片段（if, for, par, fork, join, to）

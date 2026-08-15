@@ -1167,6 +1167,13 @@ class FEMRunner:
             # ── 走边进入下一个节点 ──
             out_edges = [e for e in flow.edges if e.source == current]
             print(f"[runtime] 📤 节点 {current} 的出边: {[(e.target, e.condition) for e in out_edges]}")
+            if len(out_edges) > 1:
+                # 多出边 = fork 并发语义（文档：不写 fork 直接 mermaid 多分支也并行）。
+                # 无条件边必走、条件边评估为真才走，各分支并发执行。
+                print(f"[runtime] 🔀 节点 {current} 有多条出边（{len(out_edges)} 条），按 fork 并发执行")
+                prev_node = current
+                current = await self._run_fork(current, node, flow, extra_actions, max_steps)
+                continue
             next_node = self._follow_next_edge(current, flow)
             if current == '[p]':  # 特别关注 [p] 节点
                 print(f"[runtime]🔍 [p] 节点的下一节点: {next_node}")
@@ -2394,6 +2401,102 @@ class FEMRunner:
     # ══════════════════════════════════════════════════
 
 
+    async def _invoke_ai_llm(self, blocks: dict, ad, eparam: str, actor_info: dict, scope_info: list,
+                             _current_node_id: str) -> str:
+        """调用一次 LLM（dsh 子 agent 后端 or 直连），返回最终回复文本。
+        AI 输出容错重试的每一轮都走这里。"""
+        def stream_cb(token):
+            self._emit_event('ai_token', {
+                'node_name': _current_node_id,
+                'token': token
+            })
+
+        # 创建停止信号并保存引用
+        self._llm_stop_event = threading.Event()
+
+        # ★ 按 provider 限流，防止 429
+        provider = self._resolve_ai_source(ad, eparam)
+        await self.engine.throttle_llm(provider)
+
+        # ── dsh 子 agent 后端（dsh-femwa 宿主提供；无 LLM 直连）──
+        if getattr(self, '_dsh_ai_backend', False):
+            dsh_wait_key = f"ai_{_current_node_id}_{getattr(self, '_ai_request_counter', 0)}"
+            self._ai_request_counter = getattr(self, '_ai_request_counter', 0) + 1
+            # 角色级工具开关：actor 声明 tools: true/false 时带上布尔值，
+            # tools: [..] 列表作为白名单；均未声明时 actor_tools=None，
+            # 由宿主按其默认决定（缺省应恢复"可用工具"）。
+            actor_tools: Optional[bool] = None
+            actor_tool_list: List[str] = []
+            actor_name = eparam
+            while actor_name.startswith('@') and actor_name not in self.script.actors:
+                resolved = self.vm.get(actor_name)
+                if not resolved or not isinstance(resolved, str) or not resolved.startswith('@'):
+                    break
+                actor_name = resolved
+            adef = self.script.actors.get(actor_name)
+            if adef is not None:
+                actor_tools = getattr(adef, 'tools_enabled', None)
+                actor_tool_list = list(getattr(adef, 'tools', None) or [])
+            self._emit_event('ai_request', {
+                'wait_key': dsh_wait_key,
+                'node_name': _current_node_id,
+                'blocks': blocks,
+                'actor_info': actor_info,
+                'scope': str(ad.scope) if getattr(ad, 'scope', None) else '',
+                'scope_info': scope_info,
+                'actor_tools': actor_tools,
+                'actor_tool_list': actor_tool_list,
+            })
+            dsh_result = await self.engine.human_input.wait_for_input(dsh_wait_key, timeout=3600)
+            # host 负责：启动子 agent、组装完整轨迹（思考链[仅工具轮]+回复+工具结果）。
+            # 引擎在这里只取最终回复（用于继续流程/事件），轨迹全文走 save_ai_turn 落库。
+            if isinstance(dsh_result, dict):
+                self._dsh_trajectory_text = dsh_result.get('trajectory') or ''
+                return dsh_result.get('output') or ''
+            else:
+                self._dsh_trajectory_text = ''
+                return dsh_result or ''
+        else:
+            return await self.engine.run_in_thread(
+                call_ai_with_blocks,
+                blocks,
+                stream_callback=stream_cb,
+                stop_event=self._llm_stop_event,
+                user_api_key=getattr(self, 'user_api_key', None),
+                user_api_provider=getattr(self, 'user_api_provider', None),
+                user_api_url=getattr(self, 'user_api_url', None),
+                model=getattr(self, 'user_api_model', None),
+            )
+
+    def _extract_ai_assignments(self, llm_output: str) -> tuple:
+        """提取 AI 输出中的 SET VARIABLE 赋值。
+        返回 (SET_VARIABLE 列表, assign_errors 列表)：
+        - 解析/赋值失败（未声明变量等）→ assign_errors（触发重试）
+        - 格式类失败 → SET_VARIABLE（宽容路径，交给 resolve/丢弃）"""
+        all_matches = re.findall(
+            r'(?:SET\s+VARIABLE|设定变量)\s*[:：]\s*(?:<<|《|〈|《《)\s*(.+?)(?:>>|》|〉|》》)',
+            llm_output
+        )
+        SET_VARIABLE = []
+        assign_errors = []
+        for match in all_matches:
+            try:
+                var_name, expr = self._parse_single_assignment(match.strip())
+                intent = parse_assign_syntax(expr, var_name)
+                op, val = intent
+                if op in ('set', 'add', 'remove') and isinstance(val, str):
+                    val = self.eval_expr(val)
+                intent = (op, val)
+                apply_assign(self.vm, var_name, intent)
+                print(f"[runtime]📤 AI赋值: {var_name} {intent}")
+            except FEMVariableError as e:
+                print(f"[runtime]⚠️ AI 赋值变量错误: {match!r}, error={e}")
+                assign_errors.append(str(e))
+            except Exception as e:
+                print(f"[runtime]解析失败详情: match={match!r}, error={e}")
+                SET_VARIABLE.append(match.strip())
+        return SET_VARIABLE, assign_errors
+
     async def _exec_ai(self, ad, eparam: str) -> Any:
         print(f"[DEBUG _exec_ai] 进入 AI 动作: {ad.name}")
         self._check_cancel()
@@ -2552,68 +2655,28 @@ class FEMRunner:
         # 提前捕获当前节点 ID，供线程池回调使用
         _current_node_id = self._get_current_node_id()
 
-        def stream_cb(token):
-            self._emit_event('ai_token', {
-                'node_name': _current_node_id,
-                'token': token
-            })
-
-        # 创建停止信号并保存引用
-        self._llm_stop_event = threading.Event()
-
-        # ★ 按 provider 限流，防止 429
-        provider = self._resolve_ai_source(ad, eparam)
-        await self.engine.throttle_llm(provider)
-
-        # ── dsh 子 agent 后端（dsh-femwa 宿主提供；无 LLM 直连）──
-        if getattr(self, '_dsh_ai_backend', False):
-            dsh_wait_key = f"ai_{_current_node_id}_{getattr(self, '_ai_request_counter', 0)}"
-            self._ai_request_counter = getattr(self, '_ai_request_counter', 0) + 1
-            # 角色级工具开关：actor 声明 tools: true/false 时带上布尔值，
-            # tools: [..] 列表作为白名单；均未声明时 actor_tools=None，
-            # 由宿主按其默认决定（缺省应恢复"可用工具"）。
-            actor_tools: Optional[bool] = None
-            actor_tool_list: List[str] = []
-            actor_name = eparam
-            while actor_name.startswith('@') and actor_name not in self.script.actors:
-                resolved = self.vm.get(actor_name)
-                if not resolved or not isinstance(resolved, str) or not resolved.startswith('@'):
-                    break
-                actor_name = resolved
-            adef = self.script.actors.get(actor_name)
-            if adef is not None:
-                actor_tools = getattr(adef, 'tools_enabled', None)
-                actor_tool_list = list(getattr(adef, 'tools', None) or [])
-            self._emit_event('ai_request', {
-                'wait_key': dsh_wait_key,
-                'node_name': _current_node_id,
-                'blocks': blocks,
-                'actor_info': actor_info,
-                'scope': str(ad.scope) if getattr(ad, 'scope', None) else '',
-                'scope_info': scope_info,
-                'actor_tools': actor_tools,
-                'actor_tool_list': actor_tool_list,
-            })
-            dsh_result = await self.engine.human_input.wait_for_input(dsh_wait_key, timeout=3600)
-            # host 负责：启动子 agent、组装完整轨迹（思考链[仅工具轮]+回复+工具结果）。
-            # 引擎在这里只取最终回复（用于继续流程/事件），轨迹全文走 save_ai_turn 落库。
-            if isinstance(dsh_result, dict):
-                self._dsh_trajectory_text = dsh_result.get('trajectory') or ''
-                llm_output = dsh_result.get('output') or ''
-            else:
-                self._dsh_trajectory_text = ''
-                llm_output = dsh_result or ''
-        else:
-            llm_output = await self.engine.run_in_thread(
-                call_ai_with_blocks,
-                blocks,
-                stream_callback=stream_cb,
-                stop_event=self._llm_stop_event,
-                user_api_key=getattr(self, 'user_api_key', None),
-                user_api_provider=getattr(self, 'user_api_provider', None),
-                user_api_url=getattr(self, 'user_api_url', None),
-                model=getattr(self, 'user_api_model', None),
+        # ── AI 输出容错：赋值失败（未声明变量等）→ 错误反馈 → 重新调用本节点 ──
+        # 上限 = max_retries + 1（未设置默认 2 次重试）；格式类失败进 SET_VARIABLE 宽容处理
+        max_tries = max(1, (getattr(ad, 'max_retries', None) or 2) + 1)
+        SET_VARIABLE = []
+        assign_errors = []
+        for _attempt in range(max_tries):
+            llm_output = await self._invoke_ai_llm(blocks, ad, eparam, actor_info, scope_info, _current_node_id)
+            SET_VARIABLE, assign_errors = self._extract_ai_assignments(llm_output)
+            if not assign_errors or _attempt >= max_tries - 1:
+                break
+            feedback = '\n'.join(f'- {x}' for x in assign_errors)
+            blocks['basic_safety'] = (blocks.get('basic_safety') or '') + (
+                f'\n\n[系统提示] 你上一轮输出中的变量赋值有误（第 {_attempt + 1} 次），请修正后重新输出完整内容：\n'
+                f'{feedback}\n'
+                f'（变量赋值必须使用 SET VARIABLE: <<变量 = 值>> 格式，且变量必须在 vars: 中预先声明。）'
             )
+            self._emit_event('ai_retry', {
+                'node_name': _current_node_id,
+                'attempt': _attempt + 1,
+                'errors': assign_errors,
+            })
+            print(f"[runtime]🔁 AI 赋值失败，重试（{_attempt + 1}/{max_tries - 1}）: {assign_errors}")
         
         #if llm_output:
         #    print(f"[runtime]🤖 AI 回复:\n{llm_output}")
@@ -2689,25 +2752,6 @@ class FEMRunner:
         if llm_output == "":
             print(f"[runtime]🤖 AI 选择了沉默，无输出，流程继续。")
 
-        # 提取赋值
-        all_matches = re.findall(
-            r'(?:SET\s+VARIABLE|设定变量)\s*[:：]\s*(?:<<|《|〈|《《)\s*(.+?)(?:>>|》|〉|》》)',
-            llm_output
-        )
-        SET_VARIABLE = []
-        for match in all_matches:
-            try:
-                var_name, expr = self._parse_single_assignment(match.strip())
-                intent = parse_assign_syntax(expr, var_name)
-                op, val = intent
-                if op in ('set', 'add', 'remove') and isinstance(val, str):
-                    val = self.eval_expr(val)
-                intent = (op, val)
-                apply_assign(self.vm, var_name, intent)
-                print(f"[runtime]📤 AI赋值: {var_name} {intent}")
-            except Exception as e:
-                print(f"[runtime]解析失败详情: match={match!r}, error={e}")
-                SET_VARIABLE.append(match.strip())
         if SET_VARIABLE:
             print(f"[runtime]⚠️ 解析失败的赋值已存入 SET_VARIABLE 列表: {SET_VARIABLE}")
 
@@ -2805,6 +2849,39 @@ class FEMRunner:
         else:
             return self._current_turn_id, self._oratio_idx
 
+
+    def _try_apply_human_variables(self, variables: dict, declared_out_names: set) -> Optional[str]:
+        """尝试应用人类输入的变量赋值；成功返回 None，失败返回错误信息（str）。
+        容错原则：human 输入不稳定可重试，但未声明变量必须报错（不静默忽略）。"""
+        if not variables:
+            return None
+        for var_name, var_value in variables.items():
+            raw = str(var_value).strip()
+            if not raw:
+                print(f"[runtime]⏭️ 变量 '{var_name}' 值为空，跳过")
+                continue
+            if var_name not in declared_out_names:
+                return (f"变量 '{var_name}' 未声明（该节点 out 只声明了: "
+                        f"{', '.join(sorted(declared_out_names)) or '无'}）。"
+                        f"所有变量必须在 vars: 中预先声明。")
+            try:
+                # 构造表达式：+=/-= 前缀直接用（标准化空格），否则加 "= " 前缀
+                if raw.startswith('+=') or raw.startswith('-='):
+                    expr = raw[:2] + ' ' + raw[2:].strip()
+                else:
+                    expr = '= ' + raw
+                op, val = parse_assign_syntax(expr, var_name)
+                # 对 set/add/remove 的字符串值，用 eval_expr 解析变量引用（如 @Alice）
+                if op in ('set', 'add', 'remove') and isinstance(val, str):
+                    resolved = self.eval_expr(val)
+                    val = resolved
+                apply_assign(self.vm, var_name, (op, val))
+                print(f"[runtime]📤 前端变量赋值完成: {var_name} {op} {val!r}, 当前值={self.vm.get(var_name)!r}")
+            except FEMVariableError as e:
+                return str(e)
+            except Exception as e:
+                return f"变量 '{var_name}' 赋值失败: {e}"
+        return None
 
     async def _exec_human(self, ad, eparam: str) -> Any:
         # 人类动作现在支持异步等待，不再阻塞事件循环
@@ -2923,14 +3000,17 @@ class FEMRunner:
             # ── 获取人类输入：FastAPI 模式 or CLI 模式 ──
             chat_text = ''
             variables = {}
+            retry_hint = ''
 
+            # 人类输入容错：赋值失败 → 带错误信息重新等待输入（不中断流程）
             if self._human_input_event is not None:
                 # wait_key 在上面改动3中已计算，此处直接使用
                 if 'wait_key' not in locals():
                     self._human_input_counter += 1
                     node_id = self._get_current_node_id()
                     wait_key = f"human_{node_id}_{self._human_input_counter}"
-                print(f"[runtime]⏳ 等待前端人类输入... 频道: {wait_key}")
+                print(f"[runtime]⏳ 等待前端人类输入... 频道: {wait_key}"
+                      + (f"（上次被拒: {retry_hint}）" if retry_hint else ""))
                 raw_input = await self.engine.human_input.wait_for_input(wait_key, timeout=3600)
                 print(f"[runtime]📥 收到前端输入: type={type(raw_input).__name__}")
                 print(f"[runtime]📥 raw_input = {raw_input}")
@@ -3031,37 +3111,34 @@ class FEMRunner:
                         declared_out_names.add(oname)
             print(f"[runtime]📋 已声明的 out 变量: {declared_out_names}")
 
-            if variables:
-                for var_name, var_value in variables.items():
-                    raw = str(var_value).strip()
-
-                    if not raw:
-                        print(f"[runtime]⏭️ 变量 '{var_name}' 值为空，跳过")
-                        continue
-                    if var_name not in declared_out_names:
-                        print(f"[runtime]⚠️ 前端传来未声明的变量 '{var_name}'，已忽略")
-                        continue
-
-                    # 构造表达式：+=/-= 前缀直接用（标准化空格），否则加 "= " 前缀
-                    if raw.startswith('+=') or raw.startswith('-='):
-                        expr = raw[:2] + ' ' + raw[2:].strip()
+            # 人类输入容错循环：赋值失败（未声明变量等）→ 错误提示 → 重新等待输入（不中断流程）
+            while True:
+                assign_err = self._try_apply_human_variables(variables, declared_out_names)
+                if assign_err is None:
+                    break
+                retry_hint = assign_err
+                self._emit_event('human_input_error', {
+                    'node_name': self._get_current_node_id(),
+                    'wait_key': wait_key if 'wait_key' in locals() else '',
+                    'error': assign_err,
+                })
+                print(f"[runtime]⚠️ 人类输入被拒绝: {assign_err}，请重新输入")
+                # 重新等输入
+                if self._human_input_event is not None:
+                    print(f"[runtime]⏳ 重新等待前端人类输入... 频道: {wait_key}")
+                    raw_input = await self.engine.human_input.wait_for_input(wait_key, timeout=3600)
+                    if isinstance(raw_input, dict):
+                        chat_text = raw_input.get('chat_text', '')
+                        variables = raw_input.get('variables', {})
                     else:
-                        expr = '= ' + raw
-
-                    print(f"[runtime]🔧 构造赋值表达式: var_name={var_name!r}, raw={raw!r} -> expr={expr!r}")
-
-                    # 复用 parse_assign_syntax 解析
-                    op, val = parse_assign_syntax(expr, var_name)
-                    print(f"[runtime]🔧 parse_assign_syntax: op={op!r}, val={val!r}")
-
-                    # 对 set/add/remove 的字符串值，用 eval_expr 解析变量引用（如 @Alice）
-                    if op in ('set', 'add', 'remove') and isinstance(val, str):
-                        resolved = self.eval_expr(val)
-                        print(f"[runtime]🔧 eval_expr({val!r}) = {resolved!r}")
-                        val = resolved
-
-                    apply_assign(self.vm, var_name, (op, val))
-                    print(f"[runtime]📤 前端变量赋值完成: {var_name} {op} {val!r}, 当前值={self.vm.get(var_name)!r}")
+                        chat_text = str(raw_input) if raw_input else ''
+                        variables = {}
+                else:
+                    # CLI 模式：单行重试输入
+                    cli_line = await self.engine.run_in_thread(
+                        lambda: sys.stdin.readline().rstrip('\n'))
+                    chat_text = cli_line
+                    variables = {}
 
             # ── 拼接存储文本（runtime 立即拼接，save_dialog 无脑存） ──
             dialog_text = format_human_dialog(chat_text, variables)

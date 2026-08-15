@@ -17,7 +17,7 @@ check('引号内 # 保留', stripLineComments('name = "a#b"'), 'name = "a#b"');
 check('引号内 // 保留', stripLineComments('msg = "http://x"'), 'msg = "http://x"');
 check('引号后 # 截断', stripLineComments('name = "a" # tail'), 'name = "a" ');
 check('单引号内 # 保留', stripLineComments("msg = 'a#b'"), "msg = 'a#b'");
-check('魔法注释保留', stripLineComments('# for loop -> [ASK] while true'), '# for loop -> [ASK] while true');
+check('魔法注释按普通注释剥离（特性已废弃）', stripLineComments('# for loop -> [ASK] while true'), '');
 check('无注释原样', stripLineComments('  scope: [@a, @b]'), '  scope: [@a, @b]');
 check('保留行首缩进', stripLineComments('    out: x += 1  # 注释'), '    out: x += 1  ');
 

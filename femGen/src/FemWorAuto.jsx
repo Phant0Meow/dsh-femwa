@@ -1462,6 +1462,24 @@ case 'human_wait':
   setBubbleOverlay({ nodeId });
   break;
 
+case 'human_input_error':
+  // 人类输入被引擎拒绝（未声明变量等）：重新打开输入框并显示错误信息
+  console.log('[human_input_error] 收到的 data:', data);
+  setActiveNodeIds(prev => new Set([...prev, nodeId]));
+  setNodeStates((prev) => ({
+    ...prev,
+    [nodeId]: {
+      ...prev[nodeId],
+      status: 'human_wait',
+      type: 'human',
+      wait_key: data.wait_key || prev[nodeId]?.wait_key || '',
+      inputError: data.error || '输入无效，请重新输入',
+      outVars: prev[nodeId]?.outVars || [],
+    },
+  }));
+  setBubbleOverlay({ nodeId });
+  break;
+
       case 'context_ready':
         setNodeStates((prev) => {
           const existing = prev[nodeId] || {};

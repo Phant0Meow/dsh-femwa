@@ -37,7 +37,7 @@ function BubbleSection({ title, content, streaming }) {
   );
 }
 
-function HumanInputSection({ nodeId, onSubmit, outVars }) {
+function HumanInputSection({ nodeId, onSubmit, outVars, inputError }) {
   const [chatText, setChatText] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const [varValues, setVarValues] = useState({});
@@ -106,6 +106,22 @@ function HumanInputSection({ nodeId, onSubmit, outVars }) {
       >
         ⏳ 等待人类输入
       </div>
+      {inputError && (
+        <div
+          style={{
+            fontSize: 11,
+            color: '#dc2626',
+            background: '#fef2f2',
+            border: '1px solid #fecaca',
+            borderRadius: 6,
+            padding: '6px 8px',
+            marginBottom: 6,
+            whiteSpace: 'pre-wrap',
+          }}
+        >
+          ❌ 输入被拒绝：{inputError}
+        </div>
+      )}
       <div
         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
@@ -389,6 +405,7 @@ function BubbleOverlay({ bubbleOverlay, nodes, nodeStates, actionStore, onClose,
               nodeId={node.id}
               onSubmit={submitHumanInput}
               outVars={ns.outVars || []}
+              inputError={ns.inputError}
             />
           </div>
         )}

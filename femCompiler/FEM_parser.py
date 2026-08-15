@@ -226,13 +226,13 @@ def _strip_comment(line: str) -> str:
     return line
     
 def normalize_symbols(line: str) -> str:
-    """只对 FEM 语法行替换中文符号，不影响文本内容"""
+    """只对 FEM 语法行替换中文符号，不影响文本内容。
+    注意：-- -> -> 不在全局替换（文档约定仅 flow/mainflow 区等价，由 eval_flow 单独做）。"""
     line = line.replace('：', ':').replace('，', ',')
     line = line.replace('“', '"').replace('”', '"')
     line = line.replace('（', '(').replace('）', ')')
     line = line.replace('【', '[').replace('】', ']')
     line = line.replace('｜', '|')
-    line = line.replace('--', '->')  # flow 链符号
     return line
 
 def _is_blank_or_comment(line: str) -> bool:
@@ -256,10 +256,46 @@ def _detect_type(line: str) -> str:
     if s.startswith('flow:') or s.startswith('mainflow:'): return 'flow'
     return 'unknown'
 
+def _find_multiline_ranges(lines: List[str]) -> List[Tuple[int, int]]:
+    """找出多行文本块的行区间 [start, end)：prompt: | / showprompt: | / key = |。
+    块内注释豁免（# 和 // 是文本内容）。"""
+    ranges = []
+    i = 0
+    n = len(lines)
+    while i < n:
+        m = re.match(
+            r'^\s*(?:(?:prompt|showprompt):\s*[|｜]|@?[\w\u4e00-\u9fff]+\s*=\s*[|｜])\s*(?:#.*)?$',
+            lines[i],
+        )
+        if m:
+            base = len(lines[i]) - len(lines[i].lstrip())
+            j = i + 1
+            while j < n:
+                if not lines[j].strip():
+                    j += 1
+                    continue           # 空行算块内容
+                if len(lines[j]) - len(lines[j].lstrip()) <= base:
+                    break              # 缩进回到字段层 → 块结束
+                j += 1
+            ranges.append((i + 1, j))
+            i = j
+            continue
+        i += 1
+    return ranges
+
 def build_blocks(text: str, base_indent: int = 0) -> List[Block]:
     """将脚本文本按缩进切分为块树，支持模块递归"""
+    raw_lines = text.split('\n')
+    prompt_ranges = _find_multiline_ranges(raw_lines)
     lines = []
-    for raw in text.split('\n'):
+    for idx, raw in enumerate(raw_lines):
+        if any(s <= idx < e for s, e in prompt_ranges):
+            # prompt 块内：原样保留（注释豁免，不剥 # //）
+            content = raw.strip()
+            if content:
+                indent = len(raw) - len(raw.lstrip())
+                lines.append((indent, content))
+            continue
         stripped = raw.rstrip()
         if _is_blank_or_comment(stripped):
             continue
@@ -735,6 +771,12 @@ def eval_actors(block: Block) -> Dict[str, ActorDef]:
                             tools_enabled = raw_tools == 'true'
                         else:
                             tools = _parse_tools(raw_tools)
+                    elif p.startswith('tools ='):
+                        raw_tools = p[len('tools ='):].strip()
+                        if raw_tools in ('true', 'false'):
+                            tools_enabled = raw_tools == 'true'
+                        else:
+                            tools = _parse_tools(raw_tools)
                 actors[nm] = ActorDef(type=at, ref=nm, name=nm, soul=soul, source=source,
                                       tools=tools, tools_enabled=tools_enabled)
                 #print(f"[DEBUG eval_actors] 创建 human actor: {nm}, soul={soul!r}, source={source!r}")
@@ -1049,14 +1091,13 @@ class FlowBuilder:
             # ── join(...): 独立行（无前导链） ──
             if re.match(r'^join\s*(?:\((\w+)\))?\s*:\s*$', line):
                 join_gw = self.parse_join(block, g)
-                # 检查下一个同级块是否为 'to Target' 出口行
+                # 检查下一个同级块是否为 'to Target' 出口行（支持链：to [X]:ref -> [Y]）
                 if i + 1 < len(blocks):
                     next_line = blocks[i + 1].line.strip()
                     if next_line.startswith('to '):
                         target_str = next_line[3:].strip()
-                        target_id = self._reg_node(g, target_str)
-                        g.add_edge(join_gw, target_id)
-                        pending_from = target_id
+                        target_id = self.parse_single_chain(target_str, join_gw, g)
+                        pending_from = target_id if target_id is not None else join_gw
                         i += 2
                         continue
                 pending_from = join_gw
@@ -1351,6 +1392,8 @@ def eval_flow(block: Block) -> FlowGraph:
     flow_lines = block.content_lines
     flow_text = '\n'.join(flow_lines)
     flow_text = normalize_symbols(flow_text)
+    # -- 仅在 flow/mainflow 区等价 ->（文档约定）
+    flow_text = flow_text.replace('--', '->')
 
     # 节点绑定已由标准化器处理，不再需要从 flow 内部解析。
     # 但标准化器生成的节点定义放在 mainflow 之前，解析器不会读到它们。
