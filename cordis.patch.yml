@@ -1,0 +1,8 @@
+# dsh-femwa bundle patch: inserts this plugin into a profile's layer stack.
+# Applied when a profile lists this bundle (or copied by hand for manual
+# installs).
+- insert:
+    - id: dsh-femwa
+      name: 'dsh-femwa'
+      config:
+        enabled: true

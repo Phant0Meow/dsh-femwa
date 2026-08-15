@@ -1,0 +1,11 @@
+node_modules/
+lib/
+*.log
+.DS_Store
+
+# 运行时数据（user_dir 自包含布局：搬文件夹时用户数据跟着走，不入库）
+user_data/
+__pycache__/
+*.pyc
+.cache/
+debug_normalized_output.fems

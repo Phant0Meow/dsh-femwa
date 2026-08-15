@@ -1,0 +1,43 @@
+{
+  "name": "dsh-femwa",
+  "version": "1.0.0",
+  "description": "FemWA (FlowEngineforMinds) 多智能体剧本引擎的 dsh 插件版 — 无主模型 Fem 会话、聊天窗口角色气泡、剧本控制（含完整引擎，自包含，整个文件夹搬走即用）",
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "femwa",
+    "multi-agent",
+    "orchestration",
+    "script"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "license": "Apache-2.0",
+  "dsh": {
+    "client": {
+      "platform": "web"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "link-workspace": "powershell -ExecutionPolicy Bypass -File scripts/link-workspace.ps1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}
