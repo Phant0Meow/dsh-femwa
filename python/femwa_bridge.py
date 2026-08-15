@@ -37,6 +37,11 @@ import threading
 import argparse
 import traceback
 
+# fork 循环回流每轮嵌套一层 asyncio 任务（见 FEM_runtime._run_fork），
+# 深层任务链的 Task.cancel() 是同步递归，默认 1000 栈深会在 stop 时
+# RecursionError（maximum recursion depth exceeded）。提高递归限制兜底。
+sys.setrecursionlimit(200_000)
+
 # ── resolve the FemWA project root ────────────────────────────────────────
 def resolve_femwa_root():
     root = os.environ.get("FEMWA_ROOT", "")

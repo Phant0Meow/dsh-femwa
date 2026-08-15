@@ -105,6 +105,73 @@ mainflow:
         assert assigns[-1]["count"] in (11, 101), f"并发竞态下最终值应为 11 或 101: {assigns}"
 
 
+class TestStopDuringLoop:
+    """stop 在深层 fork 循环嵌套任务链中必须正常工作（Task.cancel 递归栈溢出回归）。"""
+
+    def test_stop_on_nested_fork_loop(self):
+        import subprocess, threading, json, time, os as _os, sys as _sys
+        ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        script = """meta:
+  session = new
+vars:
+  count = 0
+module M:
+  action up @assign:
+    out: count += 1
+  flow:
+    [IN] -> [UP]:up -> fork:
+      -> if (count < 100000) -> [IN]
+      -> if (count >= 100000) -> [OUT]
+mainflow:
+  [START] -> [M]:&M -> [END]
+"""
+        p = subprocess.Popen(
+            [_sys.executable, _os.path.join(ROOT, "python", "femwa_bridge.py"), "--fe4m", ROOT],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace", bufsize=1,
+        )
+        events = []
+        responses = []
+        def drain():
+            for line in p.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if obj.get("type") == "event":
+                    events.append(obj)
+                elif obj.get("type") == "response":
+                    responses.append(obj)
+        t = threading.Thread(target=drain, daemon=True)
+        t.start()
+        def send(obj):
+            p.stdin.write(json.dumps(obj, ensure_ascii=False) + "\n")
+            p.stdin.flush()
+        send({"id": 1, "cmd": "run", "args": {"fems": script, "base_dir": _os.path.join(ROOT, "python")}})
+        time.sleep(3)  # 让循环嵌套跑起来
+        send({"id": 2, "cmd": "stop", "args": {}})
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if any(r.get("id") == 2 for r in responses):
+                break
+            time.sleep(0.1)
+        stop_resp = next((r for r in responses if r.get("id") == 2), None)
+        assert stop_resp is not None, "stop 无响应（Task.cancel 递归栈溢出）"
+        assert stop_resp.get("ok") is True, f"stop 失败: {stop_resp}"
+        # flow_stopped 事件应发出
+        assert any(e["event"] == "flow_stopped" for e in events), "应收到 flow_stopped 事件"
+        send({"id": 3, "cmd": "shutdown", "args": {}})
+        time.sleep(0.3)
+        p.stdin.close()
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+
+
 class TestHumanInputRetry:
     """人类输入容错：赋值失败 → human_input_error 事件 → 重试成功，流程不中断。"""
 

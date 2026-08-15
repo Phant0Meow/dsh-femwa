@@ -1278,15 +1278,25 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
         addEdge({ srcLabel: pbLabel, tgtLabel: parOutLabel, cond: '', isBack: false });
       });
 
-      // 处理出口：同缩进的 -> [ExitNode]（排除控制块入口 fork:/for:/par:/join:）
+      // 处理出口：同缩进的 -> [ExitNode]（出口行可同时是控制块入口：
+      // -> [A] -> [B] -> fork: 时，链部分作为出口，控制块行留给主循环）
       if (i < flowLines.length && flowLines[i].indent === cl.indent) {
         const afterLine = normalizeSymbols(flowLines[i].text, 'flow').trim();
         const am = afterLine.match(/^->\s*(.+)$/);
-        if (am && !/\b(for|par|fork|join)\b/.test(am[1])) {
+        if (am) {
           const exitTargetRaw = am[1].trim();
-          // parOutLabel 已在上方创建，这里直接使用（出口支持链：-> [X]:ref -> [Y]）
-          const exitLabel = resolveExitChain(exitTargetRaw, parOutLabel);
-          i++;
+          const ctrlMatch = exitTargetRaw.match(/\s*->\s*(for|par|fork|join)\b/);
+          if (ctrlMatch) {
+            // 出口链 + 控制块入口：链部分建出口边，不消费该行
+            const chainPart = exitTargetRaw.slice(0, ctrlMatch.index).trim();
+            if (chainPart) {
+              resolveExitChain(chainPart, parOutLabel);
+            }
+          } else {
+            // 纯出口链（支持内联定义：-> [FAREWELL]:farewell -> [END]）
+            resolveExitChain(exitTargetRaw, parOutLabel);
+            i++;
+          }
         }
       }
 
@@ -1515,8 +1525,7 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
       if (i < flowLines.length && flowLines[i].indent === cl.indent) {
         const afterLine = normalizeSymbols(flowLines[i].text, 'flow').trim();
         const am = afterLine.match(/^->\s*(.+)$/);
-        if (am && !/\b(for|par|fork|join)\b/.test(am[1])) {
-          const exitTargetRaw = am[1].trim();
+        if (am) {
           // 声明 for_out 节点
           if (!nodeDecls.some(d => d.label === forOutLabel)) {
             nodeDecls.push({
@@ -1526,9 +1535,19 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
               forNodeId: forNodeLabel,
             });
           }
-          // for_out -> 出口节点（支持链：-> [X]:ref -> [Y]）
-          const exitLabel = resolveExitChain(exitTargetRaw, forOutLabel);
-          i++;
+          const exitTargetRaw = am[1].trim();
+          const ctrlMatch = exitTargetRaw.match(/\s*->\s*(for|par|fork|join)\b/);
+          if (ctrlMatch) {
+            // 出口链 + 控制块入口：链部分建出口边，不消费该行
+            const chainPart = exitTargetRaw.slice(0, ctrlMatch.index).trim();
+            if (chainPart) {
+              resolveExitChain(chainPart, forOutLabel);
+            }
+          } else {
+            // for_out -> 出口节点（支持链：-> [X]:ref -> [Y]）
+            resolveExitChain(exitTargetRaw, forOutLabel);
+            i++;
+          }
         }
       }
 

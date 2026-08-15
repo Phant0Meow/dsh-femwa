@@ -952,9 +952,16 @@ class FEMRunner:
         if self._llm_stop_event:
             self._llm_stop_event.set()
 
-        # 2. 取消主协程
+        # 2. 取消主协程（深层 fork 循环嵌套任务链的 cancel 是同步递归，
+        #    栈溢出时兜底：在事件循环线程里再取消一次）
         if self._main_task and not self._main_task.done():
-            self._main_task.cancel()
+            try:
+                self._main_task.cancel()
+            except RecursionError:
+                print("[runtime] ⚠️ Task.cancel 递归栈溢出，改在事件循环线程内重试取消...")
+                loop = self._main_task.get_loop()
+                task = self._main_task
+                loop.call_soon_threadsafe(task.cancel)
             print("[runtime] 主协程已取消")
 
         # 发送事件通知前端
@@ -2850,37 +2857,53 @@ class FEMRunner:
             return self._current_turn_id, self._oratio_idx
 
 
-    def _try_apply_human_variables(self, variables: dict, declared_out_names: set) -> Optional[str]:
+    def _try_apply_human_variables(self, variables: dict, out_defs: list) -> Optional[str]:
         """尝试应用人类输入的变量赋值；成功返回 None，失败返回错误信息（str）。
-        容错原则：human 输入不稳定可重试，但未声明变量必须报错（不静默忽略）。"""
+        容错原则：human 输入不稳定可重试，但未声明变量必须报错（不静默忽略）。
+        支持动态字典键 out（damage_report.@hero → dict[实际角色]）。"""
         if not variables:
             return None
-        for var_name, var_value in variables.items():
+
+        def display_name(od):
+            base = getattr(od, 'global_name', None) or getattr(od, 'var_name', '')
+            dk = getattr(od, 'dynamic_key', None)
+            return f"{base}.{dk}" if dk else base
+
+        by_display = {display_name(od): od for od in (out_defs or [])}
+        declared_display = set(by_display)
+
+        for var_key, var_value in variables.items():
             raw = str(var_value).strip()
             if not raw:
-                print(f"[runtime]⏭️ 变量 '{var_name}' 值为空，跳过")
+                print(f"[runtime]⏭️ 变量 '{var_key}' 值为空，跳过")
                 continue
-            if var_name not in declared_out_names:
-                return (f"变量 '{var_name}' 未声明（该节点 out 只声明了: "
-                        f"{', '.join(sorted(declared_out_names)) or '无'}）。"
+            if var_key not in declared_display:
+                return (f"变量 '{var_key}' 未声明（该节点 out 只声明了: "
+                        f"{', '.join(sorted(declared_display)) or '无'}）。"
                         f"所有变量必须在 vars: 中预先声明。")
+            od = by_display[var_key]
             try:
                 # 构造表达式：+=/-= 前缀直接用（标准化空格），否则加 "= " 前缀
                 if raw.startswith('+=') or raw.startswith('-='):
                     expr = raw[:2] + ' ' + raw[2:].strip()
                 else:
                     expr = '= ' + raw
-                op, val = parse_assign_syntax(expr, var_name)
+                op, val = parse_assign_syntax(expr, getattr(od, 'var_name', var_key))
                 # 对 set/add/remove 的字符串值，用 eval_expr 解析变量引用（如 @Alice）
                 if op in ('set', 'add', 'remove') and isinstance(val, str):
                     resolved = self.eval_expr(val)
                     val = resolved
-                apply_assign(self.vm, var_name, (op, val))
-                print(f"[runtime]📤 前端变量赋值完成: {var_name} {op} {val!r}, 当前值={self.vm.get(var_name)!r}")
+                if getattr(od, 'dynamic_key', None):
+                    # 动态字典键：dict.@actor（@actor 解析为实际角色实体）
+                    self._set_out_var(od, val)
+                    print(f"[runtime]📤 前端动态键赋值完成: {display_name(od)} = {val!r}")
+                else:
+                    apply_assign(self.vm, od.var_name, (op, val))
+                    print(f"[runtime]📤 前端变量赋值完成: {od.var_name} {op} {val!r}, 当前值={self.vm.get(od.var_name)!r}")
             except FEMVariableError as e:
                 return str(e)
             except Exception as e:
-                return f"变量 '{var_name}' 赋值失败: {e}"
+                return f"变量 '{var_key}' 赋值失败: {e}"
         return None
 
     async def _exec_human(self, ad, eparam: str) -> Any:
@@ -2937,13 +2960,14 @@ class FEMRunner:
             if ad.scope:
                 from .FEM_scope_resolver import scope_str_to_actor_list
                 scope_info = scope_str_to_actor_list(ad.scope, self.script.actors, self.vm)
-            # 构建 out_vars 列表（变量名完整显示，带 @ 的保留 @）
+            # 构建 out_vars 列表（变量名完整显示，dynamic_key 拼成 dict.@actor）
             out_vars = []
             if ad.outs:
                 for od in ad.outs:
                     var_name = getattr(od, 'global_name', None) or getattr(od, 'var_name', '')
+                    dk = getattr(od, 'dynamic_key', None)
                     if var_name:
-                        out_vars.append(var_name)
+                        out_vars.append(f"{var_name}.{dk}" if dk else var_name)
             print(f"[runtime]📋 human_wait out_vars: {out_vars}")
 
             # ── 生成唯一 wait_key，用于精确路由人类输入 ──
@@ -3103,17 +3127,12 @@ class FEMRunner:
                 # CLI 模式下 variables 保持空（CLI 不支持结构化输入）
 
             # ── 变量赋值：以 ad.outs 为准，复用 parse_assign_syntax ──
-            declared_out_names = set()
-            if ad.outs:
-                for od in ad.outs:
-                    oname = getattr(od, 'global_name', None) or getattr(od, 'var_name', '')
-                    if oname:
-                        declared_out_names.add(oname)
-            print(f"[runtime]📋 已声明的 out 变量: {declared_out_names}")
+            print(f"[runtime]📋 该节点 out 声明: "
+                  f"{[(getattr(od, 'var_name', ''), getattr(od, 'dynamic_key', None)) for od in (ad.outs or [])]}")
 
             # 人类输入容错循环：赋值失败（未声明变量等）→ 错误提示 → 重新等待输入（不中断流程）
             while True:
-                assign_err = self._try_apply_human_variables(variables, declared_out_names)
+                assign_err = self._try_apply_human_variables(variables, ad.outs)
                 if assign_err is None:
                     break
                 retry_hint = assign_err
@@ -3206,6 +3225,12 @@ class FEMRunner:
             result_keys = list(result.keys())
             missing_in_result = [n for n in out_names if n not in result_keys]
             extra_in_result = [k for k in result_keys if k not in out_names]
+            if missing_in_result and len(outs) == 1:
+                # 单 out + 返回 dict 与 out 名完全不匹配：
+                # 宽容回退——函数返回的字典整体作为单值赋给唯一 out
+                # （如 enemy_phase 返回 hp 字典给 out: hp）
+                self._set_out_var(outs[0], result)
+                return
             if missing_in_result:
                 raise FEMVariableError(
                     f"@func 返回值不匹配：out 声明的变量 {missing_in_result} 在函数返回字典中不存在。"
