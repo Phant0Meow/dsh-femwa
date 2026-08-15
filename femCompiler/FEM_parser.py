@@ -1126,19 +1126,26 @@ class FlowBuilder:
                     exit_candidates = self._process_inner_single_lines(plain, loop_gw, g)
                     for nest_block in nested:
                         self._process_nested_control_block(nest_block, g)
-                    # 检查下一个同级块是否为出口行
+                    # 检查下一个同级块是否为出口行（支持链：-> [X]:ref -> [Y]；
+                    # 排除控制块入口行：-> [A] -> ... -> fork:/for:/par:/join:）
                     target_id = None
                     if i + 1 < len(blocks):
                         next_line = blocks[i + 1].line.strip()
-                        if next_line.startswith('->'):
-                            target_id = self._reg_node(g, next_line[2:].strip())
+                        if (next_line.startswith('->')
+                                and not re.search(r'\b(for|par|fork|join)\b', next_line)):
+                            chain_str = next_line[2:].strip()
+                            # 链首 = 出口边目标；整链解析后 pending_from = 链尾
+                            head = self.parse_single_chain(chain_str.split('->', 1)[0].strip(), None, g)
+                            tail = self.parse_single_chain(chain_str, None, g)
+                            target_id = head if head is not None else tail
+                            pending_from = tail if tail is not None else target_id
                             i += 1  # 消费出口行
                     # 为每个出口候选节点添加回边到循环网关
                     for nid in exit_candidates:
                         g.add_edge(nid, loop_gw)
                     if target_id:
-                        g.add_edge(loop_gw, target_id)      # 循环结束后的出口边
-                        pending_from = target_id
+                        g.add_edge(loop_gw, target_id)      # 循环结束后的出口边（连链首）
+                        pending_from = pending_from if pending_from is not None else target_id
                     else:
                         if not exit_candidates:
                             raise SyntaxError(
@@ -1150,16 +1157,22 @@ class FlowBuilder:
 
                 elif ctrl_type == 'par':
                     join_gw = self.parse_par(block, g)
-                    # 检查下一个同级块是否为出口行
+                    # 检查下一个同级块是否为出口行（支持链：-> [X]:ref -> [Y]；
+                    # 排除控制块入口行：-> [A] -> ... -> fork:/for:/par:/join:）
                     target_id = None
                     if i + 1 < len(blocks):
                         next_line = blocks[i + 1].line.strip()
-                        if next_line.startswith('->'):
-                            target_id = self._reg_node(g, next_line[2:].strip())
+                        if (next_line.startswith('->')
+                                and not re.search(r'\b(for|par|fork|join)\b', next_line)):
+                            chain_str = next_line[2:].strip()
+                            head = self.parse_single_chain(chain_str.split('->', 1)[0].strip(), None, g)
+                            tail = self.parse_single_chain(chain_str, None, g)
+                            target_id = head if head is not None else tail
+                            pending_from = tail if tail is not None else target_id
                             i += 1
                     if target_id:
-                        g.add_edge(join_gw, target_id)
-                        pending_from = target_id
+                        g.add_edge(join_gw, target_id)      # 出口边连链首
+                        pending_from = pending_from if pending_from is not None else target_id
                     else:
                         # 如果没有出口行，默认连 [BREAK]
                         break_id = self._reg_node(g, "[BREAK]", "break")

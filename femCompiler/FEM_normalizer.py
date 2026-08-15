@@ -43,13 +43,16 @@ class FEMNormalizer:
         # 记录已有定义，以便检测本块新增的定义
         old_def_keys = set(self._definitions.keys())
 
-        # 1. 计算内部行的最小缩进
-        min_indent = base_indent + 2
+        # 1. 计算内部行的最小缩进（从内容行实际缩进取最小值；
+        #    初始 None 防止 base_indent+2 假设被 4 空格缩进剧本打破）
+        min_indent = None
         for line in inner_lines:
             if line.strip():
                 indent = len(line) - len(line.lstrip())
-                if indent < min_indent:
+                if min_indent is None or indent < min_indent:
                     min_indent = indent
+        if min_indent is None:
+            min_indent = base_indent + 2
 
         # 2. 去除最小缩进
         dedented_lines = []
@@ -286,14 +289,10 @@ class FEMNormalizer:
             keywords = {'fork', 'for', 'par', 'join', 'to', 'if', 'in', 'all', 'any', 'n'}
             if token.lower() in keywords:
                 return token
-            # 生成节点内部键
-            node_key = token
-            if token.startswith('&'):
-                base = token[1:]
-                node_key = f'&{base}'
-            else:
-                node_key = token
-            original_key = node_key
+            # 生成节点内部键：&module 的节点名不带 &（绑定保留 & 前缀）
+            base = token.lstrip('&')
+            node_key = base
+            original_key = base
             counter = 1
             while node_key in self._definitions:
                 node_key = f'{original_key}_{counter}'
@@ -301,8 +300,9 @@ class FEMNormalizer:
             self._definitions[node_key] = token
             return f'[{node_key}]'
 
-        # 处理普通单词（不含括号的）
-        fragment = re.sub(r'(?<!\[)\b(&?\w+)\b(?!\])', replacer, fragment)
+        # 处理普通单词（不含括号的）；注意 & 是非单词字符，
+        # \b 在 & 前不成立，必须用 (&?\b\w+) 才能把 & 一并捕获
+        fragment = re.sub(r'(?<!\[)(&?\b\w+)\b(?!\])', replacer, fragment)
         # 处理带括号的模块引用 &mymodule(args)
         fragment = re.sub(
             r'(?<!\[)&(\w+)\(([^)]*)\)',
@@ -313,10 +313,10 @@ class FEMNormalizer:
 
     def _handle_module_ref(self, mod_name: str, args: str) -> str:
         token = f'&{mod_name}({args})'
-        node_key = f'&{mod_name}'
+        node_key = mod_name   # 节点名不带 &
         counter = 1
         while node_key in self._definitions:
-            node_key = f'&{mod_name}_{counter}'
+            node_key = f'{mod_name}_{counter}'
             counter += 1
         self._definitions[node_key] = token
         return f'[{node_key}]'

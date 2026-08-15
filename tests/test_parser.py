@@ -172,6 +172,32 @@ mainflow:
         # flow 区 -- 应等价 ->（[START] -> [END] 连通）
         assert any(e.source == "[START]" and e.target == "[END]" for e in s.flow.edges)
 
+    def test_goblin_v2_engine_parse(self):
+        """goblin-v2（4 空格缩进 + 裸 &module + for 出口链）引擎解析完整性。
+        回归保护：normalizer min_indent 初始值 bug（4 空格缩进剧本流程行全丢）
+        与 &module 裸引用 bug（\b 边界不覆盖 &）。"""
+        script = load("goblin-v2.fems")
+        # 主流程完整
+        assert "[START]" in script.flow.nodes, "[START] 丢失（min_indent bug）"
+        assert "[END]" in script.flow.nodes
+        fw = script.flow.nodes.get("[FAREWELL]")
+        assert fw is not None and fw.action_name == "farewell"
+        assert any(e.source == "[FAREWELL]" and e.target == "[END]" for e in script.flow.edges), \
+            "for 出口链 [FAREWELL] -> [END] 边丢失"
+        # 裸 &module 引用
+        br = script.flow.nodes.get("[BattleRound]")
+        assert br is not None and br.module_ref == "BattleRound", \
+            f"&BattleRound 引用错误: {getattr(br, 'module_ref', None)}"
+        # module flow 完整
+        mod = script.modules.get("BattleRound")
+        assert mod is not None and mod.flow is not None
+        assert len(mod.flow.nodes) >= 10, f"module flow 节点缺失: {len(mod.flow.nodes)}"
+        # 模块内 par + fork 网关
+        gw = [n for n in mod.flow.nodes.values() if n.type == "gateway"]
+        assert any(n.meta.get("is_par_fork") for n in gw), "module 内 par 网关缺失"
+        assert any(n.meta.get("gw_kind") == "fork" and not n.meta.get("is_par_fork") for n in gw), \
+            "module 内 fork 网关缺失"
+
 
 # ── 语法测试剧本（引擎真实语法）──────────────────────────────
 

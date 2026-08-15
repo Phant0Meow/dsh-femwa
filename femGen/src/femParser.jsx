@@ -1026,6 +1026,23 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
     return prev;
   }
 
+  // 链式出口解析：-> [FAREWELL]:farewell -> [END]（for/par 出口行允许内联定义 + 链）
+  function resolveExitChain(raw, srcLabel) {
+    const parts = raw.split('->').map(p => p.trim()).filter(Boolean);
+    if (parts.length === 0) return srcLabel;
+    let cur = srcLabel;
+    for (const part of parts) {
+      const ifMatch = part.match(/^if\s*\((.+)\)$/);
+      if (ifMatch) {
+        const rest = part.slice(part.indexOf(')') + 1).trim();
+        cur = resolveTarget(cur, rest, ifMatch[1].trim());
+      } else {
+        cur = resolveTarget(cur, part, '');
+      }
+    }
+    return cur;
+  }
+
   // ── 第一步：全局裸引用规范化（按->切块，智能保留控制结构） ──
   for (const line of flowLines) {
 
@@ -1267,8 +1284,8 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
         const am = afterLine.match(/^->\s*(.+)$/);
         if (am && !/\b(for|par|fork|join)\b/.test(am[1])) {
           const exitTargetRaw = am[1].trim();
-          // parOutLabel 已在上方创建，这里直接使用
-          const exitLabel = resolveTarget(parOutLabel, exitTargetRaw, '');
+          // parOutLabel 已在上方创建，这里直接使用（出口支持链：-> [X]:ref -> [Y]）
+          const exitLabel = resolveExitChain(exitTargetRaw, parOutLabel);
           i++;
         }
       }
@@ -1509,8 +1526,8 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
               forNodeId: forNodeLabel,
             });
           }
-          // for_out -> 出口节点
-          const exitLabel = resolveTarget(forOutLabel, exitTargetRaw, '');
+          // for_out -> 出口节点（支持链：-> [X]:ref -> [Y]）
+          const exitLabel = resolveExitChain(exitTargetRaw, forOutLabel);
           i++;
         }
       }
