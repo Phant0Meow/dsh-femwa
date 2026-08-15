@@ -452,12 +452,18 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
     sessionActors: Map<string, string[]>
     /** Per-session engine errors (meta info for the Fem script panel). */
     errors: Map<string, Array<{ ts: number; text: string }>>
+    /** 最近一次停止是否由「暂停」发起（flow_stopped 文案区分暂停/停止）。 */
+    pausedByUser: boolean
+    /** 最近引擎事件缓冲（cap 100）：SSE 新连接重放，运行中打开编辑器也能看到实时状态。 */
+    lastEvents: Array<{ type: string; data: unknown }>
   } = {
     running: false,
     nodeActors: new Map(),
     nodeScopes: new Map(),
     sessionActors: new Map(),
     errors: new Map(),
+    pausedByUser: false,
+    lastEvents: [],
   }
 
   const recordError = (sessionId: SessionId, text: string): void => {
@@ -562,6 +568,9 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
     if (sessionId === undefined) return
     // 可视化运行通道：原样转发引擎事件（画布按 node_name 匹配节点做高亮/详情）。
     broadcastSse(eventType, data)
+    // 事件缓冲：SSE 新连接（运行中打开编辑器标签）先重放已发生的事件。
+    runState.lastEvents.push({ type: eventType, data })
+    if (runState.lastEvents.length > 100) runState.lastEvents.shift()
     const session = sessionsStore?.get(sessionId)
     if (session === undefined) return
     const d = (data ?? {}) as Record<string, unknown>
@@ -665,10 +674,11 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
       }
       case 'flow_done': {
         runState.running = false
+        runState.pausedByUser = false
         // 完整跑完：清掉 checkpoint，下次 run 从头开始
         void clearCheckpoint(resolved.femwaRoot, String(sessionId))
           .catch((error: unknown) => console.log(`[dsh-femwa] checkpoint clear failed: ${String(error)}`))
-        appendChat(ctx, session, '✅ 剧本流程结束', 'notice')
+        appendChat(ctx, session, '✅ 剧本已跑完', 'notice')
         break
       }
       case 'flow_error': {
@@ -682,7 +692,9 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
       }
       case 'flow_stopped': {
         runState.running = false
-        appendChat(ctx, session, '⏹ 剧本已停止', 'notice')
+        // 暂停（引擎侧为 stop 半实现）与停止共用 flow_stopped：按发起方区分文案。
+        appendChat(ctx, session, runState.pausedByUser ? '⏸ 剧本已暂停' : '⏹ 剧本已停止', 'notice')
+        runState.pausedByUser = false
         break
       }
       case 'bridge_run_ended': {
@@ -726,6 +738,7 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
           writeJson(res, 200, { ok: true, stopped: false, note: 'no active run' })
           return
         }
+        runState.pausedByUser = false
         bridge.send('stop', {}, 5000).then(() => {
           writeJson(res, 200, { ok: true, stopped: true })
         }).catch((error: unknown) => {
@@ -740,9 +753,11 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
       kind: 'exact',
       path: '/dsh-femwa/pause',
       handler: (_req: IncomingMessage, res: ServerResponse): void => {
+        runState.pausedByUser = true
         bridge.send('pause', {}, 5000).then((result) => {
           writeJson(res, 200, { ok: true, paused: (result as { paused?: boolean } | undefined)?.paused ?? false })
         }).catch((error: unknown) => {
+          runState.pausedByUser = false
           writeJson(res, 500, { ok: false, error: String(error) })
         })
       },
@@ -769,8 +784,9 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
           const waitKey = typeof raw.wait_key === 'string' ? raw.wait_key : ''
           const chatText = typeof raw.chat_text === 'string' ? raw.chat_text : ''
           const variables = (raw.variables ?? {}) as Record<string, unknown>
-          if (waitKey.length === 0 || chatText.length === 0) {
-            writeJson(res, 400, { ok: false, error: 'wait_key and chat_text are required' })
+          const hasVars = typeof variables === 'object' && variables !== null && Object.keys(variables).length > 0
+          if (waitKey.length === 0 || (chatText.length === 0 && !hasVars)) {
+            writeJson(res, 400, { ok: false, error: 'wait_key and chat_text/variables are required' })
             return
           }
           const delivered = await bridge.send('human_input', {
@@ -838,6 +854,67 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
     })
     webServer.register({
       kind: 'exact',
+      path: '/dsh-femwa/session-script',
+      handler: (req: IncomingMessage, res: ServerResponse): void => {
+        void (async () => {
+          // femGen 画布编辑的实时快照写（防抖由前端控制）。
+          const raw = await readBody(req) as unknown as Record<string, unknown>
+          const sessionId = typeof raw.sessionId === 'string' && raw.sessionId.trim().length > 0 ? raw.sessionId : ''
+          const fems = typeof raw.fems === 'string' && raw.fems.trim().length > 0 ? raw.fems : ''
+          if (sessionId.length === 0 || fems.length === 0) {
+            writeJson(res, 400, { ok: false, error: 'sessionId and fems are required' })
+            return
+          }
+          await writeSessionScript(resolved.femwaRoot, sessionId, fems)
+          writeJson(res, 200, { ok: true })
+        })().catch((error: unknown) => {
+          writeJson(res, 500, { ok: false, error: String(error) })
+        })
+      },
+    })
+    webServer.register({
+      kind: 'exact',
+      path: '/dsh-femwa/session-state',
+      handler: (req: IncomingMessage, res: ServerResponse): void => {
+        void (async () => {
+          // femGen 恢复面：剧本快照存在性 + 断点位置（含 [END]/[BREAK] 的
+          // 存量 checkpoint 顺带清理——终点点永不作为续跑位置）。
+          const url = new URL(req.url ?? '/', 'http://localhost')
+          const sessionId = url.searchParams.get('sessionId')
+          if (sessionId === null || sessionId.length === 0) {
+            writeJson(res, 400, { ok: false, error: 'sessionId is required' })
+            return
+          }
+          const script = await readSessionScript(resolved.femwaRoot, sessionId)
+          let checkpoint = await readCheckpoint(resolved.femwaRoot, sessionId)
+          let dirty = false
+          for (const [key, value] of Object.entries(checkpoint)) {
+            if (value === '[END]' || value === '[BREAK]') {
+              delete checkpoint[key]
+              dirty = true
+            }
+          }
+          if (dirty) {
+            if (Object.keys(checkpoint).length === 0) {
+              await clearCheckpoint(resolved.femwaRoot, sessionId)
+            } else {
+              await writeCheckpoint(resolved.femwaRoot, sessionId, checkpoint)
+            }
+          }
+          writeJson(res, 200, {
+            ok: true,
+            hasScript: script !== undefined,
+            script: script ?? undefined,
+            checkpoint,
+            running: runState.running && String(runState.sessionId ?? '') === sessionId,
+          })
+        })().catch((error: unknown) => {
+          writeJson(res, 500, { ok: false, error: String(error) })
+        })
+      },
+    })
+    webServer.register({
+      kind: 'exact',
       path: '/dsh-femwa/events',
       handler: (req: IncomingMessage, res: ServerResponse): void => {
         // SSE：引擎事件实时推送给 femGen 可视化画布（呼吸灯/节点详情/流式文本）。
@@ -848,6 +925,10 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
           'x-accel-buffering': 'no',
         })
         res.write(': connected\n\n')
+        // 重放已发生的运行事件（运行中打开编辑器标签时画布立即呈现实时状态）。
+        for (const event of runState.lastEvents) {
+          res.write(`data: ${JSON.stringify({ type: event.type, data: event.data ?? {} })}\n\n`)
+        }
         sseClients.add(res)
         const cleanup = (): void => { sseClients.delete(res) }
         req.on('close', cleanup)
@@ -1227,6 +1308,29 @@ async function clearCheckpoint(femwaRoot: string, sessionId: string): Promise<vo
   }
 }
 
+/** 会话级剧本快照路径：femGen 刷新/重启后恢复画布用（user_data/sessions/）。 */
+function sessionScriptPath(femwaRoot: string, sessionId: string): string {
+  return join(femwaRoot, 'user_data', 'sessions', `${sessionId}.fems`)
+}
+
+/** 把画布运行的最新剧本写入会话快照（覆盖式）。 */
+async function writeSessionScript(femwaRoot: string, sessionId: string, text: string): Promise<void> {
+  const { mkdir, writeFile } = await import('node:fs/promises')
+  const path = sessionScriptPath(femwaRoot, sessionId)
+  await mkdir(join(path, '..'), { recursive: true })
+  await writeFile(path, text, 'utf8')
+}
+
+/** 读会话剧本快照；不存在返回 undefined。 */
+async function readSessionScript(femwaRoot: string, sessionId: string): Promise<string | undefined> {
+  const { readFile } = await import('node:fs/promises')
+  try {
+    return await readFile(sessionScriptPath(femwaRoot, sessionId), 'utf8')
+  } catch {
+    return undefined
+  }
+}
+
 /** Resolve the engine's LLM key from dsh credentials (absent → AI nodes fail). */
 async function resolveApiKey(ctx: Context, resolved: ResolvedConfig): Promise<string | undefined> {
   const credentials = ctx.get('credentials') as { resolve(ref: unknown): Promise<{ value: string } | undefined> } | undefined
@@ -1247,12 +1351,26 @@ async function startRunOnSession(
   sessionId: SessionId,
   scriptText: string,
   scriptPath?: string,
+  reset = false,
 ): Promise<void> {
   const apiKey = await resolveApiKey(ctx, resolved)
   if (apiKey === undefined) {
     console.log(`[dsh-femwa] credential ${resolved.apiKeyRef} not resolved; AI nodes will fail`)
   }
+  // 会话级剧本快照：无论 fems 直传还是 scriptPath，都记录最新剧本，
+  // femGen 打开标签页时按 session 恢复画布（运行中打开也能看到剧本）。
+  await writeSessionScript(resolved.femwaRoot, String(sessionId), scriptText)
+    .catch((error: unknown) => console.log(`[dsh-femwa] session script snapshot failed: ${String(error)}`))
+  if (reset) {
+    // 手动「运行」：作废旧 checkpoint，从头跑。
+    await clearCheckpoint(resolved.femwaRoot, String(sessionId)).catch(() => undefined)
+    console.log(`[dsh-femwa] reset ${sessionId}: checkpoint cleared, running from start`)
+  }
   const checkpoints = await readCheckpoint(resolved.femwaRoot, String(sessionId))
+  // 双保险：终点点（[END]/[BREAK]）永远不作续跑位置（老引擎可能已写入）。
+  for (const [key, value] of Object.entries(checkpoints)) {
+    if (value === '[END]' || value === '[BREAK]') delete checkpoints[key]
+  }
   if (Object.keys(checkpoints).length > 0) {
     console.log(`[dsh-femwa] resuming ${sessionId} from checkpoint: ${JSON.stringify(checkpoints)}`)
   }
@@ -1328,9 +1446,11 @@ async function handleRunOnSession(
     writeJson(res, 400, { ok: false, error: 'fems or scriptPath is required' })
     return
   }
+  // 「运行」= 作废快照从头；「继续」= 不传 reset（自动带 checkpoint 续跑）。
+  const reset = body.reset === true
   try {
     const scriptText = await readScriptText(fems, scriptPath)
-    await startRunOnSession(ctx, resolved, bridge, runState, sessionId, scriptText, scriptPath)
+    await startRunOnSession(ctx, resolved, bridge, runState, sessionId, scriptText, scriptPath, reset)
     writeJson(res, 200, { ok: true, sessionId: String(sessionId) })
   } catch (error: unknown) {
     console.log(`[dsh-femwa] run-on-session FAILED: ${String(error)}`)

@@ -40,13 +40,59 @@ type FemScriptViewProps = { sessionId: string } & ScriptViewInjected
 
 /** 画布可视化编辑器（femGen 插件模式）：取代文本编辑标签页。
  *  onRun 把画布生成的 .fems 直接交给插件 run 路由（不落盘），
- *  与聊天窗角色气泡是同一次引擎运行；SSE 事件流由 femGen 内部连接。 */
+ *  与聊天窗角色气泡是同一次引擎运行；SSE 事件流由 femGen 内部连接。
+ *  挂载时读取会话状态（剧本快照 + 断点）用于恢复画布与「继续」按钮。 */
 export function FemEditorView({ sessionId, stopScript }: FemScriptViewProps) {
-  const onRun = async (fems: string): Promise<void> => {
-    const response = await fetch('/dsh-femwa/run', {
+  const [state, setState] = useState<{
+    hasScript: boolean
+    script?: string
+    checkpoint: Record<string, string>
+    running?: boolean
+  } | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void fetch(`/dsh-femwa/session-state?sessionId=${encodeURIComponent(sessionId)}`)
+      .then(response => response.json())
+      .then((data: { ok?: boolean; script?: string; checkpoint?: Record<string, string>; running?: boolean }) => {
+        if (!cancelled && data.ok === true) {
+          setState({
+            hasScript: data.script !== undefined,
+            script: data.script,
+            checkpoint: data.checkpoint ?? {},
+            running: data.running === true,
+          })
+        }
+      })
+      .catch(() => { /* 编辑器仍可空白启动 */ })
+    return () => { cancelled = true }
+  }, [sessionId])
+
+  // 断点位置：主流程分支优先，其次任一分支（画布按节点 label 匹配）。
+  const checkpointNode = state === null
+    ? undefined
+    : state.checkpoint['__main__'] ?? Object.values(state.checkpoint)[0]
+
+  // 画布编辑的实时快照写（femGen 防抖调用）：刷新/重启后按会话恢复。
+  const onSnapshot = (fems: string): void => {
+    void fetch('/dsh-femwa/session-script', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ sessionId, fems }),
+    }).catch((error: unknown) => {
+      console.warn('[dsh-femwa] snapshot write failed:', error)
+    })
+  }
+
+  const onRun = async (fems: string, opts?: { reset?: boolean }): Promise<void> => {
+    const response = await fetch('/dsh-femwa/run', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        sessionId,
+        fems,
+        ...(opts?.reset === true ? { reset: true } : {}),
+      }),
     })
     let message = `run HTTP ${response.status}`
     try {
@@ -63,7 +109,17 @@ export function FemEditorView({ sessionId, stopScript }: FemScriptViewProps) {
       console.warn('[dsh-femwa] stop failed:', error)
     })
   }
-  return <FEMEditor plugin onRun={onRun} onStop={onStop} />
+  return (
+    <FEMEditor
+      plugin
+      onRun={onRun}
+      onStop={onStop}
+      onSnapshot={onSnapshot}
+      initialScript={state?.script}
+      initialCheckpoint={checkpointNode}
+      initialRunning={state?.running === true}
+    />
+  )
 }
 
 /** Full-size panel: browse, paste/edit, save, and run Fem scripts. */

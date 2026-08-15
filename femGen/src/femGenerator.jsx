@@ -116,7 +116,11 @@ a.outVars.split('\n').forEach((v) => {
       const parts = [];
       parts.push(`soul:${a.soul || (a.type === 'ai' ? '1' : '0')}`);
       if (a.source) parts.push(`source:${a.source}`);
-      if (a.type === 'ai' && a.tools && a.tools.length) {
+      if (a.type === 'ai' && a.tools === false) {
+        parts.push('tools: false');
+      } else if (a.type === 'ai' && a.tools === true) {
+        parts.push('tools: true');
+      } else if (a.type === 'ai' && Array.isArray(a.tools) && a.tools.length) {
         parts.push(`tools = [${a.tools.join(', ')}]`);
       }
       lines.push(`  ${a.type} ${name} = ${parts.join(', ')}`);

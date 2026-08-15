@@ -827,7 +827,11 @@ class FEMRunner:
 
         存的是"位置"（node id），续跑时从该节点重放；节点不存在于新剧本
         时从头跑。每次变化都上行 checkpoint 事件，由宿主持久化。
+        [END]/[BREAK] 是终点/跳出点，永不作为续跑位置记录——否则残留的
+        checkpoint 会让后续每次 run 都从终点"续跑"而整体跳过剧本。
         """
+        if node_id in ('[END]', '[BREAK]'):
+            return
         if self.checkpoints.get(branch_key) == node_id:
             return
         self.checkpoints[branch_key] = node_id
@@ -1594,6 +1598,8 @@ class FEMRunner:
                     print(f"[FORK]      分支协程被取消，目标节点: {start_node}")
                 except Exception as e:
                     print(f"[FORK]      分支异常: {e}")
+                    # 编译器原则：分支报错必须上报，绝不静默吞掉（否则主流程假 flow_done）
+                    self._fork_errors.append((start_node, e))
                 finally:
                     _current_context.reset(token)
                     return ctx.locals
@@ -1616,6 +1622,13 @@ class FEMRunner:
             current_ctx = _current_context.get()
             if current_ctx:
                 current_ctx.locals.update(last_locals)
+        # 编译器原则：分支有错必须上报，不能静默 flow_done
+        if self._fork_errors:
+            detail = "; ".join(f"[{name}] {err}" for name, err in self._fork_errors)
+            self._fork_errors = []
+            raise FEMVariableError(
+                f"fork 分支执行失败（{len(branch_results)} 分支中有错误）: {detail}"
+            )
         return None
         
         
@@ -1886,12 +1899,18 @@ class FEMRunner:
 
         # 点分/索引路径
         if re.match(r'^[A-Za-z_]\w*(\.\w+|\[.+\])*$', expr):
-            val = self.vm.get(expr)
+            try:
+                val = self.vm.get(expr)
+            except FEMVariableError:
+                val = None  # 未声明变量：宽松求值，按字面量处理
             if val is not None: return val
 
         # 简单变量名
         if re.match(r'^@?[^\W\d_]\w*$', expr):
-            val = self.vm.get(expr)
+            try:
+                val = self.vm.get(expr)
+            except FEMVariableError:
+                val = None  # 未声明变量：宽松求值，按字面量处理
             if val is not None: return val
 
         return expr
@@ -3219,6 +3238,9 @@ class FEMRunner:
         # 重启 SaveQueue，避免上轮任务残留的停止状态
         from femCompiler.save_dialog import save_queue
         save_queue.restart()
+
+        # 每次 run 重置 fork 分支错误收集（编译器原则：分支报错必须上报，不静默）
+        self._fork_errors = []
 
         if max_steps is None:
             global_meta = getattr(self.script, 'meta', None) or {}

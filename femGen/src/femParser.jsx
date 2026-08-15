@@ -6,11 +6,8 @@ import { TYPES, SPECIAL_COLORS, actionId } from './common';
 
 function normalizeSymbols(str, context = 'global') {
   let s = str;
-  // ═══ 非 prompt 上下文：先去掉行内注释（// 和 #），再做全角替换 ═══
+  // ═══ 全角符号标准化（注释剥离已由全局 stripComments 完成，此处不再处理注释）═══
   if (context !== 'prompt') {
-    // 去掉从 // 或 # 开始到行尾的所有内容（注释）
-    s = s.replace(/\/\/.*$|#.*$/gm, '');
-    // 全角符号标准化
     s = s
       .replace(/：/g, ':')
       .replace(/，/g, ',')
@@ -29,8 +26,89 @@ function normalizeSymbols(str, context = 'global') {
   return s;
 }
 
+// ═══════════════════════════════════════════════════════════════
+// ═══ 全局注释剥离（编译第一步）═══
+// ═══════════════════════════════════════════════════════════════
+// 除 prompt 文本块内部与字符串引号内部外，所有 `#` 与 `//` 连同其后内容
+// 清空到行尾。行首缩进保留（块结构依赖缩进）。
+
+// 引号感知的行级注释剥离
+function stripLineComments(line) {
+  let out = '';
+  let quote = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      out += c;
+      if (c === '\\' && i + 1 < line.length) {
+        out += line[i + 1];
+        i++;
+        continue;
+      }
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      quote = c;
+      out += c;
+      continue;
+    }
+    if (c === '#') {
+      // flow 魔法注释（回边语法）保留：# for loop -> [X] while cond
+      if (/^#\s*for loop\s*->/.test(line)) return line;
+      break;
+    }
+    if (c === '/' && line[i + 1] === '/') break;
+    out += c;
+  }
+  return out;
+}
+
+// 找出所有多行文本块 [start, end) 行区间：
+//   prompt: | / showprompt: |（action）以及 key = |（meta：system_safety 等）
+function findPromptRanges(lines) {
+  const ranges = [];
+  let i = 0;
+  while (i < lines.length) {
+    const trimmed = lines[i].trim();
+    // 允许行尾带注释（全局剥离后该行会先被清成 prompt: |，此处宽松匹配）
+    const isMultiStart =
+      /^(?:prompt|showprompt):\s*[|｜]\s*(?:#.*)?$/.test(trimmed) ||
+      /^@?[\w\u4e00-\u9fff]+\s*=\s*[|｜]\s*(?:#.*)?$/.test(trimmed);
+    if (isMultiStart) {
+      const fieldIndent = lines[i].length - lines[i].trimStart().length;
+      let j = i + 1;
+      while (j < lines.length) {
+        const t2 = lines[j].trim();
+        if (!t2) { j++; continue; }            // 空行算 prompt 内容
+        const ind2 = lines[j].length - lines[j].trimStart().length;
+        if (ind2 <= fieldIndent) break;        // 缩进回到字段层 → 块结束
+        j++;
+      }
+      ranges.push([i + 1, j]);
+      i = j;
+      continue;
+    }
+    i++;
+  }
+  return ranges;
+}
+
+// 全局注释剥离：parseFEMS 的第一步
+function stripComments(lines) {
+  const ranges = findPromptRanges(lines);
+  return lines.map((raw, i) => {
+    for (const [s, e] of ranges) {
+      if (i >= s && i < e) return raw;          // prompt 文本块：原样保留
+    }
+    return stripLineComments(raw);
+  });
+}
+
 function parseFEMS(text) {
-  const lines = text.split('\n');
+  // 编译第一步：内存版全局去注释（# 和 // 到行尾；prompt 块与引号内豁免）
+  // 只处理内存副本，用户原文/窗口文本不受影响
+  const lines = stripComments(text.split('\n'));
   const blocks = splitTopBlocks(lines);
 
   const result = {
@@ -116,7 +194,102 @@ function parseFEMS(text) {
   }
   flattenModules(topModules, ['mainflow']);
 
+  // ═══ 变量声明校验：编译器原则，未声明必须报错，不静默兜底 ═══
+  validateDeclarations(result);
+
   return result;
+}
+
+// ── 变量声明校验 ────────────────────────────────────────────
+// 规则（与引擎一致）：
+//   1. for 循环变量必须已在 vars: 声明（如 @hero = ""）
+//   2. 条件表达式里的裸标识符必须是已声明变量 / actor / 循环变量，
+//      字符串字面量必须带引号（== "ai" 而非 == ai）
+const _RESERVED_WORDS = new Set([
+  'and', 'or', 'not', 'in', 'is',
+  'True', 'False', 'None', 'true', 'false', 'TRUE', 'FALSE',
+]);
+
+function _extractCondIdentifiers(cond) {
+  // 剥离字符串字面量（带引号的文本不算标识符）
+  const noStr = cond.replace(/"[^"]*"|'[^']*'/g, '""');
+  return noStr.match(/@?[\w\u4e00-\u9fff]+(?:\.[\w\u4e00-\u9fff]+)*/g) || [];
+}
+
+function _mainIdent(ident) {
+  const dot = ident.indexOf('.');
+  return dot >= 0 ? ident.slice(0, dot) : ident;
+}
+
+function validateDeclarations(result) {
+  const topVars = new Set((result.vars || []).map((v) => v.name));
+  const actors = new Set((result.actors || []).map((a) => a.name));
+  const moduleVars = new Map();
+  for (const m of result.modules || []) {
+    moduleVars.set(m.name, new Set((m.vars || []).map((v) => v.name)));
+  }
+
+  function validateFlow(nodeDecls, edges, ctxName, moduleName) {
+    const scopeVars = new Set(topVars);
+    if (moduleName && moduleVars.has(moduleName)) {
+      for (const n of moduleVars.get(moduleName)) scopeVars.add(n);
+    }
+    const loopVars = new Set();
+
+    // 1) for 循环变量与迭代器声明检查
+    for (const d of nodeDecls || []) {
+      if (d.specialType === 'FOR' && d.forCondition) {
+        const m = d.forCondition.match(/^(@?[\w\u4e00-\u9fff]+)\s+in\s+(.+)$/);
+        if (!m) {
+          throw new Error(
+            `for 条件格式错误: "${d.forCondition}"（${ctxName}）。期望: for @var in list`
+          );
+        }
+        const loopVar = m[1];
+        if (!scopeVars.has(loopVar)) {
+          throw new Error(
+            `for 循环变量 "${loopVar}" 未在 vars: 中声明（${ctxName}，for 条件: "${d.forCondition}"）。` +
+            `所有循环变量必须在 vars: 中预先声明，例如: ${loopVar} = ""`
+          );
+        }
+        loopVars.add(loopVar);
+        const iterable = m[2].trim();
+        if (/^@?[\w\u4e00-\u9fff]+$/.test(iterable) && !scopeVars.has(iterable)) {
+          throw new Error(
+            `for 迭代器 "${iterable}" 未在 vars: 中声明（${ctxName}，for 条件: "${d.forCondition}"）`
+          );
+        }
+      }
+    }
+
+    // 2) 条件表达式里的裸标识符检查
+    const known = new Set([...scopeVars, ...actors, ...loopVars]);
+    for (const e of edges || []) {
+      if (!e.cond) continue;
+      for (const ident of _extractCondIdentifiers(e.cond)) {
+        if (_RESERVED_WORDS.has(ident)) continue;
+        const main = _mainIdent(ident);
+        if (/^\d+(\.\d+)?$/.test(main)) continue; // 数字字面量
+        if (main.startsWith('@')) {
+          if (!actors.has(main) && !scopeVars.has(main) && !loopVars.has(main)) {
+            throw new Error(
+              `条件 "${e.cond}" 引用了未声明的 actor/变量 "${main}"（${ctxName}，边 ${e.srcLabel} -> ${e.tgtLabel}）`
+            );
+          }
+        } else if (!known.has(main)) {
+          throw new Error(
+            `条件 "${e.cond}" 引用了未声明的变量 "${main}"（${ctxName}，边 ${e.srcLabel} -> ${e.tgtLabel}）。` +
+            `字符串字面量请加引号，如 == "ai"；所有变量须在 vars: 中声明`
+          );
+        }
+      }
+    }
+  }
+
+  validateFlow(result.mainflow.nodeDecls, result.mainflow.edges, 'mainflow', null);
+  for (const m of result.modules || []) {
+    validateFlow(m.nodeDecls, m.edges, `module ${m.name}`, m.name);
+  }
 }
 
 function splitTopBlocks(lines) {
@@ -141,6 +314,10 @@ function splitTopBlocks(lines) {
     }
 
     if (indent === 0) {
+      // 顶层注释行（# 或 //）不构成块，直接跳过
+      if (trimmed.startsWith('#') || trimmed.startsWith('//')) {
+        continue;
+      }
       if (current) blocks.push(current);
       current = {
         header: normalizeSymbols(trimmed),
@@ -165,8 +342,9 @@ function parseMetaBlock(cls) {
   let i = 0;
   while (i < cls.length) {
     const cl = cls[i];
-    // 跳过空行
-    if (!cl.text.trim()) {
+    // 跳过空行与整行注释
+    const _t = cl.text.trim();
+    if (!_t || _t.startsWith('#')) {
       i++;
       continue;
     }
@@ -271,7 +449,8 @@ function parseLayoutBlock(cls) {
 function parseVarsBlock(cls) {
   const vars = [];
   for (const cl of cls) {
-    if (!cl.text.trim()) continue;          // 跳过空行
+    const _t = cl.text.trim();
+    if (!_t || _t.startsWith('#')) continue;   // 跳过空行与注释
     const line = normalizeSymbols(cl.text);
     const m = line.match(/^(@?[\w\u4e00-\u9fff]+)\s*=\s*(.*)$/);
     if (!m)
@@ -288,7 +467,8 @@ function parseVarsBlock(cls) {
 function parseCodeBlock(cls) {
   const code = [];
   for (const cl of cls) {
-    if (!cl.text.trim()) continue;          // 跳过空行
+    const _t = cl.text.trim();
+    if (!_t || _t.startsWith('#')) continue;   // 跳过空行与注释
     const line = normalizeSymbols(cl.text);
     const m = line.match(/^(@?[\w\u4e00-\u9fff]+)\s*=\s*(.*)$/);
     if (!m)
@@ -309,7 +489,8 @@ function parseCodeBlock(cls) {
 function parseActorsBlock(cls) {
   const actors = [];
   for (const cl of cls) {
-    if (!cl.text.trim()) continue;          // 跳过空行
+    const _t = cl.text.trim();
+    if (!_t || _t.startsWith('#')) continue;   // 跳过空行与注释
     const line = normalizeSymbols(cl.text);
     const prefixMatch = line.match(
       /^(ai|human)\s+(@?[\w\u4e00-\u9fff]+)\s*=\s*(.*)$/
@@ -341,13 +522,15 @@ function parseActorsBlock(cls) {
         if (!val) throw new Error(`第 ${cl.lineNum + 1} 行: source 字段缺少值，例如 source:01A`);
         source = val;
       } else if (part.startsWith('tools')) {
-        // 允许 tools = [...] 或 tools:[...]
-        let toolsStr = part.replace(/^tools\s*=\s*/, '').trim();
+        // 允许 tools = [...] / tools:[...] / tools: true|false（布尔=全部/禁用）
+        let toolsStr = part.replace(/^tools\s*[:=]\s*/, '').trim();
         if (toolsStr.startsWith('[') && toolsStr.endsWith(']')) {
           toolsStr = toolsStr.slice(1, -1);
           tools = toolsStr.split(',').map(s => s.trim()).filter(Boolean);
+        } else if (toolsStr === 'true' || toolsStr === 'false') {
+          tools = toolsStr === 'true';
         } else {
-          throw new Error(`第 ${cl.lineNum + 1} 行: tools 格式错误，应为 tools = [tool1, tool2]`);
+          throw new Error(`第 ${cl.lineNum + 1} 行: tools 格式错误，应为 tools = [tool1, tool2] 或 tools: true/false`);
         }
       } else {
         // 其他字段直接报错
@@ -383,7 +566,8 @@ function parseMemoryOrContextBlock(header, cls, blockType) {
     out: '',
   };
   for (const cl of cls) {
-    if (!cl.text.trim()) continue;          // 跳过空行
+    const _t = cl.text.trim();
+    if (!_t || _t.startsWith('#')) continue;   // 跳过空行与注释
     const line = normalizeSymbols(cl.text);
     if (line.startsWith('in:')) {
       const after = line.slice(3).trim();
@@ -441,7 +625,7 @@ function parseActionBlock(header, cls) {
         (cls[i - 1].text === 'prompt: |' || cls[i - 1].text === 'showprompt: |') &&
         cl.indent > cls[i - 1].indent);
 
-    if (!isPromptContext && !cl.text.trim()) {
+    if (!isPromptContext && (!cl.text.trim() || cl.text.trim().startsWith('#'))) {
       i++;
       continue;
     }
@@ -503,6 +687,14 @@ function parseActionBlock(header, cls) {
       if (after) {
         action.outVars = after;
         i++; // 单行模式必须推进索引
+        // 单行 out 后的缩进续行也并入（out: x += 1 后接缩进的 y = {}）
+        const ol = [];
+        while (i < cls.length && cls[i].indent > cl.indent) {
+          const t2 = normalizeSymbols(cls[i].text).trim();
+          if (t2 && !t2.startsWith('#')) ol.push(t2);
+          i++;
+        }
+        if (ol.length > 0) action.outVars = after + '\n' + ol.join('\n');
       } else {
         i++;
         const ol = [];
@@ -557,23 +749,27 @@ function parseModuleBlock(header, cls) {
     edges: [],
   };
 
-  // Split sub-blocks at indent 2
+  // 子块按最小缩进切分（兼容 2 空格 / 4 空格等任意统一缩进）
   const subBlocks = [];
   let cur = null;
+  const nonEmpty = cls.filter((cl) => cl.text.trim());
+  const baseIndent = nonEmpty.length > 0
+    ? Math.min(...nonEmpty.map((cl) => cl.indent))
+    : 0;
   for (const cl of cls) {
     // 跳过空行，防止生成空 header 的子块
     if (!cl.text.trim()) continue;
 
-    if (cl.indent === 2) {
+    if (cl.indent === baseIndent) {
       if (cur) subBlocks.push(cur);
       const headerText = cl.text.trim();
-      if (headerText.startsWith('//')) {
+      if (headerText.startsWith('//') || headerText.startsWith('#')) {
         cur = null;
       } else {
         cur = { header: cl.text, contentLines: [] };
       }
-    } else if (cur && cl.indent > 2) {
-      cur.contentLines.push({ ...cl, indent: cl.indent - 2 });
+    } else if (cur && cl.indent > baseIndent) {
+      cur.contentLines.push({ ...cl, indent: cl.indent - baseIndent });
     }
   }
   if (cur) subBlocks.push(cur);
@@ -818,6 +1014,18 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
     return label;
   }
 
+  // 链式入口解析：[A] -> [B] -> fork:/for:/par: 的入口串。
+  // 先把入口链建成普通边，返回链尾节点作为控制块的入口。
+  function resolveChainEntry(raw) {
+    const parts = raw.split('->').map(p => p.trim()).filter(Boolean);
+    if (parts.length <= 1) return ensureNodeForRef(parts[0] || raw.trim());
+    let prev = ensureNodeForRef(parts[0]);
+    for (let k = 1; k < parts.length; k++) {
+      prev = resolveTarget(prev, parts[k], '');
+    }
+    return prev;
+  }
+
   // ── 第一步：全局裸引用规范化（按->切块，智能保留控制结构） ──
   for (const line of flowLines) {
 
@@ -894,10 +1102,10 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
       i++;
       continue;
     }
-    // fork: 显式入口 [A] -> fork:
+    // fork: 显式入口 [A] -> fork:（支持链式入口 [A] -> [B] -> fork:）
     const forkMatch = text.match(/^(.+)\s*->\s*fork:$/);
     if (forkMatch) {
-      const srcLabel = ensureNodeForRef(forkMatch[1].trim());
+      const srcLabel = resolveChainEntry(forkMatch[1].trim());
       i++;
       let forkGuard = 0;
       while (i < flowLines.length && flowLines[i].indent > cl.indent) {
@@ -934,7 +1142,7 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
       const entryRaw = parMatch[1].trim();
       const condition = parMatch[2].trim();
 
-      const entryLabel = ensureNodeForRef(entryRaw);
+      const entryLabel = resolveChainEntry(entryRaw);
 
       let parLabel = 'PAR';
       let counter = 2;
@@ -1058,11 +1266,11 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
         addEdge({ srcLabel: pbLabel, tgtLabel: parOutLabel, cond: '', isBack: false });
       });
 
-      // 处理出口：同缩进的 -> [ExitNode]
+      // 处理出口：同缩进的 -> [ExitNode]（排除控制块入口 fork:/for:/par:/join:）
       if (i < flowLines.length && flowLines[i].indent === cl.indent) {
         const afterLine = normalizeSymbols(flowLines[i].text, 'flow').trim();
         const am = afterLine.match(/^->\s*(.+)$/);
-        if (am) {
+        if (am && !/\b(for|par|fork|join)\b/.test(am[1])) {
           const exitTargetRaw = am[1].trim();
           // parOutLabel 已在上方创建，这里直接使用
           const exitLabel = resolveTarget(parOutLabel, exitTargetRaw, '');
@@ -1100,7 +1308,14 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
         if (targetRaw.endsWith('->')) {
           targetRaw = targetRaw.slice(0, -2).trim();
         }
-        const tgtLabel = ensureNodeForRef(targetRaw);
+        // 支持链式目标 to [A]:ref -> [B]：sources 连链首，currentNode 走链尾
+        const parts = targetRaw.split('->').map(p => p.trim()).filter(Boolean);
+        if (parts.length === 0) throw new Error(`第 ${flowLines[i].lineNum + 1} 行: join 目标为空`);
+        const tgtLabel = ensureNodeForRef(parts[0]);
+        let tail = tgtLabel;
+        for (let k = 1; k < parts.length; k++) {
+          tail = resolveTarget(tail, parts[k], '');
+        }
         sources.forEach(s => addEdge({ srcLabel: s, tgtLabel: tgtLabel, cond: '', isBack: false }));
 
         // ═══ 将 join 信息存入目标节点的声明 ═══
@@ -1115,7 +1330,7 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
           usedLabels.add(tgtLabel);
         }
 
-        currentNode = tgtLabel;
+        currentNode = tail;
         i++;
       } else {
         throw new Error(`第 ${(flowLines[i]?.lineNum || flowLines.length) + 1} 行附近: join 缺少 to 目标`);
@@ -1131,8 +1346,8 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
       const entryRaw = forEntryMatch[1].trim();
       const condition = forEntryMatch[2].trim();
 
-      // 解析入口节点（只创建节点，不添加边）
-      const entryLabel = ensureNodeForRef(entryRaw);
+      // 解析入口节点（支持链式入口 [A] -> [B] -> for ...）
+      const entryLabel = resolveChainEntry(entryRaw);
 
       // 生成唯一的 FOR 节点标签
       let forLabel = 'FOR';
@@ -1288,7 +1503,7 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
       if (i < flowLines.length && flowLines[i].indent === cl.indent) {
         const afterLine = normalizeSymbols(flowLines[i].text, 'flow').trim();
         const am = afterLine.match(/^->\s*(.+)$/);
-        if (am) {
+        if (am && !/\b(for|par|fork|join)\b/.test(am[1])) {
           const exitTargetRaw = am[1].trim();
           // 声明 for_out 节点
           if (!nodeDecls.some(d => d.label === forOutLabel)) {
@@ -1312,6 +1527,42 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
 
 
     // ⚠️ 重要：先匹配链式连接（[label] -> ...），再匹配节点声明（[label]: ...）
+    // [label]:ref -> ... 链式（如 [AI_ATK]:ai_attack -> [AI_DONE]）
+    const dmChain = text.match(/^\[(.+?)\]:\s*(\S+)\s*->\s*(.+)$/);
+    if (dmChain) {
+      const label = dmChain[1];
+      const ref = dmChain[2].trim();
+      const existing = nodeDecls.find((d) => d.label === label);
+      if (existing) existing.ref = ref || existing.ref;
+      else nodeDecls.push({ label, ref });
+      i++;
+      // 剩余链从 label 出发（复用 chainMatch 的解析逻辑）
+      const rest = dmChain[3].trim();
+      const rawParts = rest.split('->').map((p) => p.trim()).filter((p) => p !== '');
+      const parts = [];
+      let pendingCond = null;
+      for (const part of rawParts) {
+        const ifMatch = part.match(/^if\s*\((.+)\)$/);
+        if (ifMatch) {
+          pendingCond = ifMatch[1].trim();
+        } else {
+          parts.push({ target: part, cond: pendingCond || '' });
+          pendingCond = null;
+        }
+      }
+      if (pendingCond) {
+        throw new Error(
+          `第 ${cl.lineNum + 1} 行: 条件 "if (${pendingCond})" 后面缺少目标节点 内容: "${cl.text}"`
+        );
+      }
+      let currentSrc = label;
+      for (const { target, cond } of parts) {
+        currentSrc = resolveTarget(currentSrc, target, cond);
+      }
+      currentNode = currentSrc;
+      continue;
+    }
+
     const chainMatch = text.match(/^\[(.+?)\]\s*->\s*(.*)$/);
     if (chainMatch) {
       const srcLabel = chainMatch[1];
@@ -1350,7 +1601,7 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
 
     // 单节点引用（无箭头），例如 for 内部剥箭头后只剩 [A]
     const soloNodeMatch = text.match(/^\[(.+?)\]\s*$/);
-    if (soloNodeMatch) {
+    if (soloNodeMatch && !text.includes('->') && !text.includes(':')) {
       ensureNodeForRef(`[${soloNodeMatch[1]}]`);
       i++;
       continue;
@@ -1379,7 +1630,7 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
 }
 
 export {
-  normalizeSymbols, parseFEMS, splitTopBlocks,
+  normalizeSymbols, parseFEMS, splitTopBlocks, stripComments, stripLineComments,
   parseMetaBlock, parseVarsBlock, parseCodeBlock,
   parseActorsBlock, parseMemoryOrContextBlock,
   parseActionBlock, parseModuleBlock, parseMainflowBlock,

@@ -591,29 +591,30 @@ def _parse_action_fields(block: Block) -> dict:
                         f['in_mappings'].append(InMapping(mapping_str, mapping_str))
         elif normalized_line.startswith('out:'):
             out_rest = normalized_line[len('out:'):].strip()
-            if not out_rest:
-                # 多行 out：每行独立解析，用保留字段 + 缩进判断结束
-                base_indent = len(lines[i]) - len(lines[i].lstrip())
-                j = i + 1
-                while j < len(lines):
-                    line_j = lines[j]
-                    stripped = line_j.lstrip()
-                    indent = len(line_j) - len(stripped)
-                    # 同缩进 + 二级字段关键字 → 结束
-                    if indent == base_indent and any(stripped.startswith(k) for k in _FIELD_KEYWORDS):
-                        break
-                    # 缩进小于等于当前缩进，且是一级关键字 → 结束
-                    if indent <= base_indent and any(stripped.startswith(k) for k in _TOP_KEYWORDS):
-                        break
-                    ol = normalize_symbols(lines[j].strip())
-                    if ol:
-                        f['outs'].extend(_parse_out_multi(ol))
-                    j += 1
-                i = j
-                continue
-            else:
-                # 单行 out：直接解析（逗号分割）
-                f['outs'] = _parse_out_multi(out_rest)
+            base_indent = len(lines[i]) - len(lines[i].lstrip())
+            j = i + 1
+            # 首行（若有内容）+ 后续缩进续行统一收集：
+            #   out: x += 1        （单行 + 续行）
+            #        y = {}        （缩进续行，同样生效）
+            #   out:               （纯多行模式，首行无内容）
+            if out_rest:
+                f['outs'].extend(_parse_out_multi(out_rest))
+            while j < len(lines):
+                line_j = lines[j]
+                stripped = line_j.lstrip()
+                indent = len(line_j) - len(stripped)
+                # 同缩进 + 二级字段关键字 → 结束
+                if indent == base_indent and any(stripped.startswith(k) for k in _FIELD_KEYWORDS):
+                    break
+                # 缩进小于等于当前缩进，且是一级关键字 → 结束
+                if indent <= base_indent and any(stripped.startswith(k) for k in _TOP_KEYWORDS):
+                    break
+                ol = normalize_symbols(lines[j].strip())
+                if ol:
+                    f['outs'].extend(_parse_out_multi(ol))
+                j += 1
+            i = j
+            continue
         elif line.startswith('resolve:'):
             raw = line[len('resolve:'):].strip()
             m = re.match(r'^(\S+)\(([^)]*)\)$', raw)

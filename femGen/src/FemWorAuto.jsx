@@ -41,9 +41,11 @@ function getBackendBaseUrl() {
   return `${host}:${port}`;
 }
 
-export default function FEMEditor({ plugin = false, onRun, onStop } = {}) {
+export default function FEMEditor({ plugin = false, onRun, onStop, initialScript, initialCheckpoint, initialRunning = false, onSnapshot } = {}) {
 // 插件模式：由 dsh-femwa 注入（plugin=true）——运行/停止走插件回调，
 // SSE 连插件广播路由；独立模式保留原后端调用（getBackendBaseUrl）。
+// initialScript/initialCheckpoint/initialRunning：会话恢复（刷新/重启/运行中打开）。
+// onSnapshot(fems)：画布编辑防抖后实时写会话快照（双视图同步）。
 //console.log('✅ FEMEditor 已进入渲染');
   const [locationPath, setLocationPath] = useState(['mainflow']);
   const mode =
@@ -677,8 +679,23 @@ const parOutNodeMap = useMemo(() => {
     return () => clearTimeout(timer);
   }, [saveToLocalStorage]);
 
-  // 初始化时加载状态
+  // 插件模式：画布编辑防抖 → 实时写会话快照（双视图同步，3s 防抖避免频繁生成）。
   useEffect(() => {
+    if (!plugin || typeof onSnapshot !== 'function') return;
+    const timer = setTimeout(() => {
+      try {
+        const fem = handleGraphToFemRef.current();
+        if (fem && fem.trim()) onSnapshot(fem);
+      } catch (e) {
+        console.warn('[FEMEditor] 会话快照同步失败:', e);
+      }
+    }, 3000);
+    return () => clearTimeout(timer);
+  }, [plugin, nodes, edges, flowStore, locationPath, actionStore, moduleStore, proj, onSnapshot]);
+
+  // 初始化时加载状态（插件模式跳过：画布状态按会话快照恢复，不读 localStorage）
+  useEffect(() => {
+    if (plugin) return;
     try {
       const saved = localStorage.getItem('fem_editor_state');
       if (saved) {
@@ -700,6 +717,37 @@ const parOutNodeMap = useMemo(() => {
       console.warn('加载画布状态失败:', e);
     }
   }, []); // 仅挂载时运行一次
+
+  // 插件模式会话恢复：剧本快照 → 文本到图加载画布 + 代码框；断点 → 「继续」+ 高亮。
+  // 依赖 props（session-state 异步返回后才会触发），且 props 稳定后只执行一次。
+  useEffect(() => {
+    if (!plugin) return;
+    if (initialScript && initialScript.trim().length > 0) {
+      try {
+        applyFEMText(initialScript);
+        setFemText(initialScript);
+        console.log('[FEMEditor] 已从会话快照恢复画布, 长度:', initialScript.length);
+      } catch (e) {
+        console.warn('[FEMEditor] 会话快照恢复失败:', e);
+      }
+    }
+    if (initialCheckpoint) {
+      setFlowStatus('paused'); // 按钮显示「继续」= 断点续跑
+    }
+    if (initialRunning) {
+      // 会话已在运行（比如对话窗先启动的）：立即接入实时流，按钮显示运行态。
+      setFlowStatus('running');
+      connectSse();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plugin, initialScript, initialCheckpoint, initialRunning]);
+
+  // 断点高亮：画布恢复（applyFEMText 异步 setState）完成后按 label 匹配节点。
+  useEffect(() => {
+    if (!plugin || !initialCheckpoint) return;
+    const target = (nodes || []).find((n) => n.label === initialCheckpoint);
+    if (target) setActiveNodeIds(new Set([target.id]));
+  }, [plugin, initialCheckpoint, nodes]);
 
   // Space key for panning
   useEffect(() => {
@@ -1110,7 +1158,7 @@ if (specialType === 'FOR') {
   const handleRunWorkflow = useCallback(async () => {
     console.log('[handleRunWorkflow] ====== 准备启动 ======');
     console.log('[handleRunWorkflow] flowStatus:', flowStatus);
-    if (flowStatus === 'running' || flowStatus === 'paused') return;
+    if (flowStatus === 'running') return;
     // 不用检查 API Key
     // ⚡ 运行前即时生成最新 FEM 文本（通过 ref 调用最新版，拿到同步返回值）
     console.log('[handleRunWorkflow] 运行前自动同步: 图 -> 文本');
@@ -1147,28 +1195,10 @@ if (specialType === 'FOR') {
       if (plugin) {
         // 插件模式：交给 dsh-femwa 运行（保存剧本 + 启动引擎，同一 run
         // 也驱动聊天窗角色气泡）；SSE 连插件广播路由（相对路径，同源）。
-        if (typeof onRun === 'function') await onRun(fem);
+        // 按钮语义：「运行」= reset 从头；「继续」（paused 态）= 断点续跑。
+        if (typeof onRun === 'function') await onRun(fem, { reset: flowStatus !== 'paused' });
         setRunId(null);
-        const es = new EventSource('/dsh-femwa/events');
-        eventSourceRef.current = es;
-        es.onmessage = (event) => {
-          let evt;
-          try {
-            evt = JSON.parse(event.data);
-          } catch (e) {
-            console.error('SSE parse error:', e);
-            return;
-          }
-          if (evt.type === 'heartbeat' || evt.type === 'connected') return;
-          handleWorkflowEvent(evt);
-        };
-        es.onerror = (event) => {
-          console.error('[SSE] 连接出错或关闭', event);
-          es.close();
-          eventSourceRef.current = null;
-          setFlowStatus('idle');
-          setActiveNodeIds(new Set());
-        };
+        connectSse();
         return;
       }
       // 1. 发送 FEM 脚本到后端，启动运行（独立模式）
@@ -1257,18 +1287,20 @@ const handleStopWorkflow = useCallback(async () => {
 
   // ── 继续工作流 ──
   const handleResumeWorkflow = useCallback(async () => {
-    if (!runId && !plugin) return;
+    if (plugin) {
+      // 插件模式：续跑 = 重新发起 run（插件侧自动注入 checkpoint 续跑；
+      // bridge 的 resume 是半实现，不能用于续跑）。
+      await handleRunWorkflow();
+      return;
+    }
+    if (!runId) return;
     try {
-      if (plugin) {
-        await fetch('/dsh-femwa/resume', { method: 'POST' });
-      } else {
-        await fetch(getBackendBaseUrl() + `/api/run/${runId}/resume`, { method: 'POST' });
-      }
+      await fetch(getBackendBaseUrl() + `/api/run/${runId}/resume`, { method: 'POST' });
       setFlowStatus('running');
     } catch (err) {
       console.error('继续失败:', err);
     }
-  }, [runId, plugin]);
+  }, [runId, plugin, handleRunWorkflow]);
 
   // ── 处理工作流事件 ──
 const handleWorkflowEvent = useCallback((evt) => {
@@ -1588,6 +1620,42 @@ case 'human_wait':
       default:
         console.warn('[FEM] 收到未知事件类型:', type, data);
         break;
+    }
+  }, []);
+
+  // 连接插件 SSE 广播（运行中打开标签页也实时接入；已连接则先关闭重连）。
+  const connectSse = useCallback(() => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
+    const es = new EventSource('/dsh-femwa/events');
+    eventSourceRef.current = es;
+    es.onmessage = (event) => {
+      let evt;
+      try {
+        evt = JSON.parse(event.data);
+      } catch (e) {
+        console.error('SSE parse error:', e);
+        return;
+      }
+      if (evt.type === 'heartbeat' || evt.type === 'connected') return;
+      handleWorkflowEvent(evt);
+    };
+    es.onerror = (event) => {
+      console.error('[SSE] 连接出错或关闭', event);
+      es.close();
+      eventSourceRef.current = null;
+      setFlowStatus('idle');
+      setActiveNodeIds(new Set());
+    };
+  }, [handleWorkflowEvent]);
+
+  // 卸载时关闭 SSE（切换标签页/关闭会话不残留连接）。
+  useEffect(() => () => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
     }
   }, []);
 
@@ -1939,7 +2007,6 @@ if (draggedNode.type === 'for_out' && n.id === draggedNode.forNodeId) {
 
   // Apply FEM text (from preview or import)
   function applyFEMText(text) {
-    debugger; // 打开控制台后，这里会暂停
     console.log('1. 开始解析');
     const parsed = parseFEMS(text);
     console.log('2. 解析完成', parsed);

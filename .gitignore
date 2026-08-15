@@ -19,3 +19,6 @@ femGen/*.fems
 
 # ¹éµµÇø£¨Ö»ÒÆ¶¯²»É¾³ı£©
 _archive/
+
+# esbuild è½¬è¯‘äº§ç‰©ï¼ˆæµ‹è¯•ç”¨ï¼Œå¯é‡æ–°ç”Ÿæˆï¼‰
+tests/femParser.test.mjs

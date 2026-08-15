@@ -242,7 +242,13 @@ function ProjPanel({ proj, actorNames, onChange }) {
                       'weather',
                       'web_fetch',
                     ].map((t) => {
-                      const checked = (a.tools || []).includes(t);
+                      // 布尔 tools：true=全部（全勾选），false=禁用（全不勾）；数组=白名单
+                      const toolsList = Array.isArray(a.tools)
+                        ? a.tools
+                        : (a.tools === true
+                          ? ['deep_think', 'web_search', 'shell', 'weather', 'web_fetch']
+                          : []);
+                      const checked = toolsList.includes(t);
                       return (
                         <label
                           key={t}
@@ -259,8 +265,8 @@ function ProjPanel({ proj, actorNames, onChange }) {
                             checked={checked}
                             onChange={(e) => {
                               const newTools = e.target.checked
-                                ? [...(a.tools || []), t]
-                                : (a.tools || []).filter((x) => x !== t);
+                                ? [...toolsList, t]
+                                : toolsList.filter((x) => x !== t);
                               upd({ tools: newTools });
                             }}
                           />
