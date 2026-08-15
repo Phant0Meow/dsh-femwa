@@ -201,6 +201,23 @@ function writeJson(res: ServerResponse, status: number, value: unknown): void {
   res.end(JSON.stringify(value))
 }
 
+// ── SSE broadcast（femGen 可视化运行的实时事件通道）───────────────────────
+
+/** /dsh-femwa/events 长连接集合（浏览器 EventSource）。 */
+const sseClients = new Set<ServerResponse>()
+
+/** 向所有 SSE 客户端广播一个事件（画布可视化运行按 node_name 匹配节点）。 */
+function broadcastSse(eventType: string, data: unknown): void {
+  const payload = `data: ${JSON.stringify({ type: eventType, data: data ?? {} })}\n\n`
+  for (const res of sseClients) {
+    try {
+      res.write(payload)
+    } catch {
+      sseClients.delete(res)
+    }
+  }
+}
+
 // ── FemWA bridge client (managed Python subprocess) ──────────────────────
 
 interface PendingRequest {
@@ -543,6 +560,8 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
   ctx.on('dsh-femwa/event', (eventType: string, data: unknown) => {
     const sessionId = runState.sessionId
     if (sessionId === undefined) return
+    // 可视化运行通道：原样转发引擎事件（画布按 node_name 匹配节点做高亮/详情）。
+    broadcastSse(eventType, data)
     const session = sessionsStore?.get(sessionId)
     if (session === undefined) return
     const d = (data ?? {}) as Record<string, unknown>
@@ -714,6 +733,56 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
         })
       },
     })
+    // femGen 画布控制面：pause/resume 目前对应 bridge 的半实现
+    // （pause=stop，resume 需要真实 pause 快照——README 已知限制），
+    // human-input 是完整可用的（human 节点输入）。
+    webServer.register({
+      kind: 'exact',
+      path: '/dsh-femwa/pause',
+      handler: (_req: IncomingMessage, res: ServerResponse): void => {
+        bridge.send('pause', {}, 5000).then((result) => {
+          writeJson(res, 200, { ok: true, paused: (result as { paused?: boolean } | undefined)?.paused ?? false })
+        }).catch((error: unknown) => {
+          writeJson(res, 500, { ok: false, error: String(error) })
+        })
+      },
+    })
+    webServer.register({
+      kind: 'exact',
+      path: '/dsh-femwa/resume',
+      handler: (req: IncomingMessage, res: ServerResponse): void => {
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const taskId = url.searchParams.get('taskId') ?? ''
+        bridge.send('resume', { task_id: taskId }, 5000).then((result) => {
+          writeJson(res, 200, { ok: true, resumed: (result as { resumed?: boolean } | undefined)?.resumed ?? false })
+        }).catch((error: unknown) => {
+          writeJson(res, 500, { ok: false, error: String(error) })
+        })
+      },
+    })
+    webServer.register({
+      kind: 'exact',
+      path: '/dsh-femwa/human-input',
+      handler: (req: IncomingMessage, res: ServerResponse): void => {
+        void (async () => {
+          const raw = await readBody(req) as unknown as Record<string, unknown>
+          const waitKey = typeof raw.wait_key === 'string' ? raw.wait_key : ''
+          const chatText = typeof raw.chat_text === 'string' ? raw.chat_text : ''
+          const variables = (raw.variables ?? {}) as Record<string, unknown>
+          if (waitKey.length === 0 || chatText.length === 0) {
+            writeJson(res, 400, { ok: false, error: 'wait_key and chat_text are required' })
+            return
+          }
+          const delivered = await bridge.send('human_input', {
+            wait_key: waitKey,
+            body: { chat_text: chatText, variables },
+          })
+          writeJson(res, 200, { ok: true, delivered: (delivered as { delivered?: boolean } | undefined)?.delivered ?? false })
+        })().catch((error: unknown) => {
+          writeJson(res, 500, { ok: false, error: String(error) })
+        })
+      },
+    })
     webServer.register({
       kind: 'exact',
       path: '/dsh-femwa/scripts',
@@ -765,6 +834,33 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
           ? (runState.sessionId !== undefined ? (runState.sessionActors.get(String(runState.sessionId)) ?? []) : [])
           : (runState.sessionActors.get(sessionId) ?? [])
         writeJson(res, 200, { ok: true, actors })
+      },
+    })
+    webServer.register({
+      kind: 'exact',
+      path: '/dsh-femwa/events',
+      handler: (req: IncomingMessage, res: ServerResponse): void => {
+        // SSE：引擎事件实时推送给 femGen 可视化画布（呼吸灯/节点详情/流式文本）。
+        res.writeHead(200, {
+          'content-type': 'text/event-stream',
+          'cache-control': 'no-cache',
+          connection: 'keep-alive',
+          'x-accel-buffering': 'no',
+        })
+        res.write(': connected\n\n')
+        sseClients.add(res)
+        const cleanup = (): void => { sseClients.delete(res) }
+        req.on('close', cleanup)
+        res.on('close', cleanup)
+        // 心跳注释行：防代理/浏览器把空闲连接判死。
+        const heartbeat = setInterval(() => {
+          try {
+            res.write(': ping\n\n')
+          } catch {
+            clearInterval(heartbeat)
+          }
+        }, 15_000)
+        res.on('close', () => clearInterval(heartbeat))
       },
     })
     console.log('[dsh-femwa] create-session + scripts + save-script + script + errors routes registered')
@@ -962,8 +1058,16 @@ async function runAiSubagent(
   // Watchdog starts once the child exists; every child-session event rearms
   // it. Listener is scoped to the child's session id and disposed in finally.
   armIdle()
-  const onChildEvent = (watched: Session, _event: SessionEvent): void => {
-    if (String(watched.id) === String(run.id)) armIdle()
+  const onChildEvent = (watched: Session, watchedEvent: SessionEvent): void => {
+    if (String(watched.id) !== String(run.id)) return
+    armIdle()
+    // 流式 token → 画布打字机（只转发正文增量，不转发思考/用量）。
+    if (watchedEvent.type === 'assistant/chunk') {
+      const chunk = (watchedEvent.data as { chunk?: { type?: string; text?: unknown } }).chunk
+      if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
+        broadcastSse('ai_token', { node_name: String(request.node_name ?? ''), token: chunk.text })
+      }
+    }
   }
   const disposeListener = ctx.on('session/event', onChildEvent)
   try {

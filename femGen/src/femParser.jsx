@@ -1,0 +1,1387 @@
+// ═══════════════════════════════════════════════════════════════
+// ═══ femParser.jsx ═══
+// ═══════════════════════════════════════════════════════════════
+
+import { TYPES, SPECIAL_COLORS, actionId } from './common';
+
+function normalizeSymbols(str, context = 'global') {
+  let s = str;
+  // ═══ 非 prompt 上下文：先去掉行内注释（// 和 #），再做全角替换 ═══
+  if (context !== 'prompt') {
+    // 去掉从 // 或 # 开始到行尾的所有内容（注释）
+    s = s.replace(/\/\/.*$|#.*$/gm, '');
+    // 全角符号标准化
+    s = s
+      .replace(/：/g, ':')
+      .replace(/，/g, ',')
+      .replace(/“/g, '"')
+      .replace(/”/g, '"')
+      .replace(/（/g, '(')
+      .replace(/）/g, ')')
+      .replace(/【/g, '[')
+      .replace(/】/g, ']')
+      .replace(/｜/g, '|');
+  }
+  // flow 区域额外：-- 替换为 ->
+  if (context === 'flow') {
+    s = s.replace(/--/g, '->');
+  }
+  return s;
+}
+
+function parseFEMS(text) {
+  const lines = text.split('\n');
+  const blocks = splitTopBlocks(lines);
+
+  const result = {
+    meta: {
+      name: '',
+      version: '1.0',
+      owner: '',
+      database: '',
+      session: '',
+      system_safety: '',
+      output_style: '',
+    },
+    code: [],
+    context: [],
+    memory: [],
+    vars: [],
+    actors: [],
+    actions: [],
+    modules: [],
+    mainflow: { nodeDecls: [], edges: [] },
+  };
+
+  let mainflowSketch = null; // 容错：顶层 sketch: 块（与 mainflow 同级）
+
+  for (const block of blocks) {
+    const h = block.header;
+    if (h === 'meta:') {
+      result.meta = parseMetaBlock(block.contentLines);
+    } else if (h === 'code:') {
+      result.code = parseCodeBlock(block.contentLines);
+    } else if (h === 'vars:') {
+      result.vars = parseVarsBlock(block.contentLines);
+    } else if (h === 'actors:') {
+      result.actors = parseActorsBlock(block.contentLines);
+    } else if (h.startsWith('memory ')) {
+      result.memory.push(
+        parseMemoryOrContextBlock(h, block.contentLines, 'memory')
+      );
+    } else if (h.startsWith('context ')) {
+      result.context.push(
+        parseMemoryOrContextBlock(h, block.contentLines, 'context')
+      );
+    } else if (h.startsWith('action ')) {
+      result.actions.push(parseActionBlock(h, block.contentLines));
+    } else if (h.startsWith('module ')) {
+      result.modules.push(parseModuleBlock(h, block.contentLines));
+    } else if (h === 'sketch:') {
+      // 暂存顶层草图，待 mainflow 解析后合并
+      mainflowSketch = parseLayoutBlock(block.contentLines);
+    } else if (h === 'mainflow:') {
+      result.mainflow = parseMainflowBlock(block.contentLines);
+      // 如果有与 mainflow 同级的 sketch 块，合并布局（外部覆盖内部）
+      if (mainflowSketch) {
+        result.mainflow.layout = { ...result.mainflow.layout, ...mainflowSketch };
+        mainflowSketch = null;
+      }
+    } else {
+      throw new Error(
+        `未识别的顶层块: "${h}"。期望: meta:, code:, vars:, actors:, context:, memory:, action ..., module ..., mainflow:`
+      );
+    }
+  }
+
+  // 如果 sketch 在 mainflow 之前就已经读到，但 mainflow 始终未出现，则丢弃（不报错）
+  // 如果 mainflow 已解析但之后还有 sketch 块，同样合并
+  if (mainflowSketch && result.mainflow) {
+    result.mainflow.layout = { ...result.mainflow.layout, ...mainflowSketch };
+  }
+
+  // 展平嵌套模块，为每个模块生成层级 path（从 mainflow 起）
+  const topModules = result.modules;
+  result.modules = [];
+  function flattenModules(mods, parentPath) {
+    for (const m of mods) {
+      const path = [...parentPath, m.name];
+      m.path = path;
+      result.modules.push(m);
+      if (m.subModules) {
+        flattenModules(m.subModules, path);
+        delete m.subModules; // 清理临时字段
+      }
+    }
+  }
+  flattenModules(topModules, ['mainflow']);
+
+  return result;
+}
+
+function splitTopBlocks(lines) {
+  const blocks = [];
+  let current = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    const indent = line.length - line.trimStart().length;
+
+    // 空白行：如果当前正在某个块内，保留它
+    if (!trimmed) {
+      if (current) {
+        current.contentLines.push({
+          indent,
+          text: '',
+          lineNum: i,
+          raw: line,
+        });
+      }
+      continue;
+    }
+
+    if (indent === 0) {
+      if (current) blocks.push(current);
+      current = {
+        header: normalizeSymbols(trimmed),
+        headerLineNum: i,
+        contentLines: [],
+      };
+    } else if (current) {
+      current.contentLines.push({
+        indent,
+        text: trimmed,
+        lineNum: i,
+        raw: line,
+      });
+    }
+  }
+  if (current) blocks.push(current);
+  return blocks;
+}
+
+function parseMetaBlock(cls) {
+  const meta = {};  // 不再预设空字段，全部由用户定义
+  let i = 0;
+  while (i < cls.length) {
+    const cl = cls[i];
+    // 跳过空行
+    if (!cl.text.trim()) {
+      i++;
+      continue;
+    }
+    const line = normalizeSymbols(cl.text);
+
+    // 检查是否为多行字符串定义： key = |
+    const multiMatch = line.match(/^([\w\u4e00-\u9fff]+)\s*=\s*\|$/);
+    if (multiMatch) {
+      const key = multiMatch[1];
+      i++;
+      const valueLines = [];
+      while (i < cls.length && cls[i].indent > cl.indent) {
+        valueLines.push(cls[i].text);
+        i++;
+      }
+      const value = valueLines.join('\n');
+      // 特殊字段统一命名
+      if (key === 'system_safety') {
+        meta.system_safety = value;
+      } else if (key === 'output_style') {
+        meta.output_style = value;
+      } else {
+        throw new Error(
+          `第 ${cl.lineNum + 1} 行: meta 中未识别的字段 "${key}"`
+        );
+      }
+      continue;
+    }
+
+    // 普通单行键值对
+    const m = line.match(/^([\w\u4e00-\u9fff]+)\s*=\s*(.+)$/);
+    if (!m)
+      throw new Error(
+        `第 ${cl.lineNum + 1} 行: meta 字段格式错误: "${
+          cl.text
+        }"。期望: key = value 或 key = |`
+      );
+    const [, key, val] = m;
+    let v = val.trim();
+
+    // ═══ 新增：去除首尾配对引号 & 尝试转为数字 ═══
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) {
+      v = v.slice(1, -1);
+    }
+
+    // 规范化常用字段，其他字段直接以原始键名存储
+    switch (key) {
+      case 'id':
+        meta.id = v;
+        break;
+      case 'name':
+        meta.name = v;
+        break;
+      case 'version':
+        meta.version = v;
+        break;
+      case 'owner':
+        meta.owner = String(v).replace(/^\[|\]$/g, '');
+        break;
+      case 'database':
+        meta.database = v;
+        break;
+      case 'session':
+        meta.session = v;
+        break;
+      case 'system_safety':
+        meta.system_safety = typeof v === 'string' ? v.replace(/^"|"$/g, '') : v;
+        break;
+      case 'output_style':
+        meta.output_style = typeof v === 'string' ? v.replace(/^"|"$/g, '') : v;
+        break;
+      case 'max_steps':
+        meta.max_steps = Number(v);
+        break;
+      case 'delay':
+        meta.delay = Number(v);
+        break;
+      default:
+        throw new Error(
+          `第 ${cl.lineNum + 1} 行: meta 中未识别的字段 "${key}"`
+        );
+    }
+    i++;
+  }
+
+  // ⚡ 删除所有默认值设置，直接返回解析到的字段
+  return meta;
+}
+
+function parseLayoutBlock(cls) {
+  const layout = {};
+  for (const cl of cls) {
+    const line = normalizeSymbols(cl.text);
+    const m = line.match(/^(\[.+?\])\s*=\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)$/);
+    if (m) {
+      layout[m[1]] = { dx: Math.round(parseFloat(m[2])), dy: Math.round(parseFloat(m[3])) };
+    }
+  }
+  return layout;
+}
+
+function parseVarsBlock(cls) {
+  const vars = [];
+  for (const cl of cls) {
+    if (!cl.text.trim()) continue;          // 跳过空行
+    const line = normalizeSymbols(cl.text);
+    const m = line.match(/^(@?[\w\u4e00-\u9fff]+)\s*=\s*(.*)$/);
+    if (!m)
+      throw new Error(
+        `第 ${cl.lineNum + 1} 行: vars 字段格式错误: "${
+          cl.text
+        }"。期望: varname = "value"`
+      );
+    vars.push({ name: m[1], defaultValue: m[2].trim() });
+  }
+  return vars;
+}
+
+function parseCodeBlock(cls) {
+  const code = [];
+  for (const cl of cls) {
+    if (!cl.text.trim()) continue;          // 跳过空行
+    const line = normalizeSymbols(cl.text);
+    const m = line.match(/^(@?[\w\u4e00-\u9fff]+)\s*=\s*(.*)$/);
+    if (!m)
+      throw new Error(
+        `第 ${cl.lineNum + 1} 行: code 字段格式错误: "${
+          cl.text
+        }"。期望: name = value`
+      );
+    let val = m[2].trim();
+    // 如果格式为 file:"xxx"，只取内部路径
+    const fm = val.match(/^file:"(.*)"$/);
+    if (fm) val = fm[1];
+    code.push({ name: m[1], value: val });
+  }
+  return code;
+}
+
+function parseActorsBlock(cls) {
+  const actors = [];
+  for (const cl of cls) {
+    if (!cl.text.trim()) continue;          // 跳过空行
+    const line = normalizeSymbols(cl.text);
+    const prefixMatch = line.match(
+      /^(ai|human)\s+(@?[\w\u4e00-\u9fff]+)\s*=\s*(.*)$/
+    );
+    if (!prefixMatch)
+      throw new Error(
+        `第 ${cl.lineNum + 1} 行: actors 格式错误: "${
+          cl.text
+        }"。期望: ai|human @name = soul:X, source:Y, tools:[...]`
+      );
+    const type = prefixMatch[1];
+    const name = prefixMatch[2];
+    const rest = prefixMatch[3];
+
+    // 初始化字段（全部 null 表示未设置，最终再给默认值）
+    let soul = null;
+    let source = null;
+    let tools = null;
+
+    // 分割属性部分：逗号或空格分隔均可，但 tools 中有逗号，所以用逗号分割再处理
+    const parts = rest.split(',').map(p => p.trim()).filter(Boolean);
+    for (const part of parts) {
+      if (part.startsWith('soul:')) {
+        const val = part.slice(5).trim();
+        if (!val) throw new Error(`第 ${cl.lineNum + 1} 行: soul 字段缺少值，例如 soul:1`);
+        soul = val;
+      } else if (part.startsWith('source:')) {
+        const val = part.slice(7).trim();
+        if (!val) throw new Error(`第 ${cl.lineNum + 1} 行: source 字段缺少值，例如 source:01A`);
+        source = val;
+      } else if (part.startsWith('tools')) {
+        // 允许 tools = [...] 或 tools:[...]
+        let toolsStr = part.replace(/^tools\s*=\s*/, '').trim();
+        if (toolsStr.startsWith('[') && toolsStr.endsWith(']')) {
+          toolsStr = toolsStr.slice(1, -1);
+          tools = toolsStr.split(',').map(s => s.trim()).filter(Boolean);
+        } else {
+          throw new Error(`第 ${cl.lineNum + 1} 行: tools 格式错误，应为 tools = [tool1, tool2]`);
+        }
+      } else {
+        // 其他字段直接报错
+        throw new Error(
+          `第 ${cl.lineNum + 1} 行: 不支持的字段 "${part}"。合法字段: soul, source, tools`
+        );
+      }
+    }
+
+    // 最后赋予默认值（不兜底修改原值）
+    if (soul === null) soul = '0';    // ai 默认 soul=1，但此处统一默认 0，实际逻辑按需调整
+    if (source === null) source = '';
+    if (tools === null) tools = [];
+
+    actors.push({ type, name, soul, source, tools });
+  }
+  return actors;
+}
+
+function parseMemoryOrContextBlock(header, cls, blockType) {
+  // 解析 memory name(fileRef): 或 context name(fileRef):
+  const hm = header.match(
+    new RegExp(`^${blockType}\\s+([\\w\\u4e00-\\u9fff]+)\\((.+?)\\):$`)
+  );
+  if (!hm)
+    throw new Error(
+      `${blockType} 声明格式错误: "${header}"。期望: ${blockType} name(fileRef):`
+    );
+  const block = {
+    name: hm[1],
+    fileRef: hm[2],
+    in: '',
+    out: '',
+  };
+  for (const cl of cls) {
+    if (!cl.text.trim()) continue;          // 跳过空行
+    const line = normalizeSymbols(cl.text);
+    if (line.startsWith('in:')) {
+      const after = line.slice(3).trim();
+      block.in =
+        after ||
+        cls
+          .filter((l) => l.indent > cl.indent)
+          .map((l) => normalizeSymbols(l.text))
+          .join('\n');
+    } else if (line.startsWith('out:')) {
+      const after = line.slice(4).trim();
+      block.out =
+        after ||
+        cls
+          .filter((l) => l.indent > cl.indent)
+          .map((l) => normalizeSymbols(l.text))
+          .join(', ');
+    }
+  }
+  return block;
+}
+
+function parseActionBlock(header, cls) {
+  // 先标准化 header
+  const normalizedHeader = normalizeSymbols(header);
+  const hm = normalizedHeader.match(
+    /^action\s+([\w\u4e00-\u9fff]+)\s+(@[\w\u4e00-\u9fff]+)(?:\((@?[\w\u4e00-\u9fff.]+)\))?:$/
+  );
+  if (!hm)
+    throw new Error(
+      `Action 声明格式错误: "${header}"。期望: action name @type(@actor):`
+    );
+  const action = {
+    name: hm[1],
+    executorType: hm[2].replace('@', ''),
+    executorActor: hm[3] || '',
+    prompt: '',
+    resolve: '',
+    scope: '',
+    outVars: '',
+    inMappings: '',
+    memory: '',
+    context: '',
+  };
+
+  let i = 0;
+  while (i < cls.length) {
+    const cl = cls[i];
+
+    // ★ 非 prompt 上下文：跳过空白行
+    const isPromptContext =
+      cl.text.startsWith('prompt:') ||
+      cl.text.startsWith('showprompt:') ||
+      (i > 0 &&
+        (cls[i - 1].text === 'prompt: |' || cls[i - 1].text === 'showprompt: |') &&
+        cl.indent > cls[i - 1].indent);
+
+    if (!isPromptContext && !cl.text.trim()) {
+      i++;
+      continue;
+    }
+
+    const line = isPromptContext ? cl.text : normalizeSymbols(cl.text);
+    if (line === 'prompt: |') {
+      i++;
+      const pl = [];
+      while (i < cls.length && cls[i].indent > cl.indent) {
+        pl.push(cls[i].text);
+        i++;
+      }
+        action.prompt = pl.join('\n');
+        continue;
+      }
+      if (line.startsWith('prompt:') && !line.endsWith('|')) {
+        const after = line.slice(7).trim();
+        action.prompt = after;
+        i++;
+        continue;
+      }
+      if (line === 'showprompt: |') {
+        i++;
+        const spl = [];
+        while (i < cls.length && cls[i].indent > cl.indent) {
+          spl.push(cls[i].text);
+          i++;
+        }
+        action.showprompt = spl.join('\n');
+        continue;
+      }
+      if (line.startsWith('showprompt:')) {
+        const after = line.slice(11).trim();
+        action.showprompt = after;
+        i++;
+        continue;
+      }
+      if (line.startsWith('in:')) {
+      const after = line.slice(3).trim();
+      if (after) {
+        action.inMappings = after;
+        i++; // 单行模式必须推进索引，否则死循环
+      } else {
+        i++;
+        const il = [];
+        let guard = 0;
+        while (i < cls.length && cls[i].indent > cl.indent) {
+          if (++guard > 500)
+            throw new Error(`第 ${cl.lineNum + 1} 行: in 字段解析陷入死循环`);
+          il.push(normalizeSymbols(cls[i].text));
+          i++;
+        }
+        action.inMappings = il.join('\n');
+      }
+      continue;
+    }
+    if (line.startsWith('out:')) {
+      const after = line.slice(4).trim();
+      if (after) {
+        action.outVars = after;
+        i++; // 单行模式必须推进索引
+      } else {
+        i++;
+        const ol = [];
+        while (i < cls.length && cls[i].indent > cl.indent) {
+          ol.push(normalizeSymbols(cls[i].text));
+          i++;
+        }
+action.outVars = ol.join('\n');
+      }
+      continue;
+    }
+    if (line.startsWith('scope:')) {
+      action.scope = line.slice(6).trim();
+      i++;
+      continue;
+    }
+    if (line.startsWith('memory:')) {
+      action.memory = line.slice(7).trim();
+      i++;
+      continue;
+    }
+    if (line.startsWith('context:')) {
+      action.context = line.slice(8).trim();
+      i++;
+      continue;
+    }
+    if (line.startsWith('resolve:')) {
+      action.resolve = line.slice(8).trim();
+      i++;
+      continue;
+    }
+    throw new Error(
+      `第 ${cl.lineNum + 1} 行: 未识别的 action 子字段: "${
+        cl.text
+      }"。合法: prompt:, in:, out:, scope:, memory:, context:, resolve:`
+    );
+  }
+  return action;
+}
+
+function parseModuleBlock(header, cls) {
+  const hm = header.match(/^module\s+([\w\u4e00-\u9fff]+):$/);
+  if (!hm)
+    throw new Error(`Module 声明格式错误: "${header}"。期望: module Name:`);
+  const mod = {
+    name: hm[1],
+    meta: {},
+    code: [],
+    vars: [],
+    actions: [],
+    nodeDecls: [],
+    edges: [],
+  };
+
+  // Split sub-blocks at indent 2
+  const subBlocks = [];
+  let cur = null;
+  for (const cl of cls) {
+    // 跳过空行，防止生成空 header 的子块
+    if (!cl.text.trim()) continue;
+
+    if (cl.indent === 2) {
+      if (cur) subBlocks.push(cur);
+      const headerText = cl.text.trim();
+      if (headerText.startsWith('//')) {
+        cur = null;
+      } else {
+        cur = { header: cl.text, contentLines: [] };
+      }
+    } else if (cur && cl.indent > 2) {
+      cur.contentLines.push({ ...cl, indent: cl.indent - 2 });
+    }
+  }
+  if (cur) subBlocks.push(cur);
+
+  for (const sb of subBlocks) {
+    const hdr = normalizeSymbols(sb.header);
+    if (hdr === 'vars:') {
+      mod.vars = parseVarsBlock(sb.contentLines);
+    } else if (hdr === 'meta:') {
+      mod.meta = parseMetaBlock(sb.contentLines);
+    } else if (hdr === 'code:') {
+      mod.code = parseCodeBlock(sb.contentLines);
+    } else if (hdr.startsWith('action ')) {
+      mod.actions.push(
+        parseActionBlock(normalizeSymbols(sb.header), sb.contentLines)
+      );
+    } else if (hdr === 'flow:') {
+      const { nodeDecls, edges } = parseFlowSection(sb.contentLines);
+      mod.nodeDecls = nodeDecls;
+      mod.edges = edges;
+    } else if (hdr === 'sketch:') {
+      mod.layout = parseLayoutBlock(sb.contentLines);
+    } else if (hdr.startsWith('module ')) {
+      // 递归解析嵌套子模块
+      const subMod = parseModuleBlock(hdr, sb.contentLines);
+      if (!mod.subModules) mod.subModules = [];
+      mod.subModules.push(subMod);
+    } else {
+      throw new Error(
+        `Module 内未识别的子块: "${sb.header}"。合法: vars:, meta:, code:, action ..., module ..., flow:`
+      );
+    }
+  }
+  return mod;
+}
+
+function parseMainflowBlock(cls) {
+  // 计算最小缩进（跳过空行和注释）
+  const nonCommentLines = cls.filter(l => {
+    const t = normalizeSymbols(l.text).trim();
+    return t && !t.startsWith('//') && !t.startsWith('#');
+  });
+  if (nonCommentLines.length === 0) {
+    return { nodeDecls: [], edges: [], layout: {} };
+  }
+  const baseIndent = Math.min(...nonCommentLines.map(l => l.indent));
+
+  // 按 baseIndent 分组（mainflow 内部子块）
+  const groups = [];
+  let currentGroup = null;
+  for (const cl of cls) {
+    if (cl.indent === baseIndent) {
+      if (currentGroup) groups.push(currentGroup);
+      currentGroup = { header: cl, lines: [] };
+    } else if (currentGroup && cl.indent > baseIndent) {
+      currentGroup.lines.push(cl);
+    }
+    // 缩进小于 baseIndent 的异常行忽略
+  }
+  if (currentGroup) groups.push(currentGroup);
+
+  let flowLines = [];
+  let layout = {};
+
+  for (const group of groups) {
+    const headerText = normalizeSymbols(group.header.text);
+    if (headerText === 'sketch:') {
+      // 收集 sketch 块内的坐标行
+      layout = parseLayoutBlock(group.lines);
+    } else {
+      // 其他行（节点声明、连线）原样放入 flowLines
+      flowLines.push(group.header);
+      flowLines.push(...group.lines);
+    }
+  }
+
+  // 如果没有分组（所有行缩进相同），则直接作为 flow 行
+  if (groups.length === 0) {
+    flowLines = cls;
+  }
+
+  const result = parseFlowSection(flowLines);
+  result.layout = layout;
+  return result;
+}
+
+function parseFlowSection(flowLines, existingLabels) {
+
+    console.log('parseFlowSection 被调用，flowLines:');
+
+  const nodeDecls = [];
+  const edges = [];
+  let currentNode = null;
+  const usedLabels = new Set(existingLabels || []);
+
+  const addEdge = (edge) => {
+    const newCond = (edge.cond || '').trim();
+    console.log(`[DEBUG] addEdge: src="${edge.srcLabel}" -> tgt="${edge.tgtLabel}", cond="${newCond}", isBack=${edge.isBack}`);
+
+    const existing = edges.filter(
+      (e) => e.srcLabel === edge.srcLabel && e.tgtLabel === edge.tgtLabel
+    );
+    console.log(`[DEBUG] 已有同src→tgt边数: ${existing.length}, 现有cond列表: [${existing.map(e => JSON.stringify((e.cond||'').trim())).join(', ')}]`);
+
+    // Case 0: 该 src→tgt 无任何已有边 → 直接加入
+    if (existing.length === 0) {
+      console.log(`[addEdge] 无冲突, 直接加入`);
+      edges.push(edge);
+      return;
+    }
+
+    // 查找完全相同的 cond
+    const exactMatch = existing.find((e) => (e.cond || '').trim() === newCond);
+    if (exactMatch) {
+      console.log(`[addEdge] 完全相同 cond "${newCond}" 已存在, 跳过新边`);
+      return;
+    }
+
+    const newIsConditional = newCond !== '';
+    const hasAnyConditional = existing.some((e) => (e.cond || '').trim() !== '');
+    const allUnconditional = existing.every((e) => (e.cond || '').trim() === '');
+    console.log(`[DEBUG] newIsConditional=${newIsConditional}, hasAnyConditional=${hasAnyConditional}, allUnconditional=${allUnconditional}`);
+
+    // 规则2a: 新边无条件，已有中存在有条件边 → 丢弃新边（保留已有的条件边）
+    if (!newIsConditional && hasAnyConditional) {
+      const keptCond = existing.find(e => (e.cond || '').trim() !== '').cond;
+      console.log(`[addEdge] 规则2: 新边无条件，已有条件边 "${(keptCond||'').trim()}" → 丢弃新边`);
+      return;
+    }
+
+    // 规则2b: 新边有条件，已有全无条件 → 删除已有无条件边，加入新条件边
+    if (newIsConditional && allUnconditional) {
+      console.log(`[addEdge] 规则2: 新边有条件 "${newCond}"，已有全无条件 → 删除已有无条件边，加入新条件边`);
+      const indicesToRemove = existing
+        .map(e => edges.indexOf(e))
+        .filter(i => i !== -1)
+        .sort((a, b) => b - a);
+      for (const idx of indicesToRemove) {
+        edges.splice(idx, 1);
+      }
+      edges.push(edge);
+      return;
+    }
+
+    // 规则4: 新边有条件，已有也有条件，且条件不同 → 报错
+    if (newIsConditional && hasAnyConditional) {
+      const existingConds = existing.map(e => (e.cond || '').trim());
+      throw new Error(
+        `边冲突: "${edge.srcLabel}" → "${edge.tgtLabel}" 已存在条件边 (条件: "${existingConds.join('", "')}"),` +
+        ` 新边条件为 "${newCond}"。同一 src→tgt 不允许同时存在两条不同条件的边，请检查流程结构`
+      );
+    }
+
+    // 兜底: 新边无条件，已有也全无条件 → 实际上被 exactMatch 拦住了，不会走到这里
+    console.log(`[addEdge] 兜底: 都无条件 (${existing.length}条已有), 加入`);
+    edges.push(edge);
+  };
+  // 根据裸引用获取或创建节点标签，不产生边
+function ensureNodeForRef(ref) {
+    console.log('ensureNodeForRef 被调用:', ref);
+  if (ref.includes('->')) {
+    console.trace('异常节点引用（含 ->）:', ref);
+    throw new Error(`ensureNodeForRef 收到非法引用: "${ref}"`);
+  }
+    const trimmed = ref.trim();
+    const bracketMatch = trimmed.match(/^\[(.+)\]$/);
+    if (bracketMatch) {
+      const label = bracketMatch[1];
+      if (!usedLabels.has(label) && !nodeDecls.some(d => d.label === label)) {
+        nodeDecls.push({ label, ref: '' });
+        usedLabels.add(label);
+      }
+      return label;
+    }
+    const inlineMatch = trimmed.match(/^\[(.+?)\]:\s*(.*)$/);
+    if (inlineMatch) {
+      const label = inlineMatch[1];
+      const refVal = inlineMatch[2].trim();
+      if (!usedLabels.has(label) && !nodeDecls.some(d => d.label === label)) {
+        nodeDecls.push({ label, ref: refVal });
+        usedLabels.add(label);
+      }
+      return label;
+    }
+    let baseName = trimmed.startsWith('&') ? trimmed.substring(1) : trimmed;
+    baseName = baseName.replace(/\(.*$/, '').trim();
+    let label = baseName;
+    let counter = 2;
+    while (usedLabels.has(label) || nodeDecls.some(d => d.label === label)) {
+      label = `${baseName}_${counter}`;
+      counter++;
+    }
+    nodeDecls.push({ label, ref: trimmed });
+    usedLabels.add(label);
+    return label;
+  }
+
+  // 统一解析目标（支持 [label]、[label]:ref、actionName、&module 等）
+  function resolveTarget(srcLabel, targetRaw, cond) {
+console.log('resolveTarget:', srcLabel, '->', targetRaw, 'cond:', cond);
+console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", cond="${cond}"`);
+    if (targetRaw == null) {
+      console.trace('resolveTarget 收到空 targetRaw，srcLabel:', srcLabel);
+      throw new Error(`resolveTarget 收到空 targetRaw，srcLabel: ${srcLabel}`);
+    }
+    const trimmed = targetRaw.trim().replace(/：/g, ':');
+    const inlineMatch = trimmed.match(/^\[(.+?)\]:\s*(.*)$/);
+    if (inlineMatch) {
+      const label = inlineMatch[1];
+      const ref = inlineMatch[2].trim();
+      if (!usedLabels.has(label) && !nodeDecls.some(d => d.label === label)) {
+        nodeDecls.push({ label, ref });
+        usedLabels.add(label);
+      }
+      addEdge({ srcLabel, tgtLabel: label, cond, isBack: false });
+      return label;
+    }
+
+    const bracketMatch = trimmed.match(/^\[(.+)\]$/);
+    if (bracketMatch) {
+      const label = bracketMatch[1];
+      if (!usedLabels.has(label) && !nodeDecls.some(d => d.label === label)) {
+        nodeDecls.push({ label, ref: '' });
+        usedLabels.add(label);
+      }
+      addEdge({ srcLabel, tgtLabel: label, cond, isBack: false });
+      return label;
+    }
+
+    // 普通引用
+    let nodeLabel = trimmed.startsWith('&') ? trimmed.substring(1) : trimmed;
+    const baseName = nodeLabel.replace(/\(.*$/, '').trim();
+    let label = baseName;
+    let counter = 2;
+    while (usedLabels.has(label) || nodeDecls.some(d => d.label === label)) {
+      label = `${baseName}_${counter}`;
+      counter++;
+    }
+    nodeDecls.push({ label, ref: trimmed.trim() });
+    usedLabels.add(label);
+    addEdge({ srcLabel, tgtLabel: label, cond, isBack: false });
+    return label;
+  }
+
+  // ── 第一步：全局裸引用规范化（按->切块，智能保留控制结构） ──
+  for (const line of flowLines) {
+
+    let t = normalizeSymbols(line.text, 'flow');
+    console.log('规范化前:', line.text);
+    // 按 -> 切割成块
+    const parts = t.split('->').map(p => {
+      let s = p.trim();
+      if (!s) return '';
+
+      // 已经是 [label] 或 [label]:ref → 原样
+      if (s.startsWith('[')) return s;
+
+      // 包含冒号的定义式（如 god:god_announce） → 原样
+      if (/^[^:]+\s*:\s*.+/.test(s)) return s;
+
+      // 如果块内包含控制流关键字或括号 → 整块原样保留
+      if (
+        /\b(if|for|while|fork|par|join|in|to|all)\b/.test(s) ||
+        /[()]/.test(s)
+      ) {
+        return s;
+      }
+
+      // &module → 转成 [module]
+      if (s.startsWith('&')) {
+        const label = ensureNodeForRef(s);
+        return `[${label}]`;
+      }
+
+      // 纯标识符（如 tally, nextDay）→ 转成 [label]
+      if (/^[a-zA-Z_]\w*$/.test(s)) {
+        const label = ensureNodeForRef(s);
+        return `[${label}]`;
+      }
+
+      // 其他未知结构，原样保留（安全）
+      return s;
+    });
+
+    // 用 ' -> ' 重新拼接（保证后续正则 100% 命中）
+    line.text = parts.join(' -> ');
+    console.log('规范化后:', line.text);
+  }
+
+  let i = 0;
+  let loopGuard = 0;
+  while (i < flowLines.length) {
+
+    if (++loopGuard > flowLines.length * 20) {
+      throw new Error(`第 ${flowLines[i]?.lineNum || i} 行附近: 流程解析陷入死循环`);
+    }
+    const cl = flowLines[i];
+    if (!cl) break;
+    let text = normalizeSymbols(cl.text, 'flow').trim();
+    console.log('>>> LINE', cl.lineNum+1, JSON.stringify(text));
+
+    // 跳过空行和注释
+    if (!text || text.startsWith('//')) {
+      i++;
+      continue;
+    }
+
+    // 跳过 // 注释行
+    if (text.startsWith('//')) { i++; continue; }
+
+    // 注释
+    if (text.startsWith('#')) {
+      const fm = text.match(/^#\s*for loop\s*->\s*\[(.+?)\]\s+while\s+(.+)$/);
+      if (fm) {
+        if (!currentNode) throw new Error(`第 ${cl.lineNum + 1} 行: for 循环注释缺少上游节点`);
+        addEdge({ srcLabel: currentNode, tgtLabel: fm[1], cond: fm[2], isBack: true });
+      }
+      i++;
+      continue;
+    }
+    // fork: 显式入口 [A] -> fork:
+    const forkMatch = text.match(/^(.+)\s*->\s*fork:$/);
+    if (forkMatch) {
+      const srcLabel = ensureNodeForRef(forkMatch[1].trim());
+      i++;
+      let forkGuard = 0;
+      while (i < flowLines.length && flowLines[i].indent > cl.indent) {
+        if (++forkGuard > 500) throw new Error(`fork 分支解析死循环`);
+        const rawLine = flowLines[i].text;
+        const bl = normalizeSymbols(rawLine, 'flow').trim();
+        // 分支行：-> if (cond) -> 目标  或  -> 目标 -> 目标2 ...
+        const bm = bl.match(/^->\s*(?:if\s*\((.+?)\)\s*->\s*)?(.+)$/);
+        if (bm) {
+          const cond = bm[1] || '';
+          const rest = bm[2].trim();
+          // 把剩余部分当链式解析，从 srcLabel 出发
+          const parts = rest.split('->').map(p => p.trim()).filter(p => p !== '');
+          if (parts.length === 0) throw new Error(`第 ${flowLines[i].lineNum + 1} 行: fork 分支缺少目标`);
+          let curSrc = srcLabel;
+          let first = true;
+          for (const part of parts) {
+            curSrc = resolveTarget(curSrc, part, first ? cond : '');
+            first = false;
+          }
+        } else {
+          throw new Error(`第 ${flowLines[i].lineNum + 1} 行: fork 分支格式错误: "${rawLine}"`);
+        }
+        i++;
+      }
+      continue;
+    }
+
+
+
+    // par 循环（与 for 完全相同的解析，但特殊类型为 PAR）
+    const parMatch = text.match(/^(.+)\s*->\s*par\s+(.+):$/);
+    if (parMatch) {
+      const entryRaw = parMatch[1].trim();
+      const condition = parMatch[2].trim();
+
+      const entryLabel = ensureNodeForRef(entryRaw);
+
+      let parLabel = 'PAR';
+      let counter = 2;
+      while (nodeDecls.some(d => d.label === parLabel)) {
+        parLabel = `PAR_${counter}`;
+        counter++;
+      }
+      const parNodeLabel = parLabel;
+      const parOutLabel = parLabel + '_out';
+
+      nodeDecls.push({
+        label: parNodeLabel,
+        ref: '',
+        specialType: 'PAR',
+        forCondition: condition,
+      });
+
+      // 立即创建 par_out 节点（确保无论是否有出口行都存在）
+      if (!nodeDecls.some(d => d.label === parOutLabel)) {
+        nodeDecls.push({
+          label: parOutLabel,
+          ref: '',
+          specialType: 'PAR_OUT',
+          forNodeId: parNodeLabel,
+        });
+      }
+
+      addEdge({ srcLabel: entryLabel, tgtLabel: parNodeLabel, cond: '', isBack: false });
+
+      i++; // 跳过 par 行
+
+      const rawBodyLines = [];
+      while (i < flowLines.length && flowLines[i].indent > cl.indent) {
+        rawBodyLines.push(flowLines[i]);
+        i++;
+      }
+
+      if (rawBodyLines.length === 0) {
+        throw new Error(`第 ${cl.lineNum + 1} 行: par 块不能为空`);
+      }
+
+      const pendingBackNodes = [];
+      const cleanBodyLines = [];
+
+      for (const bl of rawBodyLines) {
+        let textBody = normalizeSymbols(bl.text, 'flow').trim();
+        let lastNodeInLine = null;
+
+        if (textBody.startsWith('->')) {
+          const restAfterStart = textBody.substring(2).trim();
+          const ifMatch = restAfterStart.match(/^if\s*\((.+?)\)\s*->\s*(.*)$/);
+          let startCond = '';
+          if (ifMatch) {
+            startCond = ifMatch[1].trim();
+            textBody = ifMatch[2].trim();
+          } else {
+            textBody = restAfterStart;
+          }
+          const parts = textBody.split('->').map(x => x.trim()).filter(Boolean);
+          if (!parts.length) {
+            throw new Error(`第 ${bl.lineNum + 1} 行: par 内部行首 -> 后面缺少目标`);
+          }
+          const firstPart = parts[0];
+          const tgtLabel = resolveTarget(parNodeLabel, firstPart, startCond);
+          lastNodeInLine = tgtLabel;
+        }
+
+        let endsWithArrow = false;
+        if (textBody.endsWith('->')) {
+          textBody = textBody.slice(0, -2).trim();
+          endsWithArrow = true;
+        }
+
+        if (textBody) {
+          const parts = textBody.split('->').map(p => p.trim()).filter(p => p !== '');
+          if (parts.length > 0) {
+            const lastPart = parts[parts.length - 1];
+            const labelMatch = lastPart.match(/^\[(.+?)\]/);
+            if (labelMatch) {
+              lastNodeInLine = labelMatch[1];
+            } else {
+              lastNodeInLine = ensureNodeForRef(lastPart);
+            }
+          }
+        } else if (!lastNodeInLine) {
+          throw new Error(`第 ${bl.lineNum + 1} 行: par 内部行缺少节点`);
+        }
+
+        if (endsWithArrow && lastNodeInLine) {
+          pendingBackNodes.push(lastNodeInLine);
+        }
+
+        if (textBody) {
+          cleanBodyLines.push({
+            ...bl,
+            text: textBody,
+          });
+        }
+      }
+
+      if (cleanBodyLines.length > 0) {
+        const minIndent = Math.min(...cleanBodyLines.map(l => l.indent));
+        const normalizedLines = cleanBodyLines.map(l => ({
+          ...l,
+          indent: l.indent - minIndent + 2,
+        }));
+        const { nodeDecls: bodyDecls, edges: bodyEdges } = parseFlowSection(
+          normalizedLines,
+          [...usedLabels]
+        );
+        bodyDecls.forEach(d => {
+          if (!nodeDecls.some(existing => existing.label === d.label)) {
+            nodeDecls.push(d);
+          }
+        });
+        bodyEdges.forEach(be => addEdge(be));
+      }
+
+      // 内部路径末端连向 par_out（不再是 PAR 自身）
+      pendingBackNodes.forEach(pbLabel => {
+        addEdge({ srcLabel: pbLabel, tgtLabel: parOutLabel, cond: '', isBack: false });
+      });
+
+      // 处理出口：同缩进的 -> [ExitNode]
+      if (i < flowLines.length && flowLines[i].indent === cl.indent) {
+        const afterLine = normalizeSymbols(flowLines[i].text, 'flow').trim();
+        const am = afterLine.match(/^->\s*(.+)$/);
+        if (am) {
+          const exitTargetRaw = am[1].trim();
+          // parOutLabel 已在上方创建，这里直接使用
+          const exitLabel = resolveTarget(parOutLabel, exitTargetRaw, '');
+          i++;
+        }
+      }
+
+      currentNode = parOutLabel;
+      continue;
+    }
+
+    // join(all):
+    const jm = text.match(/^join\((\w+)\):$/);
+    if (jm) {
+      const joinParam = jm[1]; // 保留用户写的参数，如 "all", "1", "any"
+      i++;
+      const sources = [];
+      while (i < flowLines.length && !flowLines[i].text.trim().startsWith('to ')) {
+        const rawLine = flowLines[i].text;
+        const srcLine = rawLine.trim();
+        if (!srcLine.endsWith('->')) {
+          throw new Error(`第 ${flowLines[i].lineNum + 1} 行: join 内部每行必须以 -> 结尾。当前行: "${rawLine}"`);
+        }
+        const sm = srcLine.match(/^\[(.+?)\]\s*->$/);
+        if (sm) {
+          sources.push(sm[1]);
+        } else {
+          throw new Error(`第 ${flowLines[i].lineNum + 1} 行: join 源节点格式错误，期望 [节点名] ->，实际: "${rawLine}"`);
+        }
+        i++;
+      }
+      if (i < flowLines.length && flowLines[i].text.trim().startsWith('to ')) {
+        let targetRaw = flowLines[i].text.trim().slice(3).trim();
+        if (!targetRaw) throw new Error(`第 ${flowLines[i].lineNum + 1} 行: join 目标为空`);
+        if (targetRaw.endsWith('->')) {
+          targetRaw = targetRaw.slice(0, -2).trim();
+        }
+        const tgtLabel = ensureNodeForRef(targetRaw);
+        sources.forEach(s => addEdge({ srcLabel: s, tgtLabel: tgtLabel, cond: '', isBack: false }));
+
+        // ═══ 将 join 信息存入目标节点的声明 ═══
+        const tgtDecl = nodeDecls.find(d => d.label === tgtLabel);
+        if (tgtDecl) {
+          if (!tgtDecl.joinEntries) tgtDecl.joinEntries = [];
+          tgtDecl.joinEntries.push({ sources: sources.slice(), param: joinParam });
+        } else {
+          // ensureNodeForRef 应该已创建，但以防万一手动补
+          const newDecl = { label: tgtLabel, ref: '', joinEntries: [{ sources: sources.slice(), param: joinParam }] };
+          nodeDecls.push(newDecl);
+          usedLabels.add(tgtLabel);
+        }
+
+        currentNode = tgtLabel;
+        i++;
+      } else {
+        throw new Error(`第 ${(flowLines[i]?.lineNum || flowLines.length) + 1} 行附近: join 缺少 to 目标`);
+      }
+      continue;
+    }
+
+
+
+    // for 循环新语法: [A] -> for 条件:
+    const forEntryMatch = text.match(/^(.+)\s*->\s*for\s+(.+):$/);
+    if (forEntryMatch) {
+      const entryRaw = forEntryMatch[1].trim();
+      const condition = forEntryMatch[2].trim();
+
+      // 解析入口节点（只创建节点，不添加边）
+      const entryLabel = ensureNodeForRef(entryRaw);
+
+      // 生成唯一的 FOR 节点标签
+      let forLabel = 'FOR';
+      let counter = 2;
+      while (nodeDecls.some(d => d.label === forLabel)) {
+        forLabel = `FOR_${counter}`;
+        counter++;
+      }
+      const forNodeLabel = forLabel;
+      const forOutLabel = forLabel + '_out';
+
+      // 声明 FOR 节点
+      nodeDecls.push({
+        label: forNodeLabel,
+        ref: '',
+        specialType: 'FOR',
+        forCondition: condition,
+      });
+
+      // 入口边: entryLabel -> FOR
+      addEdge({ srcLabel: entryLabel, tgtLabel: forNodeLabel, cond: '', isBack: false });
+
+      i++; // 跳过 for 行
+
+      // 收集缩进大于 for 行的内部行
+      const rawBodyLines = [];
+      while (i < flowLines.length && flowLines[i].indent > cl.indent) {
+        rawBodyLines.push(flowLines[i]);
+        i++;
+      }
+
+      if (rawBodyLines.length === 0) {
+        throw new Error(`第 ${cl.lineNum + 1} 行: for 块不能为空`);
+      }
+
+      // ---------- 剥箭头预处理 ----------
+      const pendingBackNodes = []; // 需要回连/连出口的节点 label
+      const cleanBodyLines = [];   // 剥除箭头后的行（用于递归解析）
+
+      for (const bl of rawBodyLines) {
+        let textBody = normalizeSymbols(bl.text, 'flow').trim();
+        let lastNodeInLine = null; // 记录该行最右节点
+
+        // 1. 处理行首箭头：-> if (cond) -> target 或 -> target ...
+        if (textBody.startsWith('->')) {
+          const restAfterStart = textBody.substring(2).trim();
+          const ifMatch = restAfterStart.match(/^if\s*\((.+?)\)\s*->\s*(.*)$/);
+          let startCond = '';
+          if (ifMatch) {
+            startCond = ifMatch[1].trim();
+            textBody = ifMatch[2].trim();
+          } else {
+            textBody = restAfterStart;
+          }
+          // 提取第一个目标节点（仅用于生成 FOR->node 边，不截断 textBody）
+          const parts =
+            textBody
+              .split('->')
+              .map(x => x.trim())
+              .filter(Boolean);
+
+          if (!parts.length) {
+            throw new Error(`第 ${bl.lineNum + 1} 行: for 内部行首 -> 后面缺少目标`);
+          }
+
+          const firstPart = parts[0];
+
+          const tgtLabel =
+            resolveTarget(
+              forNodeLabel,
+              firstPart,
+              startCond
+            );
+
+          lastNodeInLine = tgtLabel;
+          // 注意：textBody 保持不变，继续包含完整链式，以便后续行尾箭头处理和 cleanBodyLines 解析
+        }
+
+        // 2. 处理行尾箭头
+        let endsWithArrow = false;
+        if (textBody.endsWith('->')) {
+          textBody = textBody.slice(0, -2).trim();
+          endsWithArrow = true;
+        }
+
+        // 3. 找出该行的最右节点（用于 pendingBackNodes）
+        if (textBody) {
+          // 从 textBody 中提取最后一个节点 label
+          const parts = textBody.split('->').map(p => p.trim()).filter(p => p !== '');
+          if (parts.length > 0) {
+            const lastPart = parts[parts.length - 1];
+            // 尝试解析最后一个节点的 label
+            const labelMatch = lastPart.match(/^\[(.+?)\]/);
+            if (labelMatch) {
+              lastNodeInLine = labelMatch[1];
+            } else {
+              // 裸引用，用 ensureNodeForRef 获取 label
+              const lbl = ensureNodeForRef(lastPart);
+              lastNodeInLine = lbl;
+            }
+          }
+        } else if (!lastNodeInLine) {
+          // textBody 为空且没有行首箭头，说明该行只有行尾箭头（不太可能，但防御）
+          throw new Error(`第 ${bl.lineNum + 1} 行: for 内部行缺少节点`);
+        }
+
+        // 如果有行尾箭头，记录最右节点
+        if (endsWithArrow && lastNodeInLine) {
+          pendingBackNodes.push(lastNodeInLine);
+        }
+
+        // 若剥完后 textBody 非空，作为普通行加入 cleanBodyLines
+        if (textBody) {
+          cleanBodyLines.push({
+            ...bl,
+            text: textBody,
+          });
+        }
+      }
+
+      // 递归解析清理后的循环体内部
+      if (cleanBodyLines.length > 0) {
+        const minIndent = Math.min(...cleanBodyLines.map(l => l.indent));
+        const normalizedLines = cleanBodyLines.map(l => ({
+          ...l,
+          indent: l.indent - minIndent + 2,
+        }));
+        const { nodeDecls: bodyDecls, edges: bodyEdges } = parseFlowSection(
+          normalizedLines,
+          [...usedLabels]
+        );
+        bodyDecls.forEach(d => {
+          if (!nodeDecls.some(existing => existing.label === d.label)) {
+            nodeDecls.push(d);
+          }
+        });
+        bodyEdges.forEach(be => addEdge(be));
+      }
+
+      // 处理出口：同缩进的 -> [ExitNode]
+      // 无论有无出口，pendingBackNodes 都应回连 FOR 形成环
+      pendingBackNodes.forEach(pbLabel => {
+        addEdge({ srcLabel: pbLabel, tgtLabel: forNodeLabel, cond: '', isBack: true });
+      });
+
+      console.log('FOR出口诊断:', {
+        i,
+        lineText: flowLines[i]?.text,
+        lineIndent: flowLines[i]?.indent,
+        forIndent: cl.indent,
+        isMatch: flowLines[i]?.indent === cl.indent
+      });
+      if (i < flowLines.length && flowLines[i].indent === cl.indent) {
+        const afterLine = normalizeSymbols(flowLines[i].text, 'flow').trim();
+        const am = afterLine.match(/^->\s*(.+)$/);
+        if (am) {
+          const exitTargetRaw = am[1].trim();
+          // 声明 for_out 节点
+          if (!nodeDecls.some(d => d.label === forOutLabel)) {
+            nodeDecls.push({
+              label: forOutLabel,
+              ref: '',
+              specialType: 'FOR_OUT',
+              forNodeId: forNodeLabel,
+            });
+          }
+          // for_out -> 出口节点
+          const exitLabel = resolveTarget(forOutLabel, exitTargetRaw, '');
+          i++;
+        }
+      }
+
+      // 更新 currentNode 为 for_out 标签，方便后续链
+      currentNode = forOutLabel;
+      continue;
+    }
+
+
+    // ⚠️ 重要：先匹配链式连接（[label] -> ...），再匹配节点声明（[label]: ...）
+    const chainMatch = text.match(/^\[(.+?)\]\s*->\s*(.*)$/);
+    if (chainMatch) {
+      const srcLabel = chainMatch[1];
+      let rest = chainMatch[2];
+      i++;
+
+      if (!nodeDecls.some(d => d.label === srcLabel)) {
+        nodeDecls.push({ label: srcLabel, ref: '' });
+      }
+
+      const rawParts = rest.split('->').map(p => p.trim()).filter(p => p !== '');
+      const parts = [];
+      let pendingCond = null;
+      for (const part of rawParts) {
+        const ifMatch = part.match(/^if\s*\((.+)\)$/);
+        if (ifMatch) {
+          pendingCond = ifMatch[1].trim();
+        } else {
+          parts.push({ target: part, cond: pendingCond || '' });
+          pendingCond = null;
+        }
+      }
+      if (pendingCond) {
+        throw new Error(
+          `第 ${cl.lineNum + 1} 行: 条件 "if (${pendingCond})" 后面缺少目标节点 内容: "${cl.text}"`
+        );
+      }
+
+      let currentSrc = srcLabel;
+      for (const { target, cond } of parts) {
+        currentSrc = resolveTarget(currentSrc, target, cond);
+      }
+      currentNode = currentSrc;
+      continue;
+    }
+
+    // 单节点引用（无箭头），例如 for 内部剥箭头后只剩 [A]
+    const soloNodeMatch = text.match(/^\[(.+?)\]\s*$/);
+    if (soloNodeMatch) {
+      ensureNodeForRef(`[${soloNodeMatch[1]}]`);
+      i++;
+      continue;
+    }
+
+    // 节点声明 [label]: ref
+    const dm = text.match(/^\[(.+?)\]:\s*(.*)$/);
+    if (dm) {
+      const label = dm[1];
+      const ref = dm[2].trim();
+      const existing = nodeDecls.find(d => d.label === label);
+      if (existing) existing.ref = ref || existing.ref;
+      else nodeDecls.push({ label, ref });
+      currentNode = label;
+      i++;
+      continue;
+    }
+
+
+
+
+    throw new Error(`第 ${cl.lineNum + 1} 行: 未识别的流程语法: "${text}"`);
+  }
+
+  return { nodeDecls, edges };
+}
+
+export {
+  normalizeSymbols, parseFEMS, splitTopBlocks,
+  parseMetaBlock, parseVarsBlock, parseCodeBlock,
+  parseActorsBlock, parseMemoryOrContextBlock,
+  parseActionBlock, parseModuleBlock, parseMainflowBlock,
+  parseFlowSection,
+};

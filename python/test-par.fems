@@ -1,0 +1,21 @@
+meta:
+  name = 语法测试3-并发循环
+  session = new
+
+vars:
+  workers = [@w1, @w2, @w3]
+  count = 0
+
+actors:
+  ai @w1 = soul:3
+  ai @w2 = soul:4
+  ai @w3 = soul:5
+
+action work @assign:
+  out:
+    count += 1
+
+mainflow:
+  [START] -> [A] -> par @w in workers:
+    -> [W]:work ->
+  -> [END]

@@ -72,6 +72,63 @@ pip install requests          # Python 3 唯一必需依赖（引擎 LLM 调用�
 - **含注册面的 dsh**（本特性上游化后的官方版，或打补丁的构建）：完整功能，历史正常加载
 - **官方原版**：插件照常工作、live 会话完全正常；**唯一限制**——重启后，含 `dsh-femwa/chat` 事件的旧会话历史无法加载（dsh 拒绝未知事件类型是设计行为）。新会话不受影响
 
+### 给官方 dsh 打补丁（推荐，10 分钟）
+
+让官方版也支持历史加载，只需把 `dsh-femwa/chat` 加进 dsh 的**已知事件类型白名单**。
+改动极小（一个文件一行），下面给出精确到行的操作步骤。
+
+**目标文件**：`@deepseek-ai/dsh-session` 包内的 `KNOWN_SESSION_EVENT_TYPES` 定义处。
+
+**源码运行版**（`node --import tsx` 启动的 dsh，文件在
+`packages/core/session/src/known-event-types.ts`）：
+
+找到这个数组（第 19 行起）：
+
+```ts
+export const KNOWN_SESSION_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'agent-preset/selected',
+  'agent/inbox/spliced',
+  'approval/asked',
+  'approval/decided',
+  'approval/policy',
+  'assistant/chunk',
+  'assistant/message',
+  'command/done',
+  'command/run',
+  'compaction/end',   // ← 在 'command/run', 和 'compaction/end', 之间插入一行
+```
+
+**把**：
+
+```ts
+  'command/done',
+  'command/run',
+  'compaction/end',
+```
+
+**改成**：
+
+```ts
+  'command/done',
+  'command/run',
+  'dsh-femwa/chat',
+  'compaction/end',
+```
+
+**npm 安装版**（`npm install` 的 dsh，运行时加载的是编译产物）：
+
+1. 定位包：`node -e "console.log(require.resolve('@deepseek-ai/dsh-session'))"`（或在
+   `node_modules/@deepseek-ai/dsh-session/lib/` 下找）
+2. 在产物文件里**全文搜索** `command/run`（白名单数组就在它附近），找到形如
+   `"command/run", "compaction/end"`（或换行写法）的数组
+3. 在 `"command/run"` 之后插入 `"dsh-femwa/chat"`（保持数组语法一致）
+
+**注意事项**：
+
+- 该文件头部标注 `GENERATED ... do not edit by hand`——手改可用，但 dsh 升级/重装后**需要重打**（升级后重新执行本步骤）
+- 改完重启 dsh 生效；这是白名单唯一需要动的地方，其余文件都不用碰
+- 高级替代：把完整注册面特性（`registerSessionEventType` API + coordinator 消费）合入 dsh——改动更正规、可随上游升级，详见本项目文档与 dsh 的 `known-event-types.ts` 头部注释（"a registration surface ... deferred until such a consumer exists"）
+
 ## 剧本
 
 `.fems` 剧本放在 `user_data/projects/`（子目录或直接文件）。侧边栏 🎭 按钮新建 Fem 会话，会话顶部「Fem 剧本」面板选择/编辑/保存并运行；👁 视角切换（上帝/角色视角）。

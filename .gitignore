@@ -9,3 +9,13 @@ __pycache__/
 *.pyc
 .cache/
 debug_normalized_output.fems
+
+# femGen（可视化剧本编辑器）：敏感凭据与构建产物不入库
+femGen/.env
+femGen/dist/
+femGen/.wrangler/
+femGen/.DS_Store
+femGen/*.fems
+
+# �鵵����ֻ�ƶ���ɾ����
+_archive/

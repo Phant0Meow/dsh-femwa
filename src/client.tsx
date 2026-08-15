@@ -18,6 +18,7 @@ import { useEffect, useMemo, useState, type CSSProperties } from 'react'
 import type { ConversationNodeDefinition } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import FEMEditor from '../femGen/src/FemWorAuto'
 
 /** Peer packages this plugin needs injected. */
 export const inject: string[] = ['slots', 'conversationEvents', 'sessions', 'workspaces']
@@ -36,6 +37,34 @@ interface ScriptViewInjected {
 }
 
 type FemScriptViewProps = { sessionId: string } & ScriptViewInjected
+
+/** 画布可视化编辑器（femGen 插件模式）：取代文本编辑标签页。
+ *  onRun 把画布生成的 .fems 直接交给插件 run 路由（不落盘），
+ *  与聊天窗角色气泡是同一次引擎运行；SSE 事件流由 femGen 内部连接。 */
+export function FemEditorView({ sessionId, stopScript }: FemScriptViewProps) {
+  const onRun = async (fems: string): Promise<void> => {
+    const response = await fetch('/dsh-femwa/run', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId, fems }),
+    })
+    let message = `run HTTP ${response.status}`
+    try {
+      const data = await response.json() as { ok?: boolean; error?: string }
+      if (data.ok === true) return
+      message = data.error ?? message
+    } catch {
+      // non-JSON body: keep the status message
+    }
+    throw new Error(message)
+  }
+  const onStop = (): void => {
+    void stopScript().catch((error: unknown) => {
+      console.warn('[dsh-femwa] stop failed:', error)
+    })
+  }
+  return <FEMEditor plugin onRun={onRun} onStop={onStop} />
+}
 
 /** Full-size panel: browse, paste/edit, save, and run Fem scripts. */
 export function FemScriptView({ sessionId, listScripts, readScript, saveScript, runScript, stopScript, fetchErrors }: FemScriptViewProps) {
@@ -1131,9 +1160,9 @@ export function apply(ctx: any): void {
       name: 'conversation.view',
       id: 'femwa',
       order: 20,
-      label: () => 'Fem 剧本',
+      label: () => 'Fem 编辑器',
       inject: scriptViewInjected,
     },
-    FemScriptView,
+    FemEditorView,
   ))
 }
