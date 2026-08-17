@@ -151,30 +151,6 @@ export default function FEMEditor({ plugin = false, onRun, onStop, initialScript
 
 
   // ── 后端地址/连接状态 ──
-  const [backendRefreshTrigger, setBackendRefreshTrigger] = useState(0);
-  const [backendConnected, setBackendConnected] = useState(null);
-
-  // ── 后端连接状态检测 ──
-  useEffect(() => {
-    const checkConnection = async () => {
-      if (plugin) { setBackendConnected(true); return; } // 插件模式：后端就是插件自身
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 3000);
-        const resp = await fetch(getBackendBaseUrl() + '/api/ping', {
-          method: 'GET',
-          signal: controller.signal,
-        });
-        clearTimeout(timeout);
-        setBackendConnected(resp.ok);
-      } catch {
-        setBackendConnected(false);
-      }
-    };
-    checkConnection();
-    const interval = setInterval(checkConnection, 5000);
-    return () => clearInterval(interval);
-  }, [backendRefreshTrigger]);
 
   // ── 工作流运行状态 ──
   const [flowStatus, setFlowStatus] = useState('idle'); // idle | running | paused
@@ -3655,7 +3631,6 @@ if (enrichedNode.type === 'par_out') {
 
 
       {/* ── 新建 SOUL ID 浮层（插件模式暂不提供 souls 管理入口）── */}
-      {!plugin && (
       <SoulModal
         open={soulModalOpen}
         onClose={() => setSoulModalOpen(false)}
@@ -3663,7 +3638,6 @@ if (enrichedNode.type === 'par_out') {
           setSoulModalOpen(false);
         }}
       />
-      )}
     </div> {/* 闭合最外层 flex 容器 */}
     </ErrorBoundary>
   );
