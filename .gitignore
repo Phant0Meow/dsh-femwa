@@ -22,3 +22,4 @@ _archive/
 
 # esbuild 转译产物（测试用，可重新生成）
 tests/femParser.test.mjs
+.dsh-meow/
