@@ -179,7 +179,7 @@ const [userApiModel, setUserApiModel] = useState(() => {
 
   // ── 新建 SOUL ID 浮层状态 ──
   const [soulModalOpen, setSoulModalOpen] = useState(false);
-  const [soulForm, setSoulForm] = useState({ soul_id: '', soul_name: '', description: '', user_id: '', password: '' });
+  const [soulForm, setSoulForm] = useState({ soul_id: '', soul_name: '', description: '' });
   const [soulFormError, setSoulFormError] = useState('');
   const [soulFormSubmitting, setSoulFormSubmitting] = useState(false);
 
@@ -1040,13 +1040,11 @@ if (specialType === 'FOR') {
   // ── 新建 SOUL ID ──
   const handleCreateSoul = useCallback(async () => {
     setSoulFormError('');
-    const { soul_id, soul_name, description, user_id, password } = soulForm;
+    const { soul_id, soul_name, description } = soulForm;
 
     // 前端基础校验
     if (!soul_id.trim()) { setSoulFormError('soul_id 不能为空'); return; }
     if (!/^[a-zA-Z0-9]+$/.test(soul_id.trim())) { setSoulFormError('soul_id 只允许英文字母和数字'); return; }
-    if (!user_id.trim()) { setSoulFormError('user_id 不能为空'); return; }
-    if (!/^[a-zA-Z0-9]+$/.test(user_id.trim())) { setSoulFormError('user_id 只允许英文字母和数字'); return; }
 
     setSoulFormSubmitting(true);
     try {
@@ -1057,8 +1055,6 @@ if (specialType === 'FOR') {
           soul_id: soul_id.trim(),
           soul_name: soul_name.trim(),
           description: description.trim(),
-          user_id: user_id.trim(),
-          password: password,
         }),
       });
       const data = await resp.json();
@@ -1068,7 +1064,7 @@ if (specialType === 'FOR') {
       }
       // 成功：关闭浮层，重置表单
       setSoulModalOpen(false);
-      setSoulForm({ soul_id: '', soul_name: '', description: '', user_id: '', password: '' });
+      setSoulForm({ soul_id: '', soul_name: '', description: '' });
       setSoulFormError('');
       alert(`SOUL ID "${data.soul_id}" 创建成功！`);
     } catch (e) {
@@ -2358,7 +2354,7 @@ nodes={nodes}
           onApplyFem={handleApplyFem}
           onRestoreFem={handleRestoreFem}
           onGraphToFem={handleGraphToFem}
-          onOpenSoul={() => { setSoulForm({ soul_id: '', soul_name: '', description: '', user_id: '', password: '' }); setSoulFormError(''); setSoulModalOpen(true); }}
+          onOpenSoul={() => { setSoulForm({ soul_id: '', soul_name: '', description: '' }); setSoulFormError(''); setSoulModalOpen(true); }}
           backEdges={backEdges}
           onDeleteNode={handleDeleteSelNode}
           onDeleteEdge={handleDeleteSelEdge}
@@ -2591,7 +2587,7 @@ nodes={nodes}
             flexShrink: 0,
           }}>
             <button
-              onClick={() => { setSoulForm({ soul_id: '', soul_name: '', description: '', user_id: '', password: '' }); setSoulFormError(''); setSoulModalOpen(true); }}
+              onClick={() => { setSoulForm({ soul_id: '', soul_name: '', description: '' }); setSoulFormError(''); setSoulModalOpen(true); }}
               style={{
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
                 padding: '6px 8px', borderRadius: 7,

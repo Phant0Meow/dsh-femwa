@@ -11,8 +11,6 @@ function SoulModal({ open, onClose, onCreated }) {
     soul_id: '',
     soul_name: '',
     description: '',
-    user_id: '',
-    password: '',
   });
   const [soulFormError, setSoulFormError] = useState('');
   const [soulFormSubmitting, setSoulFormSubmitting] = useState(false);
@@ -22,10 +20,6 @@ function SoulModal({ open, onClose, onCreated }) {
   const handleCreateSoul = async () => {
     if (!soulForm.soul_id.trim()) {
       setSoulFormError('Soul ID 不能为空');
-      return;
-    }
-    if (!soulForm.user_id.trim()) {
-      setSoulFormError('User ID 不能为空');
       return;
     }
     setSoulFormSubmitting(true);
@@ -118,32 +112,6 @@ function SoulModal({ open, onClose, onCreated }) {
           />
         </div>
 
-        {/* user_id */}
-        <div style={{ marginBottom: 13 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: '#3d5cf5', marginBottom: 4 }}>
-            User ID <span style={{ color: '#ef4444' }}>*</span>
-          </div>
-          <input
-            value={soulForm.user_id}
-            onChange={(e) => setSoulForm({ ...soulForm, user_id: e.target.value.replace(/[^a-zA-Z0-9]/g, '') })}
-            placeholder="英文+数字，重复时需验证密码"
-            style={{ ...inp, width: '100%' }}
-          />
-        </div>
-
-        {/* password */}
-        <div style={{ marginBottom: 13 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: '#3d5cf5', marginBottom: 4 }}>
-            Password
-          </div>
-          <input
-            type="password"
-            value={soulForm.password}
-            onChange={(e) => setSoulForm({ ...soulForm, password: e.target.value })}
-            placeholder="用户ID重复时需验证密码，新用户请设置密码"
-            style={{ ...inp, width: '100%' }}
-          />
-        </div>
 
         {/* 错误提示 */}
         {soulFormError && (
