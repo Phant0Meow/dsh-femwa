@@ -77,10 +77,10 @@ const FontStyle = ({ scoped = false }) => (
 );
 
 // ═══ CONSTANTS ═══
-const NW = 200,
-  NH = 80; // Action node size
-const MW = 220,
-  MH = 92; // Module node size on canvas
+const NW = 100,
+  NH = 64; // Action node size (w 50%, h 80%)
+const MW = 110,
+  MH = 74; // Module node size on canvas (w 50%, h 80%)
 const SPW = 90,
   SPH = 36; // Special node size
 const PSW = 90,
