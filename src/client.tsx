@@ -15,6 +15,8 @@
  */
 
 import { useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { createPortal } from 'react-dom'
+import { createRoot } from 'react-dom/client'
 import type { ConversationNodeDefinition } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -549,32 +551,7 @@ export function FemwaChatNodeView({ node, useSession }: ChatNodeViewProps<'femwa
       </div>
     )
   }
-  if (kind === 'thinking') {
-    // Folded thinking chain (subagent cot). Display-only; memory storage
-    // already filtered it by the tool-call rule.
-    return (
-      <details style={{
-        margin: '2px 0',
-        fontSize: '12px',
-        color: 'var(--dsw-text-tertiary, #999)',
-      }}>
-        <summary style={{ cursor: 'pointer', userSelect: 'none', outline: 'none' }}>
-          💭 思考（点击展开）
-        </summary>
-        <div style={{
-          marginTop: '4px',
-          padding: '6px 10px',
-          borderRadius: '6px',
-          background: 'var(--dsw-surface-2, #f5f5f5)',
-          whiteSpace: 'pre-wrap',
-          wordBreak: 'break-word',
-          lineHeight: 1.5,
-        }}>
-          {text}
-        </div>
-      </details>
-    )
-  }
+  // (kind === 'thinking' 的自绘折叠思考链已按用户要求删除：思考链统一用 dsh 原生 assistant-step 折叠渲染，不再自绘。)
   if (kind === 'tool_call') {
     // Subagent tool invocation line: text is JSON {kind:'call'|'result', name, args?, result?}.
     // Parsing failure falls back to plain text (older sessions).
@@ -1040,7 +1017,7 @@ export function FemViewButton({ useSession, useSessions }: PropsRuntime<'convers
 
   const { chatActors, hidden } = useMemo(() => {    const actors = new Set<string>()
     let hiddenCount = 0
-    for (const node of snapshot.nodes) {
+    for (const node of (snapshot.chat?.nodes?.values() ?? [])) {
       if (node.kind !== 'femwa-role') continue
       const data = node.data as FemwaChatData | undefined
       if (data === undefined) continue
@@ -1314,4 +1291,72 @@ export function apply(ctx: any): void {
     },
     FemEditorView,
   ))
+
+  // 流式预览条：独立 React 根（常驻，不依赖任何 tab 挂载）。
+  try {
+    const previewHost = document.createElement('div')
+    previewHost.id = 'dsh-femwa-stream-preview'
+    document.body.appendChild(previewHost)
+    createRoot(previewHost).render(<StreamPreviewBar />)
+  } catch (error: unknown) {
+    console.warn('[dsh-femwa] stream preview mount failed:', error)
+  }
 }
+// ── 流式输出预览条（方案丁）：SSE ai_token → 对话窗口底部覆盖条。
+// 纯插件实现：独立 React 根（react-dom shell 单例）+ portal 到 body；
+// 流式期间显示「角色名 + 累积正文」，节点完成（ai_done/flow_done/flow_error/human_wait）后消失。
+// 最终态仍由 dsh 原生 assistant-step 渲染（镜像裁剪后历史只存整块）。
+function StreamPreviewBar() {
+  const [stream, setStream] = useState<{ actor: string; text: string } | null>(null)
+  useEffect(() => {
+    const es = new EventSource('/dsh-femwa/events')
+    es.onmessage = (ev: MessageEvent<string>): void => {
+      try {
+        const msg = JSON.parse(ev.data) as { type?: string; data?: Record<string, unknown> }
+        if (msg.type === 'ai_token') {
+          const d = msg.data ?? {}
+          const actor = String(d.actor ?? d.node_name ?? 'AI')
+          const token = typeof d.token === 'string' ? d.token : ''
+          if (token.length === 0) return
+          setStream(s => ({
+            actor,
+            text: (s !== null && s.actor === actor ? s.text : '') + token,
+          }))
+        } else if (msg.type === 'ai_done' || msg.type === 'flow_done' || msg.type === 'flow_error' || msg.type === 'human_wait') {
+          setStream(null)
+        }
+      } catch {
+        // 非 JSON SSE 行忽略
+      }
+    }
+    return () => es.close()
+  }, [])
+  if (stream === null) return null
+  return createPortal(
+    <div style={{
+      position: 'fixed',
+      left: '50%',
+      transform: 'translateX(-50%)',
+      bottom: 96,
+      maxWidth: 720,
+      width: '90%',
+      padding: '8px 14px',
+      borderRadius: 10,
+      background: 'color-mix(in srgb, var(--dsw-surface-2, #f5f5f5) 92%, transparent)',
+      border: '1px solid var(--dsw-border, #e0e0e0)',
+      boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+      fontSize: 13,
+      lineHeight: 1.5,
+      zIndex: 200,
+      pointerEvents: 'none',
+      whiteSpace: 'pre-wrap',
+      wordBreak: 'break-word',
+    }}>
+      <span style={{ fontWeight: 700, color: actorColor(stream.actor) }}>🎭 {stream.actor}</span>
+      <span style={{ color: 'var(--dsw-text-secondary, #666)' }}>：{stream.text}</span>
+      <span style={{ color: 'var(--dsw-text-tertiary, #999)' }}>…</span>
+    </div>,
+    document.body,
+  )
+}
+

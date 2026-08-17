@@ -34,7 +34,7 @@ import { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-ses
 import * as sessionNS from '@deepseek-ai/dsh-session'
 import type { SubprocessHandle } from '@deepseek-ai/dsh-subprocess'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import z from '@deepseek-ai/schemastery'
 
@@ -55,6 +55,17 @@ declare module '@deepseek-ai/dsh-session/types' {
       text: string
       /** role = AI character line; notice = engine/flow status; human_wait = waiting for the user; prompt = node hint/announcement; error = engine error (red, system-like); thinking = subagent cot (folded). */
       kind: 'role' | 'notice' | 'human_wait' | 'prompt' | 'error' | 'thinking'
+    }
+    /**
+     * 镜像 turn → scope 持久映射（视角过滤重启恢复用；合成 turn/start 时写入）。
+     * @mode emit
+     * @param data - mapped turn and the node's visible actor list.
+     */
+    'dsh-femwa/turn-scope': {
+      /** Mapped main-session turn number. */
+      turn: number
+      /** Actor names this turn is visible to. */
+      scope: string[]
     }
   }
 }
@@ -809,7 +820,24 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
           writeJson(res, 400, { ok: false, error: 'sessionId is required' })
           return
         }
-        const scopes = turnScopesBySession.get(sessionId)
+        let scopes = turnScopesBySession.get(sessionId)
+        if (scopes === undefined) {
+          // 重启后内存 Map 已丢：从主会话日志的 dsh-femwa/turn-scope 事件重建。
+          const live = (ctx.get('sessions') as { get(id: SessionId): Session | undefined } | undefined)?.get(SessionId(sessionId))
+          if (live !== undefined) {
+            const rebuilt = new Map<number, string[]>()
+            for (const event of live.events) {
+              if (event.type === 'dsh-femwa/turn-scope') {
+                const d = event.data as { turn: number; scope: string[] }
+                rebuilt.set(d.turn, d.scope)
+              }
+            }
+            if (rebuilt.size > 0) {
+              turnScopesBySession.set(sessionId, rebuilt)
+              scopes = rebuilt
+            }
+          }
+        }
         const out: Record<string, string[]> = {}
         if (scopes !== undefined) {
           for (const [turn, scope] of scopes) out[String(turn)] = scope
@@ -1064,6 +1092,43 @@ function appendChat(
   }
 }
 
+/** 子代理会话目录移出 dsh sessions 树（备份区 user_data/subagent_sessions/）。
+ * 不删文件、可移回；移出后不再出现在会话列表/投影缓存（镜像已全量落主会话，
+ * 子代理日志只是冗余备份）。locate 需要 cwd 才能定位 workspace 分组目录。 */
+async function moveChildSessionOut(
+  ctx: Context,
+  resolved: ResolvedConfig,
+  run: { id: SessionId; localAgent?: { session: { header: { cwd?: string } } } },
+): Promise<void> {
+  const header = run.localAgent?.session.header
+  if (header === undefined || header.cwd === undefined) return
+  const persistence = ctx.get('sessionPersistence') as
+    | { locate?(meta: { cwd?: string; id: SessionId }): { path: string } | undefined }
+    | undefined
+  if (persistence?.locate === undefined) return
+  const loc = persistence.locate({ cwd: header.cwd, id: run.id })
+  if (loc === undefined) return
+  const sessionDir = dirname(loc.path)
+  const targetRoot = join(resolved.femwaRoot, 'user_data', 'subagent_sessions')
+  const target = join(targetRoot, String(run.id))
+  const { mkdir, rename } = await import('node:fs/promises')
+  await mkdir(targetRoot, { recursive: true })
+  // Windows 上会话日志可能仍在异步 flush（句柄占用），rename 会 EPERM：
+  // 带重试（最多 10 次 × 500ms），flush 完成后再移出。
+  let lastError: unknown
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    try {
+      await rename(sessionDir, target)
+      console.log(`[dsh-femwa] moved child session ${run.id} -> subagent_sessions/`)
+      return
+    } catch (error: unknown) {
+      lastError = error
+      await new Promise(resolve => setTimeout(resolve, 500))
+    }
+  }
+  throw lastError
+}
+
 /** Assemble the subagent's initial prompt from the engine's blocks. */
 function buildSubagentPrompt(blocks: Record<string, unknown>): string {
   const str = (key: string): string => (typeof blocks[key] === 'string' ? String(blocks[key]) : '')
@@ -1282,6 +1347,12 @@ async function runAiSubagent(
     } catch (error: unknown) {
       console.log(`[dsh-femwa] mirror turn/start failed: ${String(error)}`)
     }
+    // 持久化 turn→scope 映射（重启后视角过滤从此事件重建）。
+    try {
+      session.append('dsh-femwa/turn-scope', { turn: baseTurn, scope: scopeInfo ?? [] })
+    } catch (error: unknown) {
+      console.log(`[dsh-femwa] mirror turn-scope failed: ${String(error)}`)
+    }
     // 记录镜像 turn 的 scope（合成 turn/start 时；子代理自身没有 turn/start）
     let scopes = turnScopesBySession.get(sid)
     if (scopes === undefined) {
@@ -1313,17 +1384,25 @@ async function runAiSubagent(
   const onChildEvent = (watched: Session, watchedEvent: SessionEvent): void => {
     if (String(watched.id) !== String(run.id)) return
     armIdle()
-    // 流式 token → 画布打字机（只转发正文增量，不转发思考/用量）。
+    // 流式 token → 打字机通道（对话窗口 SSE 预览行 + 画布）：只转发正文
+    // 增量，不转发思考/用量；actor 供前端预览行显示角色名。
     if (watchedEvent.type === 'assistant/chunk') {
       const chunk = (watchedEvent.data as { chunk?: { type?: string; text?: unknown } }).chunk
       if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
-        broadcastSse('ai_token', { node_name: nodeName, token: chunk.text })
+        broadcastSse('ai_token', { node_name: nodeName, actor, token: chunk.text })
       }
     }
     // 镜像到父会话：dsh 原生 assistant 节点渲染完整 turn（思考折叠/工具卡片/
-    // 流式回答），zero 自绘 UI。turn/step 号重映射避免多节点撞号。
-    // 镜像始终全量（信息完整落盘）；视角过滤在前端显示层（CSS 隐藏）。
+    // 回答），zero 自绘 UI。turn/step 号重映射避免多节点撞号。
+    // 视角过滤在前端显示层（CSS 隐藏）。
     if (!FORWARD_CHILD_EVENTS.has(watchedEvent.type)) return
+    // 镜像裁剪（方案丙）：chunk 只镜像块边界（block-start/block-end 携带完整
+    // 块内容），delta/usage/finish 不落主会话日志——历史重放行数大幅下降，
+    // 渲染由 block-end 的完整块 + assistant/message 兜底；流式走 SSE 通道。
+    if (watchedEvent.type === 'assistant/chunk') {
+      const ctype = (watchedEvent.data as { chunk?: { type?: string } }).chunk?.type
+      if (ctype !== 'block-start' && ctype !== 'block-end') return
+    }
     const raw = watchedEvent.data as Record<string, unknown>
     const mappedTurn = mapTurn(raw.turn)
     const mappedStep = typeof raw.step === 'number' ? raw.step : 0
@@ -1401,6 +1480,11 @@ async function runAiSubagent(
         console.log(`[dsh-femwa] archive child session failed: ${String(error)}`)
       }
     }
+    // 子代理会话目录移出 dsh sessions 树（备份区）：不删文件、可移回；
+    // 移出后不再出现在会话列表/投影缓存（镜像已全量落主会话，此目录是冗余备份）。
+    await moveChildSessionOut(ctx, resolved, run).catch((error: unknown) => {
+      console.log(`[dsh-femwa] move child session failed: ${String(error)}`)
+    })
   }
 }
 
