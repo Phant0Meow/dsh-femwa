@@ -3,7 +3,6 @@
 // ═══════════════════════════════════════════════════════════════
 
 
-
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   ErrorBoundary, FontStyle, TYPES, ti, SPECIAL_COLORS, SINK_ONLY,
@@ -20,8 +19,6 @@ import { ActionNodeView, PositionNodeView, SpecialNodeView, ForOutNodeView, ParO
 import { LibPanel } from './libPanel';
 import { ProjPanel } from './projectPanel';
 import { ActionModal } from './actionModal';
-import { ApiKeyModal } from './apiKeyModal';
-import { BackendUrlModal } from './BackendUrlModal';
 import { SoulModal } from './soulModal';
 import { BubbleOverlay } from './bubbleOverlay';
 import { FemPreview } from './femPreview';
@@ -153,8 +150,6 @@ export default function FEMEditor({ plugin = false, onRun, onStop, initialScript
   }, [isResizingRight]);
 
 
-
-
   // ── 后端地址/连接状态 ──
   const [backendRefreshTrigger, setBackendRefreshTrigger] = useState(0);
   const [backendConnected, setBackendConnected] = useState(null);
@@ -199,12 +194,7 @@ const [userApiUrl, setUserApiUrl] = useState(() => {
 const [userApiModel, setUserApiModel] = useState(() => {
   try { return localStorage.getItem('fem_user_api_model') || ''; } catch { return ''; }
 });
-  const [apiUrlInput, setApiUrlInput] = useState(userApiUrl);
   const [apiModelInput, setApiModelInput] = useState(userApiModel);
-  const [apiKeyModalOpen, setApiKeyModalOpen] = useState(false);   // 补上这一行！
-  const [apiKeyInput, setApiKeyInput] = useState(userApiKey);
-  const [apiProviderSelect, setApiProviderSelect] = useState(userApiProvider);
-  const [rememberKey, setRememberKey] = useState(true);
   const [runId, setRunId] = useState(null);
   const [nodeStates, setNodeStates] = useState({}); // { [nodeId]: { status, streamingText, output, prompt, history } }
   const eventSourceRef = useRef(null);
@@ -213,10 +203,7 @@ const [userApiModel, setUserApiModel] = useState(() => {
 
   // ── 新建 SOUL ID 浮层状态 ──
   const [soulModalOpen, setSoulModalOpen] = useState(false);
-  const [backendModalOpen, setBackendModalOpen] = useState(false);
   const [soulForm, setSoulForm] = useState({ soul_id: '', soul_name: '', description: '', user_id: '', password: '' });
-
-
 
 
   // Import file ref
@@ -388,7 +375,6 @@ const [userApiModel, setUserApiModel] = useState(() => {
   }, [cycleEdgesMap]);
  
 
-  
   // 检测从 FOR 节点出发但未形成回环的边（红色虚线）
   const forBrokenEdges = useMemo(() => {
     const broken = new Set();
@@ -1072,46 +1058,6 @@ if (specialType === 'FOR') {
     setBubbleOverlay(null);
   }, []);
 
-  // ── API Key 管理 ──
-  const handleSaveApiKey = () => {
-    const key = apiKeyInput.trim();
-    const provider = apiProviderSelect;
-    const url = apiUrlInput.trim();
-    const model = apiModelInput.trim();
-    setUserApiKey(key);
-    setUserApiProvider(provider);
-    setUserApiUrl(url);
-    setUserApiModel(model);
-    if (rememberKey) {
-      try {
-        localStorage.setItem('fem_user_api_key', key);
-        localStorage.setItem('fem_user_api_provider', provider);
-        localStorage.setItem('fem_user_api_url', url);
-        localStorage.setItem('fem_user_api_model', model);
-      } catch {}
-    } else {
-      try {
-        localStorage.removeItem('fem_user_api_key');
-        localStorage.removeItem('fem_user_api_provider');
-        localStorage.removeItem('fem_user_api_url');
-        localStorage.removeItem('fem_user_api_model');
-      } catch {}
-    }
-    setApiKeyModalOpen(false);
-  };
-  const handleClearApiKey = () => {
-    setUserApiKey('');
-    setApiKeyInput('');
-    setUserApiUrl('');
-    setUserApiModel('');
-    setApiModelInput('');
-    try {
-      localStorage.removeItem('fem_user_api_key');
-      localStorage.removeItem('fem_user_api_provider');
-      localStorage.removeItem('fem_user_api_url');
-      localStorage.removeItem('fem_user_api_model');
-    } catch {}
-  };
 
   // ── 新建 SOUL ID ──
   const handleCreateSoul = useCallback(async () => {
@@ -2434,12 +2380,6 @@ nodes={nodes}
           onApplyFem={handleApplyFem}
           onRestoreFem={handleRestoreFem}
           onGraphToFem={handleGraphToFem}
-onOpenApiKey={() => { 
-  setApiKeyInput(userApiKey); 
-  setApiProviderSelect(userApiProvider); 
-  setApiModelInput(userApiModel); 
-  setApiKeyModalOpen(true); 
-}}
           onOpenSoul={() => { setSoulForm({ soul_id: '', soul_name: '', description: '', user_id: '', password: '' }); setSoulFormError(''); setSoulModalOpen(true); }}
           backEdges={backEdges}
           onDeleteNode={handleDeleteSelNode}
@@ -2447,7 +2387,7 @@ onOpenApiKey={() => {
           onCondChange={handleCondChange}
           onEditAction={handleEditSelAction}
         />
-        {/* ActionModal、ApiKeyModal、SoulModal 在手机端也需要 */}
+        {/* ActionModalSoulModal 在手机端也需要 */}
         {modal && (
           <ActionModal
             init={modal.type !== 'new' ? modal.action : null}
@@ -2472,23 +2412,6 @@ onOpenApiKey={() => {
             onClose={() => setModal(null)}
           />
         )}
-        <ApiKeyModal
-          open={apiKeyModalOpen}
-          apiKeyInput={apiKeyInput}
-          setApiKeyInput={setApiKeyInput}
-          apiProviderSelect={apiProviderSelect}
-          setApiProviderSelect={setApiProviderSelect}
-          apiUrlInput={apiUrlInput}
-          setApiUrlInput={setApiUrlInput}
-          apiModelInput={apiModelInput}
-          setApiModelInput={setApiModelInput}
-          rememberKey={rememberKey}
-          setRememberKey={setRememberKey}
-          userApiKey={userApiKey}
-          onSave={handleSaveApiKey}
-          onClear={handleClearApiKey}
-          onClose={() => setApiKeyModalOpen(false)}
-        />
         <SoulModal
           open={soulModalOpen}
           onClose={() => setSoulModalOpen(false)}
@@ -2689,50 +2612,6 @@ onOpenApiKey={() => {
             gap: 8,
             flexShrink: 0,
           }}>
-            {/* 插件模式：key 走 dsh credentials、后端就是插件自身，两个按钮无意义 */}
-            {!plugin && (
-            <button
-            onClick={() => { 
-   setApiKeyInput(userApiKey); 
-   setApiProviderSelect(userApiProvider); 
-   setApiModelInput(userApiModel); 
-   setApiKeyModalOpen(true);
- }}
-              style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                padding: '6px 8px', borderRadius: 7,
-                fontSize: 11, fontWeight: 600,
-                fontFamily: 'DM Sans, sans-serif',
-                cursor: 'pointer', transition: 'all 0.12s',
-                border: '1px solid',
-                background: userApiKey ? '#f0fdf4' : '#fef2f2',
-                borderColor: userApiKey ? '#bbf7d0' : '#fecaca',
-                color: userApiKey ? '#15803d' : '#b91c1c',
-                flex: 1,
-              }}
-            >
-              {userApiKey ? 'Key已设置' : 'API Key'}
-            </button>
-            )}
-            {!plugin && (
-            <button
-              onClick={() => setBackendModalOpen(true)}
-              style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                padding: '6px 8px', borderRadius: 7,
-                fontSize: 11, fontWeight: 600,
-                fontFamily: 'DM Sans, sans-serif',
-                cursor: 'pointer', transition: 'all 0.12s',
-                border: '1px solid',
-                background: backendConnected === true ? '#f0fdf4' : backendConnected === false ? '#fef2f2' : '#f8fafc',
-                borderColor: backendConnected === true ? '#bbf7d0' : backendConnected === false ? '#fecaca' : '#dde4ef',
-                color: backendConnected === true ? '#15803d' : backendConnected === false ? '#b91c1c' : '#5a6a8a',
-                flex: 1,
-              }}
-            >
-              {backendConnected === true ? '后端健康' : '连接后端'}
-            </button>
-            )}
             <button
               onClick={() => { setSoulForm({ soul_id: '', soul_name: '', description: '', user_id: '', password: '' }); setSoulFormError(''); setSoulModalOpen(true); }}
               style={{
@@ -3774,26 +3653,6 @@ if (enrichedNode.type === 'par_out') {
         submitHumanInput={submitHumanInput}
       />
 
-      {/* ── API Key 设置浮层（插件模式：key 走 dsh credentials，不渲染）── */}
-      {!plugin && (
-      <ApiKeyModal
-        open={apiKeyModalOpen}
-        apiKeyInput={apiKeyInput}
-        setApiKeyInput={setApiKeyInput}
-        apiProviderSelect={apiProviderSelect}
-        setApiProviderSelect={setApiProviderSelect}
-        apiUrlInput={apiUrlInput}
-        setApiUrlInput={setApiUrlInput}
-        apiModelInput={apiModelInput}
-        setApiModelInput={setApiModelInput}
-        rememberKey={rememberKey}
-        setRememberKey={setRememberKey}
-        userApiKey={userApiKey}
-        onSave={handleSaveApiKey}
-        onClear={handleClearApiKey}
-        onClose={() => setApiKeyModalOpen(false)}
-      />
-      )}
 
       {/* ── 新建 SOUL ID 浮层（插件模式暂不提供 souls 管理入口）── */}
       {!plugin && (
@@ -3803,13 +3662,6 @@ if (enrichedNode.type === 'par_out') {
         onCreated={(data) => {
           setSoulModalOpen(false);
         }}
-      />
-      )}
-      {!plugin && (
-      <BackendUrlModal
-        open={backendModalOpen}
-        onClose={() => setBackendModalOpen(false)}
-        onSaveComplete={() => setBackendRefreshTrigger(t => t + 1)}
       />
       )}
     </div> {/* 闭合最外层 flex 容器 */}
