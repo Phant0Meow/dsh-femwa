@@ -36,6 +36,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import z from '@deepseek-ai/schemastery'
+import { registerFemwaTools, type FemwaToolDeps } from './tools'
 
 /** 插件包根目录：femwaRoot 缺省时指向插件自身（自包含布局，整个文件夹搬走即用）。 */
 const packageRoot = fileURLToPath(new URL('..', import.meta.url))
@@ -1117,6 +1118,49 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
   ctx.effect(() => () => {
     void bridge.stop()
   }, 'dsh-femwa: bridge lifecycle')
+
+  // 6) 主模型专用工具：femwa-mount（挂载剧本到会话）/ femwa-run（运行剧本）。
+  //    执行体复用现有链路（writeSessionScript / startRunOnSession），只注入依赖。
+  const toolDeps: FemwaToolDeps = {
+    mountScript: async (sessionId, scriptPath) => {
+      await writeSessionScript(resolved.femwaRoot, sessionId, { path: scriptPath })
+      console.log(`[dsh-femwa] femwa-mount ${sessionId} <- ${scriptPath}`)
+    },
+    runScript: async (sessionId, scriptPath) => {
+      const sid = SessionId(sessionId)
+      const sessionsStore = ctx.get('sessions') as { get(id: SessionId): Session | undefined } | undefined
+      const session = sessionsStore?.get(sid)
+      if (session === undefined) {
+        throw new Error(`会话 ${sessionId} 不存在`)
+      }
+      if (presetOf(session) !== FEM_PRESET) {
+        throw new Error('当前会话不是 Fem 剧本模式')
+      }
+      if (runState.running) {
+        throw new Error('已有剧本在运行中，请先停止')
+      }
+      if (scriptPath !== undefined) {
+        const { readFileSync } = await import('node:fs')
+        const scriptText = readFileSync(scriptPath, 'utf8')
+        await startRunOnSession(ctx, resolved, bridge, runState, sid, scriptText, scriptPath)
+      } else {
+        // 省略 scriptPath：运行已挂载的剧本（会话记录 path，无则 text）。
+        const prev = await readSessionScript(resolved.femwaRoot, sessionId)
+        if (prev === undefined || (prev.path === undefined && prev.text === undefined)) {
+          throw new Error('会话未挂载剧本：请先 femwa-mount 或用 scriptPath 指定')
+        }
+        if (prev.path !== undefined) {
+          const { readFileSync } = await import('node:fs')
+          const scriptText = readFileSync(prev.path, 'utf8')
+          await startRunOnSession(ctx, resolved, bridge, runState, sid, scriptText, prev.path)
+        } else {
+          await startRunOnSession(ctx, resolved, bridge, runState, sid, prev.text!)
+        }
+      }
+    },
+    isFemMainSession: (agent) => isFemAgent(agent),
+  }
+  ctx.effect(() => registerFemwaTools(ctx, toolDeps), 'dsh-femwa: main-model tools')
 }
 
 /** Extract plain text from a message's content blocks. */
