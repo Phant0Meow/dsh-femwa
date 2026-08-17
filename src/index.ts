@@ -25,7 +25,6 @@ import type { Agent, PreStepDecision } from '@deepseek-ai/dsh-agent'
 // Type-only: pulls the agent-preset domain's event declarations
 // ('agent-preset/selected' merge into cordis Events).
 import type {} from '@deepseek-ai/dsh-agent-presets'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 // Namespace import: `registerSessionEventType` (the runtime event-type
 // registration surface) only exists on builds that ship it; on stock builds
@@ -128,12 +127,6 @@ export const Config = z.object({
 /** Fem sessions carry this agentPreset marker in their session header. */
 const FEM_PRESET = 'dsh-femwa'
 
-/** Welcome message steered into every fresh Fem session. */
-const WELCOME_TEXT = '🤖 Fem 模式会话已创建。发条消息试试：消息会显示在窗口里，但不会有 AI 回复（本会话没有主模型）。'
-
-/** Guide shown once per Fem session that came from the UI preset menu. */
-const GUIDE_TEXT = '🎭 已切换到 Fem 剧本模式：本会话没有主模型，直接发言不会得到 AI 回复。请打开本会话顶部的「Fem 剧本」面板（或侧边栏 🎭 按钮）输入/选择 .fems 剧本并运行，角色才会登场。'
-
 /**
  * Session-level preset overrides: the session header is a deep-frozen
  * creation fact, so a preset picked from the UI menu (agentPreset.select →
@@ -159,50 +152,6 @@ function presetOf(session: PresetBearingIdentity): string | undefined {
 function isFemAgent(agent: Agent): boolean {
   return presetOf(agent.session) === FEM_PRESET
     && agent.session.header.parentSession === undefined
-}
-
-/** Steer the welcome message into a fresh Fem session (turns it non-blank). */
-function kickWelcome(agent: Agent): void {
-  setTimeout(() => {
-    try {
-      agent.steer(createUserMessage({
-        content: [{ type: 'text', text: WELCOME_TEXT }],
-        source: { kind: 'plugin', plugin: 'dsh-femwa' },
-      }))
-      console.log(`[dsh-femwa] steered welcome into ${agent.id}`)
-    } catch (error: unknown) {
-      console.log(`[dsh-femwa] FAILED to steer welcome: ${String(error)}`)
-    }
-  }, 1500)
-}
-
-/**
- * 等待 welcome 消息的 agent turn 处理完成（turn/end 出现）。
- * create-session 在跑剧本前调用：让「上下文注入」先显示，再开始剧本。
- * @param ctx - 宿主上下文（监听会话事件）。
- * @param agent - 新建的 Fem 会话 agent。
- * @param timeoutMs - 兜底超时（welcome 注入失败也不阻塞剧本启动）。
- */
-function waitForWelcomeTurn(ctx: Context, agent: Agent, timeoutMs: number): Promise<void> {
-  const session = agent.session
-  if (session.events.some(e => e.type === 'turn/end')) return Promise.resolve()
-  return new Promise<void>((resolve) => {
-    let settled = false
-    const off = ctx.on('session/event', (s: Session, e: SessionEvent) => {
-      if (settled || String(s.id) !== String(session.id)) return
-      if (e.type === 'turn/end') {
-        settled = true
-        off()
-        resolve()
-      }
-    })
-    setTimeout(() => {
-      if (settled) return
-      settled = true
-      off()
-      resolve()
-    }, timeoutMs)
-  })
 }
 
 // ── HTTP helpers (create-session route) ───────────────────────────────────
@@ -528,40 +477,17 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
     console.log(`[dsh-femwa] error on ${key}: ${text}`)
   }
 
-  /** Fem sessions that already got the write-your-script guide. */
-  const guidedSessions = new Set<string>()
-
-  // 1) Fem sessions never reach a model request: reject every pre-step, but
-  //    first log the messages as user/message events so the frontend displays
-  //    them (a plain reject leaves them only in the inbox, invisible in chat).
+  // 1) Fem sessions: idle → main model runs normally (dsh default);
+  //    running → reject (the engine owns the conversation; the input bridge
+  //    routes user text to human nodes / hard stop).
   ctx.on('agent/pre-step', async ({ agent, signal }, next): Promise<PreStepDecision> => {
     const decision = await next()
     if (decision === undefined || signal.aborted) return decision
     if (decision.kind !== 'enter') return decision
     if (!isFemAgent(agent)) return decision
-    for (const message of decision.messages) {
-      const source = message.source as { kind?: string; plugin?: string }
-      if (source.kind === 'user') {
-        // user message: append as-is
-      } else if (source.kind === 'plugin' && source.plugin === 'dsh-femwa') {
-        // our own welcome/role message: append as-is
-      } else {
-        continue
-      }
-      try {
-        agent.session.append('user/message', message, { surfaceOp: 'append' })
-      } catch (error: unknown) {
-        console.log(`[dsh-femwa] append user/message failed: ${String(error)}`)
-      }
-    }
-    // Guide the user once per session: a Fem session picked from the UI
-    // preset menu has no welcome steer (that is the create-session route's
-    // job), so the first rejected message is where the stage directions go.
-    if (!guidedSessions.has(String(agent.session.id))) {
-      guidedSessions.add(String(agent.session.id))
-      appendChat(ctx, agent.session, GUIDE_TEXT, 'notice')
-    }
-    console.log(`[dsh-femwa] pre-step REJECTED for fem agent ${agent.id} (${decision.messages.length} message(s) withheld from model)`)
+    const running = runState.running && runState.sessionId === agent.session.id
+    if (!running) return decision
+    console.log(`[dsh-femwa] pre-step REJECTED for running fem agent ${agent.id} (engine owns the conversation)`)
     return { kind: 'reject' }
   })
 
@@ -787,7 +713,7 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
       kind: 'exact',
       path: '/dsh-femwa/create-session',
       handler: (req: IncomingMessage, res: ServerResponse): void => {
-        void handleCreateSession(req, res, ctx, resolved, bridge, runState, guidedSessions).catch((error: unknown) => {
+        void handleCreateSession(req, res, ctx, resolved, bridge, runState).catch((error: unknown) => {
           writeJson(res, 500, { ok: false, error: String(error) })
         })
       },
@@ -2100,7 +2026,6 @@ async function handleCreateSession(
   resolved: ResolvedConfig,
   bridge: FemwaBridge,
   runState: { sessionId?: SessionId; running: boolean },
-  guidedSessions: Set<string>,
 ): Promise<void> {
   if (req.method !== 'POST') {
     writeJson(res, 405, { ok: false, error: 'method not allowed' })
@@ -2134,21 +2059,8 @@ async function handleCreateSession(
       },
     })
     console.log(`[dsh-femwa] created fem session ${handle.agent.id} (cwd=${cwd})`)
-    // 引导文案立即注入（此前只在用户发消息被拒时出现，会排到运行事件
-    // 后面——剧本先跑起来、提示才姗姗来迟）。guidedSessions 去重，
-    // pre-step reject 路径不会再重复注入。
-    if (!guidedSessions.has(String(handle.agent.id))) {
-      guidedSessions.add(String(handle.agent.id))
-      appendChat(ctx, handle.agent.session, GUIDE_TEXT, 'notice')
-    }
-    kickWelcome(handle.agent)
     const fems = typeof body.fems === 'string' && body.fems.trim().length > 0 ? body.fems : undefined
     const scriptPath = typeof body.scriptPath === 'string' && body.scriptPath.trim().length > 0 ? body.scriptPath : undefined
-    // 先让 welcome 消息完成处理（「上下文注入」显示在最前），再跑剧本；
-    // 否则 welcome 在 run 期间才注入，上下文注入会排在角色 turn 中间。
-    if (fems !== undefined || scriptPath !== undefined) {
-      await waitForWelcomeTurn(ctx, handle.agent, 5000)
-    }
     if (fems !== undefined || scriptPath !== undefined) {
       const scriptText = await readScriptText(fems, scriptPath)
       await startRunOnSession(ctx, resolved, bridge, runState, id, scriptText, scriptPath)
