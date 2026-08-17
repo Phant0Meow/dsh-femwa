@@ -575,26 +575,29 @@ class PythonBridge:
     """加载外部 Python 文件，调用其中函数"""
 
     def __init__(self, base_dir: str = ""):
-        # 默认从 FemWA 用户目录下的 func_code 查找代码
-        from femBridges.getDir.get_dir import get_user_dir
-        self.default_code_dir = os.path.join(get_user_dir(), "func_code")
+        # base_dir = 剧本文件所在目录（有剧本地址时由 host 传入）；
+        # 空 = 剧本未保存（纯文本运行），此时相对路径一律报错。
         self.base_dir = base_dir
         self.modules: Dict[str, types.ModuleType] = {}
 
     def load(self, alias: str, filepath: str) -> types.ModuleType:
         """
         加载 .py 文件，注册为 alias。
-        若 filepath 是绝对路径，直接使用；否则从 default_code_dir 下查找；
-        func_code 中不存在时回退到 base_dir（项目根）下的相对路径。
+        地址解析规则（todo #2）：
+        - 绝对路径 → 直接使用（无脑支持）
+        - 相对路径 → 相对剧本文件所在目录（base_dir）解析
+        - base_dir 为空（剧本未保存）→ 相对路径报错
+        func_code 默认位置已取消（不再回退查找）。
         """
         if os.path.isabs(filepath):
             full_path = filepath
+        elif self.base_dir:
+            full_path = os.path.join(self.base_dir, filepath)
         else:
-            full_path = os.path.join(self.default_code_dir, filepath)
-            if not os.path.exists(full_path) and self.base_dir:
-                alt_path = os.path.join(self.base_dir, filepath)
-                if os.path.exists(alt_path):
-                    full_path = alt_path
+            raise FileNotFoundError(
+                f"Python Bridge: 相对路径 '{filepath}' 需要剧本文件地址（剧本未保存）。"
+                f"请先「导出 .FEMS」保存剧本，或改用绝对路径。"
+            )
 
         if not os.path.exists(full_path):
             raise FileNotFoundError(f"Python Bridge: 文件不存在 {full_path}")

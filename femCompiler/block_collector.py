@@ -18,10 +18,11 @@ import os
 from typing import Dict, Any, Optional, List, Tuple
 
 
-def _load_file_or_text(value: str, base_dir: str = ".") -> str:
+def _load_file_or_text(value: str, base_dir: str = "") -> str:
     """
     根据新规则加载内容：
-    - file:"path" → 读取文件
+    - file:"path" → 读取文件（绝对路径直接用；相对路径相对 base_dir=剧本目录；
+      未保存态 base_dir 为空时相对路径报错）
     - "文本" 或 裸文本 → 字面量
     """
     if not value:
@@ -35,7 +36,16 @@ def _load_file_or_text(value: str, base_dir: str = ".") -> str:
         or (value.startswith('文件：\u201c') and value.endswith('\u201d'))
     ):
         filepath = value[6:-1]  # 去掉 file:" 和 结尾的 "
-        full_path = os.path.join(base_dir, filepath)
+        if os.path.isabs(filepath):
+            full_path = filepath
+        elif base_dir:
+            full_path = os.path.join(base_dir, filepath)
+        else:
+            print(f"[block_collector] ❌ 相对路径需要剧本文件地址: {filepath}")
+            raise FileNotFoundError(
+                f"相对路径 '{filepath}' 需要剧本文件地址（剧本未保存）。"
+                f"请先「导出 .FEMS」保存剧本，或改用绝对路径。"
+            )
         if not os.path.exists(full_path):
             print(f"[block_collector] ❌ 文件不存在: {full_path}")
             raise FileNotFoundError(f"文件不存在: {full_path}")

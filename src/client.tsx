@@ -105,7 +105,24 @@ export function FemEditorView({ sessionId, saveScript, stopScript }: FemScriptVi
     })
   }
 
+  /** 预检（todo #2）：未保存（无剧本地址）时，剧本里的相对 file: 引用非法——
+   *  只支持绝对地址。运行前硬拦截并给出明确提示；已保存态放行（引擎裁决）。 */
+  const preflightCheck = (fems: string): string | null => {
+    if (state?.scriptPath !== undefined && state.scriptPath.length > 0) return null
+    // 匹配 file:"xxx" / file:'xxx' / file："" / 文件：""（与引擎解析一致）
+    const refs: string[] = []
+    const re = /(?:file|文件)[:：]\s*["'“”]([^"'“”]+)["'“”]/g
+    let m: RegExpExecArray | null
+    while ((m = re.exec(fems)) !== null) refs.push(m[1])
+    const isAbs = (p: string): boolean => /^[a-zA-Z]:[\\/]/.test(p) || p.startsWith('/') || p.startsWith('\\\\')
+    const relative = refs.filter(p => !isAbs(p))
+    if (relative.length === 0) return null
+    return `剧本未保存：依赖文件只支持绝对地址。以下引用是相对路径：${relative.join('、')}。请先「导出 .FEMS」保存剧本（相对路径将基于剧本文件位置解析），或改用绝对路径。`
+  }
+
   const onRun = async (fems: string, opts?: { reset?: boolean }): Promise<void> => {
+    const problem = preflightCheck(fems)
+    if (problem !== null) throw new Error(problem)
     const response = await fetch('/dsh-femwa/run', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },

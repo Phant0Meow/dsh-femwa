@@ -1785,13 +1785,12 @@ async function startRunOnSession(
   runState.sessionId = sessionId
   runState.running = true
   try {
-    // base_dir = the script's own directory (FemWA CLI semantics): @func
-    // relative files (e.g. werewolf_utils.py beside the script) resolve
-    // against it. 已保存/导入（有地址）→ 剧本文件所在目录；未保存（纯文本）
-    // → 项目根（todo #2 再收紧为「未保存只支持绝对地址」）。
+    // base_dir = 剧本文件所在目录（todo #2）：code/memory/context 的相对
+    // file: 地址基于它解析。有地址（已保存/导入）→ 剧本文件所在目录；
+    // 未保存（纯文本）→ 传空字符串，引擎对相对路径直接报错（只支持绝对地址）。
     const baseDir = effectivePath !== undefined
       ? effectivePath.replace(/[\\/][^\\/]*$/, '')
-      : resolved.femwaRoot
+      : ''
     await bridge.send('run', {
       fems: scriptText,
       base_dir: baseDir,

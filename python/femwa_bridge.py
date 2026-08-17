@@ -227,7 +227,9 @@ def main():
             ensure_default_data()
             start_run(
                 fems_text,
-                args_obj.get("base_dir") or femwa_root,
+                # base_dir：有剧本地址=剧本目录；未保存=空串（引擎对相对路径报错）。
+                # 不能用 `or femwa_root` 回退——空串是「未保存」的合法语义。
+                args_obj.get("base_dir") if args_obj.get("base_dir") is not None else femwa_root,
                 args_obj.get("user_api_key"),
                 args_obj.get("user_api_provider"),
                 args_obj.get("user_api_url"),
