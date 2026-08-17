@@ -551,7 +551,8 @@ function parseActorsBlock(cls) {
 
     // 分割属性部分：逗号或空格分隔均可，但 tools 中有逗号，所以用逗号分割再处理
     const parts = rest.split(',').map(p => p.trim()).filter(Boolean);
-    for (const part of parts) {
+    for (let pi = 0; pi < parts.length; pi++) {
+      const part = parts[pi];
       if (part.startsWith('soul:')) {
         const val = part.slice(5).trim();
         if (!val) throw new Error(`第 ${cl.lineNum + 1} 行: soul 字段缺少值，例如 soul:1`);
@@ -563,6 +564,11 @@ function parseActorsBlock(cls) {
       } else if (part.startsWith('tools')) {
         // 允许 tools = [...] / tools:[...] / tools: true|false（布尔=全部/禁用）
         let toolsStr = part.replace(/^tools\s*[:=]\s*/, '').trim();
+        // tools 列表内部含逗号会被上面的 split 切碎成多段：拼接后续段直到方括号闭合
+        while (!toolsStr.endsWith(']') && pi + 1 < parts.length) {
+          pi += 1;
+          toolsStr += ',' + parts[pi];
+        }
         if (toolsStr.startsWith('[') && toolsStr.endsWith(']')) {
           toolsStr = toolsStr.slice(1, -1);
           tools = toolsStr.split(',').map(s => s.trim()).filter(Boolean);
