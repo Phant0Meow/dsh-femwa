@@ -43,11 +43,14 @@ type FemScriptViewProps = { sessionId: string } & ScriptViewInjected
 /** 画布可视化编辑器（femGen 插件模式）：取代文本编辑标签页。
  *  onRun 把画布生成的 .fems 直接交给插件 run 路由（不落盘），
  *  与聊天窗角色气泡是同一次引擎运行；SSE 事件流由 femGen 内部连接。
- *  挂载时读取会话状态（剧本快照 + 断点）用于恢复画布与「继续」按钮。 */
-export function FemEditorView({ sessionId, stopScript }: FemScriptViewProps) {
+ *  挂载时读取会话状态（剧本记录 + 断点）用于恢复画布与「继续」按钮。
+ *  savedPath=剧本文件地址（导出/导入产生）：非空 → 会话已保存（提示消失、
+ *  支持相对寻址）；空 → 未保存（显示小字提示、依赖只支持绝对地址）。 */
+export function FemEditorView({ sessionId, saveScript, stopScript }: FemScriptViewProps) {
   const [state, setState] = useState<{
     hasScript: boolean
     script?: string
+    scriptPath?: string
     checkpoint: Record<string, string>
     running?: boolean
   } | null>(null)
@@ -70,11 +73,12 @@ export function FemEditorView({ sessionId, stopScript }: FemScriptViewProps) {
     let cancelled = false
     void fetch(`/dsh-femwa/session-state?sessionId=${encodeURIComponent(sessionId)}`)
       .then(response => response.json())
-      .then((data: { ok?: boolean; script?: string; checkpoint?: Record<string, string>; running?: boolean }) => {
+      .then((data: { ok?: boolean; script?: string; scriptPath?: string; checkpoint?: Record<string, string>; running?: boolean }) => {
         if (!cancelled && data.ok === true) {
           setState({
             hasScript: data.script !== undefined,
             script: data.script,
+            scriptPath: data.scriptPath,
             checkpoint: data.checkpoint ?? {},
             running: data.running === true,
           })
@@ -90,6 +94,7 @@ export function FemEditorView({ sessionId, stopScript }: FemScriptViewProps) {
     : state.checkpoint['__main__'] ?? Object.values(state.checkpoint)[0]
 
   // 画布编辑的实时快照写（femGen 防抖调用）：刷新/重启后按会话恢复。
+  // 会话记录 = {path?, text?}：编辑只写 text，保留已有地址。
   const onSnapshot = (fems: string): void => {
     void fetch('/dsh-femwa/session-script', {
       method: 'POST',
@@ -125,6 +130,43 @@ export function FemEditorView({ sessionId, stopScript }: FemScriptViewProps) {
       console.warn('[dsh-femwa] stop failed:', error)
     })
   }
+
+  /** 导出：系统目录选择器选保存目录 → 保存 <目录>/<文件名>.fems → 会话记录
+   *  替换为地址（不保留原文）→ 返回完整路径。 */
+  const onExport = async (fems: string, name: string): Promise<string> => {
+    const pickResp = await fetch('/dsh-femwa/pick-directory', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const pickData = await pickResp.json() as { ok?: boolean; directory?: string | null; error?: string; kind?: string }
+    if (pickData.ok !== true || typeof pickData.directory !== 'string' || pickData.directory.length === 0) {
+      if (pickData.kind === 'browse') {
+        // browse 后端：无系统对话框，前端提示用路径输入（暂未实现）。
+        throw new Error('当前环境不支持系统目录选择器（browse 后端）')
+      }
+      throw new Error(pickData.error ?? (pickData.directory === null ? '已取消选择' : '选择目录失败'))
+    }
+    const safe = name.replace(/[\\/:*?"<>|]/g, '_').replace(/\.fems$/i, '')
+    const fullPath = `${pickData.directory.replace(/[\\/]+$/, '')}\\${safe}.fems`
+    const saved = await saveScript(fullPath, fems)
+    await fetch('/dsh-femwa/session-script', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId, scriptPath: saved }),
+    })
+    setState(prev => prev === null ? prev : { ...prev, scriptPath: saved, script: fems })
+    return saved
+  }
+
+  /** 导入：FileReader 已把本地文件读入画布（femGen 内部），这里把内容上传
+   *  保存到服务端 projects/（按文件名）→ 会话记录只存地址。 */
+  const onImport = async (content: string, filename: string): Promise<string> => {
+    const saved = await saveScript(filename.replace(/\.fems$/i, ''), content)
+    await fetch('/dsh-femwa/session-script', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId, scriptPath: saved }),
+    })
+    setState(prev => prev === null ? prev : { ...prev, scriptPath: saved, script: content })
+    return saved
+  }
   return (
     // data-conversation-composer-overlay：dsh 本体 CSS 据此给 viewArea
     // 确定高度（flex: 1 1 0 + min-height: 0 + overflow: hidden，trajectory
@@ -136,6 +178,9 @@ export function FemEditorView({ sessionId, stopScript }: FemScriptViewProps) {
         onRun={onRun}
         onStop={onStop}
         onSnapshot={onSnapshot}
+        onExport={onExport}
+        onImport={onImport}
+        savedPath={state?.scriptPath}
         initialScript={state?.script}
         initialCheckpoint={checkpointNode}
         initialRunning={state?.running === true}
@@ -144,271 +189,6 @@ export function FemEditorView({ sessionId, stopScript }: FemScriptViewProps) {
   )
 }
 
-/** Full-size panel: browse, paste/edit, save, and run Fem scripts. */
-export function FemScriptView({ sessionId, listScripts, readScript, saveScript, runScript, stopScript, fetchErrors }: FemScriptViewProps) {
-  const [scripts, setScripts] = useState<string[]>([])
-  const [selected, setSelected] = useState<string | undefined>(undefined)
-  const [name, setName] = useState('')
-  const [content, setContent] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [errors, setErrors] = useState<Array<{ ts: number; text: string }>>([])
-  const [runError, setRunError] = useState<string | null>(null)
-
-  const refreshErrors = (): void => {
-    void fetchErrors(sessionId).then(setErrors).catch((error: unknown) => {
-      console.warn('[dsh-femwa] fetch errors failed:', error)
-    })
-  }
-
-  useEffect(() => {
-    refreshErrors()
-    const timer = window.setInterval(refreshErrors, 5000)
-    return () => window.clearInterval(timer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessionId])
-
-  const refresh = (): void => {
-    void listScripts().then(setScripts).catch((error: unknown) => {
-      console.warn('[dsh-femwa] list scripts failed:', error)
-      setScripts([])
-    })
-  }
-
-  useEffect(refresh, [listScripts])
-
-  const pick = (path: string): void => {
-    setSelected(path)
-    setName(path.split(/[\\/]/).pop()?.replace(/\.fems$/i, '') ?? '')
-    void readScript(path).then((text) => { setContent(text) }).catch((error: unknown) => {
-      console.warn('[dsh-femwa] read script failed:', error)
-      setContent('')
-    })
-  }
-
-  const run = (): void => {
-    if (busy) return
-    setBusy(true)
-    setRunError(null)
-    const target = selected
-    const saveThenRun = target === undefined || name.trim() !== (selected?.split(/[\\/]/).pop()?.replace(/\.fems$/i, '') ?? '')
-    const proceed = saveThenRun
-      ? saveScript(name.trim() || 'unnamed', content)
-      : Promise.resolve(target)
-    void proceed
-      .then((path) => runScript(sessionId, path))
-      .catch((error: unknown) => {
-        console.warn('[dsh-femwa] save/run script failed:', error)
-        setRunError(error instanceof Error ? error.message : String(error))
-      })
-      .finally(() => { setBusy(false) })
-  }
-
-  const inputStyle: CSSProperties = {
-    padding: '8px',
-    border: '1px solid var(--dsw-border, #ddd)',
-    borderRadius: '6px',
-    background: 'var(--dsw-surface-2, #f5f5f5)',
-    color: 'var(--dsw-text-primary, #222)',
-    fontSize: '12px',
-    fontFamily: 'monospace',
-    lineHeight: 1.5,
-    boxSizing: 'border-box',
-  }
-
-  return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      height: '100%',
-      minHeight: '300px',
-      gap: '10px',
-      padding: '12px 16px',
-      boxSizing: 'border-box',
-    }}>
-      <div style={{ fontWeight: 600, fontSize: '14px', color: 'var(--dsw-text-primary, #222)' }}>
-        Fem 剧本
-        <span style={{ fontWeight: 400, fontSize: '12px', color: 'var(--dsw-text-tertiary, #999)', marginLeft: '8px' }}>
-          剧本是会话的元配置（一段 .fems 文本），不是聊天消息
-        </span>
-      </div>
-      <div style={{ display: 'flex', gap: '10px', flex: 1, minHeight: 0 }}>
-        {/* left: script list */}
-        <div style={{
-          width: '220px',
-          border: '1px solid var(--dsw-border, #ddd)',
-          borderRadius: '8px',
-          overflowY: 'auto',
-          padding: '4px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '2px',
-        }}>
-          <button
-            type="button"
-            onClick={() => { setSelected(undefined); setName(''); setContent('') }}
-            style={{
-              padding: '6px 10px',
-              border: 'none',
-              borderRadius: '6px',
-              background: selected === undefined ? 'var(--dsw-accent, #4a9eff)' : 'transparent',
-              color: selected === undefined ? '#fff' : 'var(--dsw-text-secondary, #666)',
-              cursor: 'pointer',
-              textAlign: 'left',
-              fontSize: '13px',
-            }}
-          >
-            ✏️ 新建/粘贴剧本
-          </button>
-          {scripts.map((path) => {
-            const label = path.split(/[\\/]/).pop() ?? path
-            return (
-              <button
-                key={path}
-                type="button"
-                onClick={() => pick(path)}
-                title={path}
-                style={{
-                  padding: '6px 10px',
-                  border: 'none',
-                  borderRadius: '6px',
-                  background: selected === path ? 'var(--dsw-accent, #4a9eff)' : 'transparent',
-                  color: selected === path ? '#fff' : 'var(--dsw-text-primary, #222)',
-                  cursor: 'pointer',
-                  textAlign: 'left',
-                  fontSize: '13px',
-                  whiteSpace: 'nowrap',
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                }}
-              >
-                {label}
-              </button>
-            )
-          })}
-          {scripts.length === 0 && (
-            <div style={{ padding: '8px 10px', fontSize: '12px', color: 'var(--dsw-text-tertiary, #999)' }}>
-              未找到剧本。可粘贴新剧本，或放到 user_data/projects 下。
-            </div>
-          )}
-        </div>
-        {/* right: editor + actions */}
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '8px', minWidth: 0 }}>
-          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-            <input
-              value={name}
-              onChange={(e) => setName(e.currentTarget.value)}
-              placeholder="剧本名称（保存为 .fems 文件）"
-              style={{ ...inputStyle, flex: 1, fontFamily: 'inherit', fontSize: '13px' }}
-            />
-            <button
-              type="button"
-              onClick={refresh}
-              style={{
-                padding: '6px 12px',
-                border: '1px solid var(--dsw-border, #ddd)',
-                borderRadius: '6px',
-                background: 'transparent',
-                color: 'var(--dsw-text-secondary, #666)',
-                cursor: 'pointer',
-                fontSize: '13px',
-              }}
-            >
-              刷新列表
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setBusy(true)
-                setRunError(null)
-                void stopScript()
-                  .catch((error: unknown) => {
-                    console.warn('[dsh-femwa] stop failed:', error)
-                    setRunError(error instanceof Error ? error.message : String(error))
-                  })
-                  .finally(() => { setBusy(false) })
-              }}
-              style={{
-                padding: '6px 14px',
-                border: '1px solid color-mix(in srgb, #e5484d 60%, transparent)',
-                borderRadius: '6px',
-                background: 'transparent',
-                color: '#e5484d',
-                cursor: 'pointer',
-                fontSize: '13px',
-              }}
-            >
-              ⏹ 停止
-            </button>
-            <button
-              type="button"
-              disabled={busy || name.trim().length === 0 || content.trim().length === 0}
-              onClick={run}
-              style={{
-                padding: '6px 14px',
-                border: 'none',
-                borderRadius: '6px',
-                background: 'var(--dsw-accent, #4a9eff)',
-                color: '#fff',
-                cursor: 'pointer',
-                fontSize: '13px',
-              }}
-            >
-              {busy ? '运行中…' : '保存并运行'}
-            </button>
-          </div>
-          <textarea
-            value={content}
-            onChange={(e) => setContent(e.currentTarget.value)}
-            placeholder={'粘贴或编辑 .fems 剧本内容…\n\nmeta:\n  name = 我的剧本\n  session = new\n\nactors:\n  ai @Eve = soul:the1stlittlesoul\n\naction speak @ai(@Eve):\n  prompt: 说句话\n\nmainflow:\n  [START] -> speak -> [END]'}
-            spellCheck={false}
-            style={{ ...inputStyle, flex: 1, resize: 'none' }}
-          />
-          <div style={{ fontSize: '12px', color: 'var(--dsw-text-tertiary, #999)' }}>
-            保存的剧本会出现在列表和侧边栏菜单中；「保存并运行」会在<strong>当前会话</strong>播放（当前会话需为 Fem 剧本模式）。
-          </div>
-          {runError !== null && (
-            <div style={{
-              border: '1px solid color-mix(in srgb, #e5484d 40%, transparent)',
-              borderRadius: '8px',
-              background: 'color-mix(in srgb, #e5484d 8%, transparent)',
-              padding: '8px 12px',
-              color: '#e5484d',
-              fontSize: '12px',
-            }}>
-              {runError}
-            </div>
-          )}
-          {errors.length > 0 && (
-            <div style={{
-              border: '1px solid color-mix(in srgb, #e5484d 40%, transparent)',
-              borderRadius: '8px',
-              background: 'color-mix(in srgb, #e5484d 8%, transparent)',
-              padding: '8px 12px',
-              maxHeight: '140px',
-              overflowY: 'auto',
-            }}>
-              <div style={{ fontSize: '13px', fontWeight: 600, color: '#e5484d', marginBottom: '4px' }}>
-                ⚠ 运行错误（元信息，不进入聊天记录）
-              </div>
-              {errors.map((err, i) => (
-                <div key={i} style={{
-                  fontSize: '12px',
-                  color: 'var(--dsw-text-secondary, #666)',
-                  fontFamily: 'monospace',
-                  whiteSpace: 'pre-wrap',
-                  wordBreak: 'break-word',
-                  marginBottom: '4px',
-                }}>
-                  {new Date(err.ts).toLocaleTimeString()} — {err.text}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
 
 // ── dsh-femwa/chat node ───────────────────────────────────────────────────
 
@@ -1181,10 +961,13 @@ export function apply(ctx: any): void {
       sessions?.open?.(data.sessionId)
     },
     saveScript: async (name: string, content: string): Promise<string> => {
+      // 绝对路径（导出流程选目录拼出的完整路径）→ path 直写；
+      // 否则按 name 存 user_data/projects/（导入/侧边栏保存）。
+      const isPath = /^[a-zA-Z]:[\\/]/.test(name) || name.startsWith('/') || name.startsWith('\\\\')
       const response = await fetch('/dsh-femwa/save-script', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ name, content }),
+        body: JSON.stringify(isPath ? { path: name, content } : { name, content }),
       })
       if (!response.ok) {
         throw new Error(`save-script HTTP ${response.status}`)
