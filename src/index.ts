@@ -69,7 +69,7 @@ declare module '@deepseek-ai/cordis' {
 }
 
 /** Required services: agent registry + session store. */
-export const inject = ['agents', 'sessions']
+export const inject = ['agents', 'sessions', 'agentDefaultModel']
 
 export const Config = z.object({
   /** Master switch. */
@@ -163,6 +163,35 @@ function kickWelcome(agent: Agent): void {
       console.log(`[dsh-femwa] FAILED to steer welcome: ${String(error)}`)
     }
   }, 1500)
+}
+
+/**
+ * 等待 welcome 消息的 agent turn 处理完成（turn/end 出现）。
+ * create-session 在跑剧本前调用：让「上下文注入」先显示，再开始剧本。
+ * @param ctx - 宿主上下文（监听会话事件）。
+ * @param agent - 新建的 Fem 会话 agent。
+ * @param timeoutMs - 兜底超时（welcome 注入失败也不阻塞剧本启动）。
+ */
+function waitForWelcomeTurn(ctx: Context, agent: Agent, timeoutMs: number): Promise<void> {
+  const session = agent.session
+  if (session.events.some(e => e.type === 'turn/end')) return Promise.resolve()
+  return new Promise<void>((resolve) => {
+    let settled = false
+    const off = ctx.on('session/event', (s: Session, e: SessionEvent) => {
+      if (settled || String(s.id) !== String(session.id)) return
+      if (e.type === 'turn/end') {
+        settled = true
+        off()
+        resolve()
+      }
+    })
+    setTimeout(() => {
+      if (settled) return
+      settled = true
+      off()
+      resolve()
+    }, timeoutMs)
+  })
 }
 
 // ── HTTP helpers (create-session route) ───────────────────────────────────
@@ -383,6 +412,8 @@ interface ResolvedConfig {
   toolWhitelist: string[]
   subagentProvider: string
   subagentIdleTimeoutMs: number
+  /** 子 agent 推理等级（'off'|'low'|'high'|'max'）；缺省跟随全局默认模型选择。 */
+  subagentReasoning?: string
 }
 
 function resolveConfig(config: unknown): ResolvedConfig {
@@ -401,6 +432,7 @@ function resolveConfig(config: unknown): ResolvedConfig {
     defaultActorTools: c.defaultActorTools ?? true,
     subagentProvider: c.subagentProvider ?? 'spawn',
     subagentIdleTimeoutMs: c.subagentIdleTimeoutMs ?? 120_000,
+    ...c.subagentReasoning === undefined ? {} : { subagentReasoning: c.subagentReasoning },
   }
 }
 
@@ -410,6 +442,11 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
     console.log('[dsh-femwa] disabled by config')
     return
   }
+  // 全局默认模型选择（用户在模型选择 UI 保存的推理等级在这里）；
+  // 子 agent 不走 apiproxy 的 selection 安装，需要手动注入。
+  const defaultModel = ctx.get('agentDefaultModel') as
+    | { currentSelection(): unknown }
+    | undefined
 
   // Admit 'dsh-femwa/chat' into the session event vocabulary at runtime (the
   // persistence read path otherwise refuses logs containing it). Registration
@@ -617,6 +654,18 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
         }
         break
       }
+      case 'ai_retry': {
+        // 赋值失败重试：把拒绝原因显示出来（此前静默——用户视角是
+        // "AI 输出了赋值但系统没识别"，实际是引擎拒绝了非法赋值）。
+        const errors = Array.isArray(d.errors) ? d.errors.map(String) : []
+        const attempt = typeof d.attempt === 'number' ? d.attempt : 0
+        const nodeName = typeof d.node_name === 'string' ? d.node_name : undefined
+        if (errors.length > 0) {
+          appendChat(ctx, session, `⚠️ ${errors[0]}（第 ${attempt} 次重试）`, 'notice',
+            undefined, nodeName === undefined ? undefined : runState.nodeScopes.get(nodeName))
+        }
+        break
+      }
       case 'human_wait': {
         runState.humanWait = {
           waitKey: String(d.wait_key ?? ''),
@@ -641,6 +690,9 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
         break
       }
       case 'ai_done': {
+        // dsh 后端模式：回答已由子代理事件镜像（原生 assistant 节点）显示，
+        // 这里不再自绘 role 行；llmBridge 直连模式无镜像，仍走 role 行。
+        if (resolved.dshAiBackend) break
         const output = typeof d.output === 'string' && d.output.length > 0 ? d.output : undefined
         if (output !== undefined) {
           const nodeName = typeof d.node_name === 'string' ? d.node_name : undefined
@@ -663,7 +715,7 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
           runState.nodeScopes.set(reqNode, reqScope)
         }
         console.log(`[dsh-femwa] ai_request received node=${String(d.node_name ?? '')} wait_key=${String(d.wait_key ?? '')}`)
-        void runAiSubagent(ctx, resolved, bridge, session, d, recordError).catch((error: unknown) => {
+        void runAiSubagent(ctx, resolved, bridge, session, d, recordError, defaultModel, runState.nodeActors).catch((error: unknown) => {
           recordError(session.id, `子 agent 执行失败：${String(error)}`)
           void bridge.send('human_input', {
             wait_key: String(d.wait_key ?? ''),
@@ -714,7 +766,7 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
       kind: 'exact',
       path: '/dsh-femwa/create-session',
       handler: (req: IncomingMessage, res: ServerResponse): void => {
-        void handleCreateSession(req, res, ctx, resolved, bridge, runState).catch((error: unknown) => {
+        void handleCreateSession(req, res, ctx, resolved, bridge, runState, guidedSessions).catch((error: unknown) => {
           writeJson(res, 500, { ok: false, error: String(error) })
         })
       },
@@ -744,6 +796,25 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
         }).catch((error: unknown) => {
           writeJson(res, 500, { ok: false, error: String(error) })
         })
+      },
+    })
+    webServer.register({
+      kind: 'exact',
+      path: '/dsh-femwa/turn-scopes',
+      handler: (req: IncomingMessage, res: ServerResponse): void => {
+        // 主会话镜像 turn → scope 映射（前端视角过滤用）。
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const sessionId = url.searchParams.get('sessionId')
+        if (sessionId === null || sessionId.length === 0) {
+          writeJson(res, 400, { ok: false, error: 'sessionId is required' })
+          return
+        }
+        const scopes = turnScopesBySession.get(sessionId)
+        const out: Record<string, string[]> = {}
+        if (scopes !== undefined) {
+          for (const [turn, scope] of scopes) out[String(turn)] = scope
+        }
+        writeJson(res, 200, { ok: true, scopes: out })
       },
     })
     // femGen 画布控制面：pause/resume 目前对应 bridge 的半实现
@@ -987,6 +1058,7 @@ function appendChat(
       kind,
       ...visible === undefined ? {} : { visible },
     })
+    console.log(`[dsh-femwa] chat: kind=${kind} actor=${actor ?? '-'} len=${text.length}`)
   } catch (error: unknown) {
     console.log(`[dsh-femwa] appendChat failed: ${String(error)}`)
   }
@@ -1078,6 +1150,27 @@ function toolFilterOf(
 }
 
 /** One engine AI turn executed through a dsh subagent. */
+
+// 子代理事件镜像到父会话时的 turn 号重映射（父会话可能连续多个 AI 节点，
+// 每个子代理 turn 从 1 开始，直接转发会撞号）。每次 run 分配一个 base，
+// 预留 100 个 turn 给该 run 内部递增，fork 并发多个子代理也不冲突。
+const turnBaseBySession = new Map<string, number>()
+
+/** 主会话镜像 turn → scope 映射（重映射后的 turn 号 → 节点 scope 演员名）。
+ * 前端视角过滤用：god 全显示，角色视角按 scope 隐藏其他 turn。
+ * 镜像始终全量（信息完整落盘），视角过滤只在显示层。 */
+const turnScopesBySession = new Map<string, Map<number, string[]>>()
+
+/** 子代理事件类型：镜像到父会话让 dsh 原生 assistant 节点渲染（思考折叠/
+ * 工具卡片/回答，零自绘 UI）。 */
+const FORWARD_CHILD_EVENTS = new Set([
+  'turn/start', 'step/start', 'assistant/chunk', 'assistant/message',
+  'tool/call', 'tool/result', 'step/end', 'turn/end',
+])
+
+/** surface-eligible 事件（会话 API 要求 surfaceOp 标记）；其余事件不能带。 */
+const SURFACE_OP_EVENTS = new Set(['assistant/message', 'tool/result'])
+
 async function runAiSubagent(
   ctx: Context,
   resolved: ResolvedConfig,
@@ -1085,6 +1178,8 @@ async function runAiSubagent(
   session: Session,
   request: Record<string, unknown>,
   recordError: (sessionId: SessionId, text: string) => void,
+  defaultModel?: { currentSelection(): unknown },
+  nodeActors: ReadonlyMap<string, string> = new Map(),
 ): Promise<void> {
   const waitKey = String(request.wait_key ?? '')
   if (waitKey.length === 0) return
@@ -1136,9 +1231,85 @@ async function runAiSubagent(
     // an empty allow-list (no tools at all).
     ...toolFilterOf(resolved, request),
   })
+  // 推理等级注入：子 agent（spawn 进程内）不走 apiproxy 的 model-selection
+  // 安装（installSelection 只作用于会话 agent），导致用户在模型选择里调的
+  // 推理等级对子 agent 永远无效（表现为"关了推理还在输出 cot"）。
+  // 这里直接给子 agent 的请求链注入：显式配置 subagentReasoning 优先，
+  // 否则跟随全局默认模型选择（用户 UI 保存的默认）。
+  if (run.localAgent !== undefined) {
+    const effort = resolved.subagentReasoning
+      ?? (defaultModel?.currentSelection() as { reasoningEffort?: string } | undefined)?.reasoningEffort
+    if (effort !== undefined && effort.length > 0) {
+      run.localAgent.ctx.on('agent/request', async (_payload, next) => {
+        const resolvedCall = await next()
+        return { ...resolvedCall, reasoningEffort: effort }
+      })
+    }
+  }
   // Watchdog starts once the child exists; every child-session event rearms
   // it. Listener is scoped to the child's session id and disposed in finally.
   armIdle()
+  const nodeName = String(request.node_name ?? '')
+  const actor = nodeActors.get(nodeName) ?? nodeName
+  // turn 首行：发言者名字（之后 cot/工具调用/回答由 dsh 原生 UI 渲染）
+  const scopeInfo = Array.isArray(request.scope_info)
+    ? request.scope_info.filter((x): x is string => typeof x === 'string')
+    : undefined
+  appendChat(ctx, session, actor, 'speaker', actor, scopeInfo)
+  const sid = String(session.id)
+  const baseTurn = (turnBaseBySession.get(sid) ?? 100_000) + 1
+  turnBaseBySession.set(sid, baseTurn + 100)
+  const mapTurn = (childTurn: unknown): number =>
+    typeof childTurn === 'number' ? baseTurn + childTurn - 1 : baseTurn
+  // 合成 turn/step 起始事件（子代理 one-shot 会话没有这两个 start 事件，
+  // 原生 assistant 节点以 step/start 为 start，缺了就不渲染）。
+  let turnStarted = false
+  let currentStep = -1
+  const ensureTurnStart = (): void => {
+    if (turnStarted) return
+    // 幂等兜底：log 里已有同 turn 的 turn/start（可能由 dsh 内部机制补发）
+    // 就不重复 append——重复的 turn/start 会让 deliverables 等以
+    // turn/start 为 start 的节点收到两个 start Match（历史加载失败）。
+    const dup = session.events.some(e => e.type === 'turn/start'
+      && (e.data as { turn?: number }).turn === baseTurn)
+    if (dup) {
+      turnStarted = true
+      return
+    }
+    turnStarted = true
+    try {
+      session.append('turn/start', { turn: baseTurn })
+    } catch (error: unknown) {
+      console.log(`[dsh-femwa] mirror turn/start failed: ${String(error)}`)
+    }
+    // 记录镜像 turn 的 scope（合成 turn/start 时；子代理自身没有 turn/start）
+    let scopes = turnScopesBySession.get(sid)
+    if (scopes === undefined) {
+      scopes = new Map()
+      turnScopesBySession.set(sid, scopes)
+    }
+    scopes.set(baseTurn, scopeInfo ?? [])
+  }
+  const ensureStepStart = (step: number): void => {
+    if (currentStep === step) return
+    // 幂等兜底：log 里已有相同 turn:step 的 step/start（可能由 dsh 内部
+    // 机制补发）就不重复 append——重复会让 assistant-step / trajectory
+    // 节点收到两个 start Match（历史加载失败）。
+    const dup = session.events.some(e => e.type === 'step/start'
+      && (e.data as { turn?: number }).turn === baseTurn
+      && (e.data as { step?: number }).step === step)
+    if (dup) {
+      currentStep = step
+      return
+    }
+    currentStep = step
+    ensureTurnStart()
+    try {
+      session.append('step/start', { turn: baseTurn, step })
+    } catch (error: unknown) {
+      console.log(`[dsh-femwa] mirror step/start failed: ${String(error)}`)
+    }
+  }
   const onChildEvent = (watched: Session, watchedEvent: SessionEvent): void => {
     if (String(watched.id) !== String(run.id)) return
     armIdle()
@@ -1146,8 +1317,35 @@ async function runAiSubagent(
     if (watchedEvent.type === 'assistant/chunk') {
       const chunk = (watchedEvent.data as { chunk?: { type?: string; text?: unknown } }).chunk
       if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
-        broadcastSse('ai_token', { node_name: String(request.node_name ?? ''), token: chunk.text })
+        broadcastSse('ai_token', { node_name: nodeName, token: chunk.text })
       }
+    }
+    // 镜像到父会话：dsh 原生 assistant 节点渲染完整 turn（思考折叠/工具卡片/
+    // 流式回答），zero 自绘 UI。turn/step 号重映射避免多节点撞号。
+    // 镜像始终全量（信息完整落盘）；视角过滤在前端显示层（CSS 隐藏）。
+    if (!FORWARD_CHILD_EVENTS.has(watchedEvent.type)) return
+    const raw = watchedEvent.data as Record<string, unknown>
+    const mappedTurn = mapTurn(raw.turn)
+    const mappedStep = typeof raw.step === 'number' ? raw.step : 0
+    // 子代理是 one-shot 会话，事件流没有 turn/start、step/start（只有
+    // chunk/message/step/end/turn/end），而 dsh 原生 assistant 节点以
+    // step/start 为 start——这里合成两个 start 事件，原生 turn 才能渲染。
+    if (watchedEvent.type === 'turn/start' || watchedEvent.type === 'assistant/chunk'
+      || watchedEvent.type === 'assistant/message' || watchedEvent.type === 'step/end') {
+      ensureTurnStart()
+      if (watchedEvent.type !== 'turn/start') ensureStepStart(mappedStep)
+    }
+    const data = { ...raw }
+    if ('turn' in data) data.turn = mappedTurn
+    if ('step' in data && typeof data.step === 'number') data.step = data.step
+    try {
+      // 仅 surface-eligible 事件（assistant/message、tool/result）要求
+      // surfaceOp 标记；其余事件（chunk/step 边界等）不能带。
+      const surface = SURFACE_OP_EVENTS.has(watchedEvent.type)
+      session.append(watchedEvent.type as never, data,
+        surface ? { surfaceOp: 'append' } : undefined)
+    } catch (error: unknown) {
+      console.log(`[dsh-femwa] mirror child event failed (${watchedEvent.type}): ${String(error)}`)
     }
   }
   const disposeListener = ctx.on('session/event', onChildEvent)
@@ -1165,10 +1363,7 @@ async function runAiSubagent(
     if (result.stopReason !== 'completed' && result.stopReason !== 'max-tokens') {
       recordError(session.id, `子 agent 结束异常：${result.stopReason}`)
     }
-    // Display the thinking chain (folded) BEFORE the role line.
-    if (thinking.length > 0) {
-      appendChat(ctx, session, thinking, 'thinking')
-    }
+    // 思考链已在 onChildEvent 实时显示（带角色名的折叠行），这里不再重复。
     await bridge.send('human_input', {
       wait_key: waitKey,
       body: { output, trajectory },
@@ -1466,6 +1661,7 @@ async function handleCreateSession(
   resolved: ResolvedConfig,
   bridge: FemwaBridge,
   runState: { sessionId?: SessionId; running: boolean },
+  guidedSessions: Set<string>,
 ): Promise<void> {
   if (req.method !== 'POST') {
     writeJson(res, 405, { ok: false, error: 'method not allowed' })
@@ -1499,10 +1695,21 @@ async function handleCreateSession(
       },
     })
     console.log(`[dsh-femwa] created fem session ${handle.agent.id} (cwd=${cwd})`)
+    // 引导文案立即注入（此前只在用户发消息被拒时出现，会排到运行事件
+    // 后面——剧本先跑起来、提示才姗姗来迟）。guidedSessions 去重，
+    // pre-step reject 路径不会再重复注入。
+    if (!guidedSessions.has(String(handle.agent.id))) {
+      guidedSessions.add(String(handle.agent.id))
+      appendChat(ctx, handle.agent.session, GUIDE_TEXT, 'notice')
+    }
     kickWelcome(handle.agent)
-
     const fems = typeof body.fems === 'string' && body.fems.trim().length > 0 ? body.fems : undefined
     const scriptPath = typeof body.scriptPath === 'string' && body.scriptPath.trim().length > 0 ? body.scriptPath : undefined
+    // 先让 welcome 消息完成处理（「上下文注入」显示在最前），再跑剧本；
+    // 否则 welcome 在 run 期间才注入，上下文注入会排在角色 turn 中间。
+    if (fems !== undefined || scriptPath !== undefined) {
+      await waitForWelcomeTurn(ctx, handle.agent, 5000)
+    }
     if (fems !== undefined || scriptPath !== undefined) {
       const scriptText = await readScriptText(fems, scriptPath)
       await startRunOnSession(ctx, resolved, bridge, runState, id, scriptText, scriptPath)

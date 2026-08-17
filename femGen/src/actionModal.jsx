@@ -177,7 +177,7 @@ function ActionModal({
             />
           </Field>
 
-          {(f.executorType === 'ai' || f.executorType === 'human') && (
+          {(f.executorType === 'ai' || f.executorType === 'human' || f.executorType === 'mind') && (
             <Field label="Prompt" hint="支持 {变量} 插值，AI 需输出 <<KEY: value>>">
               <textarea
                 value={f.prompt}

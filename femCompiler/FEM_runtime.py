@@ -952,17 +952,25 @@ class FEMRunner:
         if self._llm_stop_event:
             self._llm_stop_event.set()
 
-        # 2. 取消主协程（深层 fork 循环嵌套任务链的 cancel 是同步递归，
-        #    栈溢出时兜底：在事件循环线程里再取消一次）
-        if self._main_task and not self._main_task.done():
-            try:
-                self._main_task.cancel()
-            except RecursionError:
-                print("[runtime] ⚠️ Task.cancel 递归栈溢出，改在事件循环线程内重试取消...")
-                loop = self._main_task.get_loop()
-                task = self._main_task
-                loop.call_soon_threadsafe(task.cancel)
-            print("[runtime] 主协程已取消")
+        # 2. 取消主协程 + 所有活动分支协程。
+        #    asyncio 的 cancel 不级联：fork 分支等子任务注册在
+        #    engine._active_tasks，只取消 _main_task 会让分支继续跑
+        #    （表现为"停止失败、狼人节点疯狂重复"）。
+        #    深层嵌套任务链的 cancel 是同步递归，栈溢出时兜底：
+        #    在事件循环线程里再取消一次。
+        targets = [self._main_task]
+        active = getattr(self.engine, '_active_tasks', None)
+        if active:
+            targets.extend(active)
+        for task in targets:
+            if task is not None and not task.done():
+                try:
+                    task.cancel()
+                except RecursionError:
+                    print("[runtime] ⚠️ Task.cancel 递归栈溢出，改在事件循环线程内重试取消...")
+                    loop = task.get_loop()
+                    loop.call_soon_threadsafe(task.cancel)
+        print("[runtime] 主协程与全部活动分支协程已取消")
 
         # 发送事件通知前端
         self._emit_event('flow_stopped', {})
@@ -2187,6 +2195,7 @@ class FEMRunner:
         elif etype == 'assign': return self._exec_assign(ad)  # assign 是同步的，暂不 await
         elif etype == 'ai': return await self._exec_ai(ad, eparam)
         elif etype == 'human': return await self._exec_human(ad, eparam)
+        elif etype == 'mind': return await self._exec_mind(ad, eparam)
         else:
             print(f"[runtime]⚠️  未支持的执行类型: @{etype}")
             return None
@@ -3204,6 +3213,43 @@ class FEMRunner:
             import traceback
             traceback.print_exc()
             raise
+
+    # ══════════════════════════════════════════════════
+    #  @mind 处理（运行时按执行者类型分发）
+    # ══════════════════════════════════════════════════
+
+    async def _exec_mind(self, ad, eparam: str) -> Any:
+        """mind 节点：运行时按实际执行者类型分发到 AI 或 human 路径。
+
+        执行者可能是变量（@mind(@speaker)），由剧本在运行中赋值——每轮
+        可能是人类也可能是 AI，编译期无法预判。因此 @mind 保持原样解析，
+        每轮进入节点时重新解析执行者（_resolve_actor_name 读当前变量值），
+        然后整体委托给 _exec_ai 或 _exec_human（事件、等待、赋值、重试等
+        行为完全复用现有路径，node_type 事件也自动正确）。
+        """
+        print(f"[runtime]🧠 Mind Action: {ad.name}")
+        if not eparam:
+            raise ValueError(
+                f"Mind Action '{ad.name}' 缺少执行者参数。期望: action {ad.name} @mind(@角色或变量):"
+            )
+        actor_name = self._resolve_actor_name(eparam)
+        if actor_name not in self.script.actors:
+            raise ValueError(
+                f"Mind Action '{ad.name}' 的执行者 '{eparam}' 解析为 '{actor_name}'，"
+                f"但 actors 中不存在该角色，无法确定执行者类型（ai/human）。"
+            )
+        atype = self.script.actors[actor_name].type.value
+        print(f"[runtime]🧠 mind 分发: {actor_name} 是 {atype} 执行者 → "
+              f"走 {'AI' if atype == 'ai' else 'human' if atype == 'human' else atype} 路径")
+        if atype == 'ai':
+            return await self._exec_ai(ad, eparam)
+        if atype == 'human':
+            return await self._exec_human(ad, eparam)
+        raise ValueError(
+            f"Mind Action '{ad.name}' 的执行者 '{actor_name}' 类型为 '{atype}'，"
+            f"mind 仅支持 ai/human 执行者（blueprint 蓝图角色尚未实现）。"
+        )
+
     # ══════════════════════════════════════════════════
     #  Out 写回
     # ══════════════════════════════════════════════════
@@ -3463,19 +3509,26 @@ class FEMRunner:
         return None
         
         
-    def _get_actor_info(self, action, executor_param: str) -> dict:
-        """解析当前 action 的 actor 信息"""
-        info = {}
+    def _resolve_actor_name(self, executor_param: str) -> str:
+        """把执行者参数解析为真实 actor 名。
+
+        支持动态变量多层引用（例如 @speaker → @voter → @Cat），
+        读当前变量值（局部优先于全局由 vm.get 决定）。
+        """
         actor_name = executor_param
-        print(f"[DEBUG _get_actor_info] 入口: action={getattr(action,'name','?')}, executor_param={executor_param!r}")
-        # 如果是动态变量（如 @speaker、@voter），上下文感知地解析真实演员名
-        # 支持多层引用（例如 @speaker → @voter → @Cat），优先查局部变量再查全局
         while actor_name.startswith('@') and actor_name not in self.script.actors:
             resolved = self.vm.get(actor_name)
             if not resolved or not isinstance(resolved, str) or not resolved.startswith('@'):
                 break
             actor_name = resolved
-            print(f"[DEBUG _get_actor_info] 二次解析: actor_name={actor_name!r}")
+            print(f"[DEBUG _resolve_actor_name] 二次解析: actor_name={actor_name!r}")
+        return actor_name
+
+    def _get_actor_info(self, action, executor_param: str) -> dict:
+        """解析当前 action 的 actor 信息"""
+        info = {}
+        actor_name = self._resolve_actor_name(executor_param)
+        print(f"[DEBUG _get_actor_info] 入口: action={getattr(action,'name','?')}, executor_param={executor_param!r}")
         #print(f"[DEBUG _get_actor_info] eparam={executor_param!r}, action.as_actor={getattr(action, 'as_actor', None)!r}")
         # ── 完整打印整个 actors 字典 ──
         #print(f"[runtime]=== full actors dict START ===")

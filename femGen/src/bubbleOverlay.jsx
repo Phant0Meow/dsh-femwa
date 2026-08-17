@@ -216,8 +216,12 @@ function BubbleOverlay({ bubbleOverlay, nodes, nodeStates, actionStore, onClose,
   if (!node || node.type !== 'action') return null;
   const action = actionStore?.find(a => a.id === node.actionId);
   const ns = nodeStates[node.id] || {};
-  const isAI = action?.executorType === 'ai';
-  const isHuman = action?.executorType === 'human';
+  // mind 节点按运行时 node_type 判断（node_start 事件写入 ns.type）：
+  // 执行者运行时才确定（可能是变量赋值），静态 executorType 无法预判；
+  // 未运行（ns.type 空）时回退到静态 executorType。
+  const runType = ns.type || action?.executorType;
+  const isAI = runType === 'ai';
+  const isHuman = runType === 'human';
   const isStreaming = ns.status === 'ai_streaming';
   const c = ti(action?.executorType)?.c || '#94a3b8';
   const scrollRef = useRef(null);

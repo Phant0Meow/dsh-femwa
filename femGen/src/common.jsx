@@ -89,6 +89,7 @@ const PSW = 90,
 const TYPES = [
   { t: 'ai', lbl: '@ai', c: '#4f6ef7', bg: '#eef1ff' },
   { t: 'human', lbl: '@human', c: '#0ea577', bg: '#edfaf4' },
+  { t: 'mind', lbl: '@mind', c: '#e11d48', bg: '#fff1f2' },
   { t: 'func', lbl: '@func', c: '#d97706', bg: '#fffbeb' },
   { t: 'assign', lbl: '@assign', c: '#8b5cf6', bg: '#f5f3ff' },
 ];
@@ -502,7 +503,9 @@ const btnS = {
 // ═══ FIELD ═══
 function F({ label, hint, children }) {
   return (
-    <div style={{ marginBottom: 13 }}>
+    // flex: 1 + minWidth: 0：并排字段（如 Version/Owner）在 flex 行里自动
+    // 平分宽度；block 父级下 flex 属性不生效，单列布局不受影响。
+    <div style={{ marginBottom: 13, flex: 1, minWidth: 0 }}>
       <div
         style={{
           fontSize: 11,

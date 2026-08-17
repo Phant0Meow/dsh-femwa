@@ -161,7 +161,9 @@ function ProjPanel({ proj, actorNames, onChange }) {
                   onChange={(e) => upd({ type: e.target.value })}
                   style={{
                     ...inp,
-                    width: 70,
+                    // 宽度自适应内容（ai/human），不随栏宽收缩
+                    width: 'auto',
+                    flex: '0 0 auto',
                     padding: '5px 6px',
                     fontSize: 11,
                   }}

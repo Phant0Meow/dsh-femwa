@@ -2507,16 +2507,20 @@ onOpenApiKey={() => {
       <div
         style={{
           display: 'flex',
+          // 插件模式整体缩放锁定 75%（zoom 连布局尺寸一起缩；
+          // 弹窗 fixed 相对本容器定位，inset:0 跟随缩放）。
+          width: '100%',
           height: plugin ? '100%' : '100vh',
+          zoom: plugin ? 0.75 : 1,
           background: '#edf1f8',
           fontFamily: 'DM Sans, sans-serif',
           overflow: 'hidden',
         }}
       >
-        {/* ── LEFT SIDEBAR ── */}
+        {/* ── LEFT SIDEBAR（258 → 232 = 缩窄 10%）── */}
         <div
           style={{
-            width: 258,
+            width: 232,
             background: 'white',
             borderRight: '1px solid #e4ecf7',
             display: 'flex',
@@ -2527,7 +2531,7 @@ onOpenApiKey={() => {
         >
           <div
             style={{
-              padding: '16px 18px 13px',
+              padding: '16px 16px 13px',
               borderBottom: '1px solid #e4ecf7',
             }}
           >
@@ -2584,7 +2588,7 @@ onOpenApiKey={() => {
             ))}
           </div>
 
-          <div style={{ flex: 1, overflow: 'auto', padding: '13px 14px' }}>
+          <div style={{ flex: 1, overflow: 'auto', padding: '13px 13px' }}>
             {tab === 'library' ? (
               <LibPanel
                 lib={lib}
@@ -2680,11 +2684,13 @@ onOpenApiKey={() => {
           {/* ── 底部工具栏 ── */}
           <div style={{
             borderTop: '1px solid #e4ecf7',
-            padding: '10px 14px',
+            padding: '10px 13px',
             display: 'flex',
             gap: 8,
             flexShrink: 0,
           }}>
+            {/* 插件模式：key 走 dsh credentials、后端就是插件自身，两个按钮无意义 */}
+            {!plugin && (
             <button
             onClick={() => { 
    setApiKeyInput(userApiKey); 
@@ -2707,6 +2713,8 @@ onOpenApiKey={() => {
             >
               {userApiKey ? 'Key已设置' : 'API Key'}
             </button>
+            )}
+            {!plugin && (
             <button
               onClick={() => setBackendModalOpen(true)}
               style={{
@@ -2724,6 +2732,7 @@ onOpenApiKey={() => {
             >
               {backendConnected === true ? '后端健康' : '连接后端'}
             </button>
+            )}
             <button
               onClick={() => { setSoulForm({ soul_id: '', soul_name: '', description: '', user_id: '', password: '' }); setSoulFormError(''); setSoulModalOpen(true); }}
               style={{

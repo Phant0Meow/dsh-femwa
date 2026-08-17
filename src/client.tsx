@@ -50,6 +50,20 @@ export function FemEditorView({ sessionId, stopScript }: FemScriptViewProps) {
     running?: boolean
   } | null>(null)
 
+  // 「Fem 编辑器」标签页激活时隐藏底部 composer，切走时恢复。
+  // conversation.view 只渲染激活的视图（only: active.id），所以本组件挂载
+  // ⇔ 该标签页激活。不做 composer 链 takeover：其 select 只在渲染时调用，
+  // 无法感知 tab 切换，而改 dsh 本体（ComposerChainProps 加字段）会破坏
+  // 插件自包含。composer seat / scroll body 的 data 属性是 dsh web 的稳定
+  // DOM 契约（skeleton 测试依赖 data-composer-seat）。
+  useEffect(() => {
+    const scrollBody = document.querySelector('[data-conversation-scroll]')
+    const seat = scrollBody?.querySelector<HTMLElement>('[data-composer-seat]') ?? null
+    if (seat === null) return
+    seat.style.display = 'none'
+    return () => { seat.style.display = '' }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
     void fetch(`/dsh-femwa/session-state?sessionId=${encodeURIComponent(sessionId)}`)
@@ -110,15 +124,21 @@ export function FemEditorView({ sessionId, stopScript }: FemScriptViewProps) {
     })
   }
   return (
-    <FEMEditor
-      plugin
-      onRun={onRun}
-      onStop={onStop}
-      onSnapshot={onSnapshot}
-      initialScript={state?.script}
-      initialCheckpoint={checkpointNode}
-      initialRunning={state?.running === true}
-    />
+    // data-conversation-composer-overlay：dsh 本体 CSS 据此给 viewArea
+    // 确定高度（flex: 1 1 0 + min-height: 0 + overflow: hidden，trajectory
+    // 同款机制），否则 FEMEditor 的 height:100% 解析失败、内容撑开使整个
+    // 页面可无限下拉。标记随本视图卸载自动撤销。
+    <div data-conversation-composer-overlay="" style={{ height: '100%' }}>
+      <FEMEditor
+        plugin
+        onRun={onRun}
+        onStop={onStop}
+        onSnapshot={onSnapshot}
+        initialScript={state?.script}
+        initialCheckpoint={checkpointNode}
+        initialRunning={state?.running === true}
+      />
+    </div>
   )
 }
 
@@ -394,7 +414,7 @@ export function FemScriptView({ sessionId, listScripts, readScript, saveScript, 
 interface FemwaChatData {
   readonly actor?: string
   readonly text: string
-  readonly kind: 'role' | 'notice' | 'human_wait' | 'prompt' | 'error' | 'thinking'
+  readonly kind: 'role' | 'notice' | 'human_wait' | 'prompt' | 'error' | 'thinking' | 'tool_call' | 'speaker'
   /**
    * Actor names this line is visible to (the action's scope). Absent =
    * visible to everyone (role/prompt/human_wait with unknown scope);
@@ -511,8 +531,23 @@ export function FemwaChatNodeView({ node, useSession }: ChatNodeViewProps<'femwa
   // thinking) are god-only, and dialogue lines show only when the actor's
   // scope includes this viewer. Absent `visible` = visible to everyone.
   if (view !== 'god') {
-    if (kind === 'notice' || kind === 'error' || kind === 'thinking') return null
-    if (visible !== undefined && !visible.includes(view)) return null
+    if (kind === 'notice' || kind === 'error' || kind === 'thinking' || kind === 'tool_call') return null
+    // speaker 名字行不做 scope 过滤：角色视角也能看到所有角色的名字
+    // （内容 turn 由 CSS 按视角隐藏，名字作为对话流的"演员表"保留）。
+    if (kind !== 'speaker' && visible !== undefined && !visible.includes(view)) return null
+  }
+  if (kind === 'speaker') {
+    // 子代理 turn 首行：发言者名字；cot/工具调用/回答从下一行开始。
+    return (
+      <div style={{
+        margin: '8px 0 2px',
+        fontWeight: 700,
+        fontSize: '12.5px',
+        color: actorColor(actor ?? 'AI'),
+      }}>
+        {actor ?? 'AI'}
+      </div>
+    )
   }
   if (kind === 'thinking') {
     // Folded thinking chain (subagent cot). Display-only; memory storage
@@ -538,6 +573,29 @@ export function FemwaChatNodeView({ node, useSession }: ChatNodeViewProps<'femwa
           {text}
         </div>
       </details>
+    )
+  }
+  if (kind === 'tool_call') {
+    // Subagent tool invocation line: text is JSON {kind:'call'|'result', name, args?, result?}.
+    // Parsing failure falls back to plain text (older sessions).
+    let tool: { kind?: string; name?: string; args?: string; result?: string } | null = null
+    try { tool = JSON.parse(text) as { kind?: string; name?: string; args?: string; result?: string } } catch { tool = null }
+    const name = tool?.name ?? '工具调用'
+    const body = tool?.kind === 'result' ? (tool?.result ?? '') : (tool?.args ?? '')
+    const MAX_BODY = 400
+    const clipped = body.length > MAX_BODY ? `${body.slice(0, MAX_BODY)}\n…（截断，共 ${body.length} 字符）` : body
+    return (
+      <div style={{
+        margin: '2px 0',
+        fontSize: '11px',
+        fontFamily: 'JetBrains Mono, monospace',
+        color: 'var(--dsw-text-tertiary, #999)',
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+        lineHeight: 1.5,
+      }}>
+        {tool?.kind === 'result' ? `🔧 ${name} 结果：${clipped}` : `🔧 ${name} 调用：${clipped}`}
+      </div>
     )
   }
   if (kind === 'error') {
@@ -601,40 +659,20 @@ export function FemwaChatNodeView({ node, useSession }: ChatNodeViewProps<'femwa
       </div>
     )
   }
-  // role bubble
-  const color = actorColor(actor ?? 'AI')
+  // role bubble（名字已由 turn 首行的 speaker 行显示，这里只保留文本块）
   return (
-    <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start', margin: '6px 0' }}>
-      <div style={{
-        flexShrink: 0,
-        minWidth: '32px',
-        height: '24px',
-        padding: '0 8px',
-        borderRadius: '12px',
-        background: color,
-        color: '#fff',
-        fontSize: '12px',
-        fontWeight: 600,
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        whiteSpace: 'nowrap',
-      }}>
-        {actor ?? 'AI'}
-      </div>
-      <div style={{
-        flex: 1,
-        padding: '8px 12px',
-        borderRadius: '8px',
-        background: 'var(--dsw-surface-2, #f5f5f5)',
-        color: 'var(--dsw-text-primary, #222)',
-        fontSize: '13px',
-        lineHeight: 1.6,
-        whiteSpace: 'pre-wrap',
-        wordBreak: 'break-word',
-      }}>
-        {text}
-      </div>
+    <div style={{
+      margin: '6px 0',
+      padding: '8px 12px',
+      borderRadius: '8px',
+      background: 'var(--dsw-surface-2, #f5f5f5)',
+      color: 'var(--dsw-text-primary, #222)',
+      fontSize: '13px',
+      lineHeight: 1.6,
+      whiteSpace: 'pre-wrap',
+      wordBreak: 'break-word',
+    }}>
+      {text}
     </div>
   )
 }
@@ -927,6 +965,17 @@ export function FemViewButton({ useSession, useSessions }: PropsRuntime<'convers
   // keeps it current after a runtime switch), so the menu is ready from boot
   // for existing Fem sessions and never appears on other modes.
   const isFem = useSessions(state => state.byId[sessionId]?.agentPreset === 'dsh-femwa')
+
+  // 非 Fem 会话：隐藏「Fem 编辑器」标签页。tab 列表 = conversation.view
+  // 的全部注册条目（无按会话过滤的钩子），纯插件方案在 header 挂载时
+  // DOM 隐藏该按钮；本组件随会话切换重挂载，Fem 会话恢复显示。
+  useEffect(() => {
+    const tab = [...document.querySelectorAll<HTMLElement>('[role="tab"]')]
+      .find(el => el.textContent === 'Fem 编辑器')
+    if (tab === undefined) return
+    tab.style.display = isFem ? '' : 'none'
+    return () => { tab.style.display = '' }
+  }, [isFem])
   // Script actors from the host (complete after a run) — the menu's source of
   // truth; chat-line actors below only backfill before the first run.
   const [scriptActors, setScriptActors] = useState<string[]>([])
@@ -944,8 +993,52 @@ export function FemViewButton({ useSession, useSessions }: PropsRuntime<'convers
   }, [sessionId])
 
   const snapshot = useSession(s => s)
-  const { chatActors, hidden } = useMemo(() => {
-    const actors = new Set<string>()
+
+  // ── 视角过滤（显示层 CSS）：host 记录镜像 turn → scope 映射，god 全显示；
+  // 角色视角 CSS 隐藏 scope 不含该角色的原生 turn。镜像始终全量（信息完整
+  // 落盘），过滤只影响显示，切换视角不丢任何内容。
+  const [turnScopes, setTurnScopes] = useState<Record<string, string[]>>({})
+  const turnCount = snapshot.turnTimings.size
+  useEffect(() => {
+    if (!isFem || sessionId === undefined) return
+    let cancelled = false
+    void fetch(`/dsh-femwa/turn-scopes?sessionId=${encodeURIComponent(sessionId)}`)
+      .then(response => response.json())
+      .then((data: { ok?: boolean; scopes?: Record<string, string[]> }) => {
+        if (!cancelled && data.ok === true && data.scopes !== undefined) setTurnScopes(data.scopes)
+      })
+      .catch(() => { /* 视角过滤降级为全显示（信息不丢） */ })
+    return () => { cancelled = true }
+  }, [sessionId, turnCount, isFem])
+
+  useEffect(() => {
+    // 原生 assistant turn 的 DOM 锚点：data-chat-flow-key =
+    // "13:assistant-step{turn}:{step}"（dsh 渲染器的稳定契约）。注入 CSS
+    // 隐藏不可见 turn；CSS 属性选择器对流式新增 DOM 自动生效。
+    const STYLE_ID = 'dsh-femwa-view-filter'
+    let style = document.getElementById(STYLE_ID) as HTMLStyleElement | null
+    if (style === null) {
+      style = document.createElement('style')
+      style.id = STYLE_ID
+      document.head.appendChild(style)
+    }
+    if (view === 'god') {
+      style.textContent = ''
+      return
+    }
+    const hiddenSelectors: string[] = []
+    for (const [turn, scope] of Object.entries(turnScopes)) {
+      if (scope.length > 0 && !scope.includes(view)) {
+        hiddenSelectors.push(`[data-chat-flow-key^="13:assistant-step${turn}:"]`)
+      }
+    }
+    style.textContent = hiddenSelectors.length > 0
+      ? `${hiddenSelectors.join(',\n')} { display: none !important }`
+      : ''
+    return () => { style.textContent = '' }
+  }, [view, turnScopes])
+
+  const { chatActors, hidden } = useMemo(() => {    const actors = new Set<string>()
     let hiddenCount = 0
     for (const node of snapshot.nodes) {
       if (node.kind !== 'femwa-role') continue

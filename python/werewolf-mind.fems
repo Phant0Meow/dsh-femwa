@@ -1,0 +1,266 @@
+meta:
+  name = 狼人杀
+  owner = 001
+  session = new
+  output_style = |
+    这是一局狼人杀游戏！你的身份牌决定了你所在的阵营，你要动脑子，努力让自己的阵营获胜。你要努力赢！
+    这是6人局：2狼，2神（预言家、女巫），2村民。其中村民和神是好人阵营，狼人是狼人阵营。
+    发言要有逻辑分析，不能瞎猜。第一天夜晚没有信息，不要幻觉。推理要依赖真实的聊天记录。
+    当你们想要指定玩家成为行动时，必须@他，且只能使用场上存活玩家名单中真实存在的玩家名。
+    名单里没有的名字绝不能用——例如名单里有 @Eve，输出变量时就写 @Eve；名单里没有 Kate，就绝不能写 @Kate。
+    你没有调用任何工具的能力，严禁使用工具，直接根据你看到的聊天记录发言。
+
+actors:
+  ai @Eve = soul:the1stlittlesoul, tools: false
+  ai @小猫咪 = soul:littlecat, tools: false
+  human @人 = soul:humanplayer, source:0, tools: false
+  ai @小机 = soul:debugcoder1, tools: false
+  ai @小灵 = soul:debugcoder2, tools: false
+  ai @Portia = soul:Portia, tools: false
+  ai @AI助手 = soul:AI助手, tools: false
+
+code:
+  werewolf_utils = file:"werewolf_utils.py"
+
+vars:
+  roles = {@Eve: "狼人", @小猫咪: "狼人", @AI助手: "预言家", @Portia: "女巫", @人: "村民", @小机: "村民"}
+  alive = [@Eve, @小猫咪, @AI助手, @Portia, @人, @小机]
+  all = [@Eve, @小猫咪, @AI助手, @Portia, @人, @小机, @小灵]
+  allai = [@Eve, @小猫咪, @AI助手, @Portia, @小机, @小灵]
+  wolves = []
+  witch_has_antidote = true
+  witch_has_poison = true
+  game_over = false
+  winner = ""
+  @speaker = ""
+  @voter = ""
+  @狼人 = ""
+  day = 0
+  @上帝 = @小灵
+  @预言家 = ""
+  @女巫 = ""
+  @村民1 = ""
+  @村民2 = ""
+
+action roleCard @func(werewolf_utils.assign_roles):
+  out:
+    roles, wolves, @预言家, @女巫, @村民1, @村民2
+
+module NightPhase:
+  vars:
+    @KILL = ""
+    SAVE = false
+    @POISON = ""
+    @CHECK = ""
+    seer_check_result = ""
+    dead_tonight = []
+    wolf_fail_count = 0
+
+  action nextDay @assign:
+    out:
+      day += 1
+      @KILL = ""
+      SAVE = false
+      @POISON = ""
+      @CHECK = ""
+      seer_check_result = ""
+      dead_tonight = []
+      wolf_fail_count = 0
+
+  action wolf_fail @assign:
+    out:
+      wolf_fail_count += 1
+
+  action wolf_discuss @mind(@狼人):
+    showprompt: |
+      这是第{day}天晚上，夜晚降临。目前场上存活玩家：{alive}。
+      wolves成员： {wolves}。你是{@狼人}, 你的身份卡是狼人。请选择你的击杀对象。
+    prompt: |
+      你是{@狼人}，身份卡是狼人。你的目标是带领狼队消灭所有好人阵营。
+      和你的狼队友讨论策略，统一今晚的刀法。讨论结束后，你必须决定击杀对象。
+      当你决定击杀对象时，需要输出：SET VARIABLE:<<@KILL = @目标名字>>
+    scope: [@上帝] + wolves
+    out:
+      @KILL(string, "击杀目标")
+
+  action seer_check @mind(@预言家):
+    showprompt: |
+      你是{@预言家}，你的身份是预言家，请选择你今晚要查验的玩家。目前场上的存活玩家：{alive}
+    prompt: |
+      你是{@预言家}，身份卡是预言家。每晚可以查验一名玩家的阵营。
+      选择你要查验的玩家，输出：SET VARIABLE:<<@CHECK = @目标名字>>
+    scope: [@上帝, @预言家]
+    out:
+      @CHECK(string, "查验目标")
+
+  action seer_result @func(werewolf_utils.check_role):
+    in:
+      target_name = @CHECK
+      roles_dict = roles
+    out:
+      seer_check_result
+
+  action tell_seer @mind(@预言家):
+    showprompt: |
+      现在是夜晚，你查验了 {@CHECK}，结果是：{seer_check_result}。
+    prompt: |
+      你是{@预言家}。上帝告诉你：你查验了 {@CHECK}，他的身份是 {seer_check_result}。
+      简短回应这个查验结果即可。
+    scope: [@上帝, @预言家]
+
+  action witchTurn @mind(@女巫):
+    showprompt: |
+      你是{@女巫}, 你的身份是女巫，今晚 {@KILL} 被杀。你有一瓶解药可以救他，你要用吗？
+      你还有一瓶毒药，如果你认为谁是狼人，你应该用毒药毒他。
+      注意：游戏规则规定，女巫一天晚上不可以用两瓶药，所以这两瓶药，你最多只能使用其中一瓶，或不使用。
+    prompt: |
+      你是{@女巫}，身份卡是女巫。你有一瓶解药和一瓶毒药，每晚最多使用一瓶。
+      如果使用解药救 {@KILL}，输出：SET VARIABLE:<< SAVE = true >>
+      如果要毒杀某人，输出：SET VARIABLE:<< @POISON = @目标名字>>
+      解药和毒药最多只能输出其中一个 SET VARIABLE，或不输出。
+    scope: [@上帝, @女巫]
+    out:
+      SAVE(bool, "是否救人"), @POISON(string, "毒杀目标")
+
+  action resolve_night @func(werewolf_utils.resolve_night):
+    in:
+      kill_target = @KILL
+      save = SAVE
+      poison_target = @POISON
+      alive_players = alive
+      has_antidote = witch_has_antidote
+      has_poison = witch_has_poison
+    out:
+      dead_tonight, alive, witch_has_antidote, witch_has_poison
+
+  action 人类发言 @human(@人):
+    prompt: |
+      你的身份是{@人.role}，请发言。
+    scope: [@人, @上帝]
+
+  flow:
+    [nextDay]: nextDay
+    [wolf_discuss]: wolf_discuss
+    [resolve_night]: resolve_night
+
+    [IN] -> [nextDay] -> [pos_4]
+    [pos_4] -> for @狼人 in wolves:
+      -> [wolf_discuss] ->
+    -> [pos_3]
+    [pos_3] -> if (@KILL == "") -> [FAIL]:wolf_fail
+    [pos_3] -> if (@KILL != "") -> [pos_1]
+    [FAIL] -> if (wolf_fail_count < 3) -> [pos_4]
+    [FAIL] -> if (wolf_fail_count >= 3) -> [pos_1]
+    [pos_1] -> if (@预言家 in alive == false) -> [pos_2]
+    [pos_1] -> if (@预言家 in alive == true) -> seer_check -> seer_result -> tell_seer -> [pos_2]
+    [pos_2] -> if (@女巫 in alive != true) -> [resolve_night]
+    [pos_2] -> if (@女巫 in alive == true) -> witchTurn -> [resolve_night]
+    [resolve_night] -> [OUT]
+
+module DayPhase:
+  meta:
+    delay = 10
+
+  vars:
+    announcement = ""
+    @VOTE = ""
+    voter_name = ""
+    vote_results = {}
+    eliminated_today = ""
+
+  action announce @func(werewolf_utils.announce_death):
+    out:
+      announcement
+
+  action init @assign:
+    out:
+      @VOTE = ""
+
+  action god_announce @ai(@上帝):
+    showprompt: |
+      天亮了，昨夜的结果即将揭晓。
+    prompt: |
+      天亮了。{announcement}。这是第{day}天白天，存活玩家：{alive}。
+      你是上帝，你需要将昨晚的结算结果告诉所有玩家。不可以在发言中暴露夜间具体行动，不可以暴露玩家身份。
+    scope: all
+
+  action speak @mind(@speaker):
+    showprompt: |
+      轮到{@speaker}发言。
+    prompt: |
+      轮到你发言。你是{@speaker}，你的身份是{@speaker.roles}。目前场上存活玩家：{alive}。昨晚 {announcement}。
+      请分享你的想法和怀疑对象，发言要有逻辑分析，依据真实的聊天记录，不要瞎猜。
+    scope: all
+
+  action vote @mind(@voter):
+    showprompt: |
+      现在是白天，投票时间。存活玩家：{alive}。
+    prompt: |
+      你是{@voter}，你的身份是{@voter.roles}。请先分析局势，然后决定放逐谁。
+      最后输出：SET VARIABLE: <<@VOTE = @目标名字>>
+    scope: [@上帝, @voter]
+    out:
+      @VOTE(string, "投票目标")
+
+  action collect_vote @func(werewolf_utils.collect_vote):
+    in:
+      voter_name = @voter
+      target = @VOTE
+    out:
+      vote_results.@voter(string, "")
+
+  action announce_vote @ai(@上帝):
+    showprompt: |
+      投票结束，放逐结果即将揭晓。
+    prompt: |
+      投票结束。{eliminated_today} 被放逐。存活玩家：{alive}。请告诉大家投票结果，谁都票了谁。
+      本环节只宣布投票结果，不许说下一步的行动。不可以在发言中透露玩家身份。
+    scope: all
+
+  action process_vote @func(werewolf_utils.process_votes_and_end):
+    in:
+      votes = vote_results
+      alive_players = alive
+      roles_dict = roles
+    out:
+      eliminated_today, alive, game_over, winner
+
+  flow:
+    [init]: init
+    [process_vote]: process_vote
+    [god]: god_announce
+    [c]: collect_vote
+
+    [IN] -> announce -> [god]
+    [god] -> for @speaker in alive:
+      -> speak ->
+    -> [init]
+    [init] -> par @voter in alive:
+      -> vote -> [c] ->
+    -> [process_vote]
+    [process_vote] -> announce_vote -> [OUT]
+
+module chat:
+  vars:
+    @player = ""
+
+  action chat @mind(@player):
+    prompt: 游戏结束啦，随便聊聊吧～
+
+  action chat_human @human(@人):
+    scope: all
+
+  flow:
+    [IN] -> [pos_1]
+    [pos_1] -> for @player in all:
+      -> chat ->
+    [pos_1] -> chat_human -> [pos_1]
+
+mainflow:
+  [roleCard]: roleCard
+  [game_loop]: &NightPhase
+  [day]: &DayPhase
+  [chat]: &chat
+
+  [START] -> [roleCard] -> [game_loop] -> [day] -> if (game_over == false) -> [game_loop]
+  [day] -> if (game_over == true) -> [chat] -> [END]

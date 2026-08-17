@@ -137,13 +137,14 @@ function FemPreview({ value, onChange, error, dirty, onApply, onRestore, onGraph
         <div
           ref={lineNumbersRef}
           style={{
-            width: 30,
+            // 行号区整体缩为原 75%（30 → 22.5），左侧空间同步收紧
+            width: 22.5,
             background: '#0a0f1e',
             color: '#4a5568',
             fontFamily: 'JetBrains Mono, monospace',
             fontSize: 10.5,
             lineHeight: 1.8,
-            padding: '11px 5px 11px 8px',
+            padding: '11px 3px 11px 6px',
             textAlign: 'right',
             userSelect: 'none',
             overflow: 'hidden',
@@ -170,7 +171,8 @@ function FemPreview({ value, onChange, error, dirty, onApply, onRestore, onGraph
               width: '100%',
               height: '100%',
               background: '#0c1428',
-              padding: '11px 13px',
+              // 左 padding 归零：顶格代码紧贴行号区边缘
+              padding: '11px 0',
               overflow: 'auto',
               resize: 'none',
               fontFamily: 'JetBrains Mono, monospace',

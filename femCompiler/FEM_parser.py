@@ -38,6 +38,7 @@ class ExecutorType(Enum):
     HUMAN = "human"
     FUNC = "func"
     ASSIGN = "assign"
+    MIND = "mind"
 
 class ActorType(Enum):
     AI = "ai"
@@ -581,11 +582,11 @@ def _parse_action_fields(block: Block) -> dict:
                     # 否则属于 prompt 内容
                     plines.append(line_j.strip())
                     j += 1
-                f['prompt'] = '\n'.join(plines)
+                f['showprompt'] = '\n'.join(plines)
                 i = j
                 continue
             else:
-                f['prompt'] = pv.strip('"').strip("'")
+                f['showprompt'] = pv.strip('"').strip("'")
         elif normalized_line.startswith('scope:'):
             # 保留原始 scope 字符串，去掉 'scope:' 前缀并去除两端空白
             raw_scope = line.strip()[len('scope:'):].strip()

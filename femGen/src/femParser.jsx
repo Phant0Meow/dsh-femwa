@@ -156,7 +156,8 @@ function parseFEMS(text) {
     } else if (h === 'sketch:') {
       // 暂存顶层草图，待 mainflow 解析后合并
       mainflowSketch = parseLayoutBlock(block.contentLines);
-    } else if (h === 'mainflow:') {
+    } else if (h === 'mainflow:' || h === 'flow:') {
+      // flow: 与 mainflow: 等价（编译器 build_blocks 均归为 flow 块）
       result.mainflow = parseMainflowBlock(block.contentLines);
       // 如果有与 mainflow 同级的 sketch 块，合并布局（外部覆盖内部）
       if (mainflowSketch) {
@@ -359,16 +360,8 @@ function parseMetaBlock(cls) {
         i++;
       }
       const value = valueLines.join('\n');
-      // 特殊字段统一命名
-      if (key === 'system_safety') {
-        meta.system_safety = value;
-      } else if (key === 'output_style') {
-        meta.output_style = value;
-      } else {
-        throw new Error(
-          `第 ${cl.lineNum + 1} 行: meta 中未识别的字段 "${key}"`
-        );
-      }
+      // 与编译器一致：任意 key 都收（不限于 system_safety/output_style）
+      meta[key] = value;
       continue;
     }
 
@@ -421,9 +414,9 @@ function parseMetaBlock(cls) {
         meta.delay = Number(v);
         break;
       default:
-        throw new Error(
-          `第 ${cl.lineNum + 1} 行: meta 中未识别的字段 "${key}"`
-        );
+        // 与编译器一致：未知字段保留原始键名，不报错
+        meta[key] = v;
+        break;
     }
     i++;
   }
@@ -446,10 +439,27 @@ function parseLayoutBlock(cls) {
 
 function parseVarsBlock(cls) {
   const vars = [];
-  for (const cl of cls) {
+  let i = 0;
+  while (i < cls.length) {
+    const cl = cls[i];
     const _t = cl.text.trim();
-    if (!_t || _t.startsWith('#')) continue;   // 跳过空行与注释
+    if (!_t || _t.startsWith('#')) { i++; continue; }   // 跳过空行与注释
     const line = normalizeSymbols(cl.text);
+
+    // 多行值：key = |（与编译器 _eval_kv_block 一致）
+    const multiMatch = line.match(/^(@?[\w\u4e00-\u9fff]+)\s*=\s*\|$/);
+    if (multiMatch) {
+      const key = multiMatch[1];
+      i++;
+      const valueLines = [];
+      while (i < cls.length && cls[i].indent > cl.indent) {
+        valueLines.push(cls[i].text);
+        i++;
+      }
+      vars.push({ name: key, defaultValue: valueLines.join('\n') });
+      continue;
+    }
+
     const m = line.match(/^(@?[\w\u4e00-\u9fff]+)\s*=\s*(.*)$/);
     if (!m)
       throw new Error(
@@ -458,6 +468,7 @@ function parseVarsBlock(cls) {
         }"。期望: varname = "value"`
       );
     vars.push({ name: m[1], defaultValue: m[2].trim() });
+    i++;
   }
   return vars;
 }
@@ -486,10 +497,40 @@ function parseCodeBlock(cls) {
 
 function parseActorsBlock(cls) {
   const actors = [];
-  for (const cl of cls) {
+  let i = 0;
+  while (i < cls.length) {
+    const cl = cls[i];
     const _t = cl.text.trim();
-    if (!_t || _t.startsWith('#')) continue;   // 跳过空行与注释
+    if (!_t || _t.startsWith('#')) { i++; continue; }   // 跳过空行与注释
     const line = normalizeSymbols(cl.text);
+
+    // blueprint 块（与编译器一致）：blueprint name: + 缩进属性 source/tools
+    const bpMatch = line.match(/^blueprint\s+(@?[\w\u4e00-\u9fff]+)\s*:\s*$/);
+    if (bpMatch) {
+      const bpName = bpMatch[1];
+      let source = null;
+      let tools = null;
+      i++;
+      while (i < cls.length && cls[i].indent > cl.indent) {
+        const al = normalizeSymbols(cls[i].text).trim();
+        if (al.startsWith('source:')) {
+          source = al.slice(7).trim();
+        } else if (al.startsWith('tools')) {
+          const toolsStr = al.replace(/^tools\s*[:=]\s*/, '').trim();
+          if (toolsStr.startsWith('[') && toolsStr.endsWith(']')) {
+            tools = toolsStr.slice(1, -1).split(',').map(s => s.trim()).filter(Boolean);
+          } else if (toolsStr === 'true' || toolsStr === 'false') {
+            tools = toolsStr === 'true';
+          } else {
+            throw new Error(`第 ${cl.lineNum + 1} 行: tools 格式错误，应为 tools = [tool1, tool2] 或 tools: true/false`);
+          }
+        }
+        i++;
+      }
+      actors.push({ type: 'blueprint', name: bpName, soul: '', source: source ?? '', tools: tools ?? [] });
+      continue;
+    }
+
     const prefixMatch = line.match(
       /^(ai|human)\s+(@?[\w\u4e00-\u9fff]+)\s*=\s*(.*)$/
     );
@@ -544,6 +585,7 @@ function parseActorsBlock(cls) {
     if (tools === null) tools = [];
 
     actors.push({ type, name, soul, source, tools });
+    i++;
   }
   return actors;
 }
@@ -610,6 +652,9 @@ function parseActionBlock(header, cls) {
     inMappings: '',
     memory: '',
     context: '',
+    max_retries: 0,
+    fallback: '',
+    interrupt: '',
   };
 
   let i = 0;
@@ -725,10 +770,25 @@ action.outVars = ol.join('\n');
       i++;
       continue;
     }
+    if (line.startsWith('max_retries:')) {
+      action.max_retries = Number(line.slice(12).trim());
+      i++;
+      continue;
+    }
+    if (line.startsWith('fallback:')) {
+      action.fallback = line.slice(9).trim();
+      i++;
+      continue;
+    }
+    if (line.startsWith('interrupt:')) {
+      action.interrupt = line.slice(10).trim();
+      i++;
+      continue;
+    }
     throw new Error(
       `第 ${cl.lineNum + 1} 行: 未识别的 action 子字段: "${
         cl.text
-      }"。合法: prompt:, in:, out:, scope:, memory:, context:, resolve:`
+      }"。合法: prompt:, in:, out:, scope:, memory:, context:, resolve:, max_retries:, fallback:, interrupt:`
     );
   }
   return action;
