@@ -329,7 +329,10 @@ export function FemwaChatNodeView({ node, useSession }: ChatNodeViewProps<'femwa
   // View-perspective filter: in a role view, meta lines (notice/error/
   // thinking) are god-only, and dialogue lines show only when the actor's
   // scope includes this viewer. Absent `visible` = visible to everyone.
-  if (view !== 'god') {
+  if (view === 'offstage') {
+    // 戏外视角：只留用户/系统行（notice/error 之外的角色行全隐藏）。
+    if (kind === 'role' || kind === 'speaker' || kind === 'human_wait' || kind === 'prompt' || kind === 'tool_call') return null
+  } else if (view !== 'god') {
     if (kind === 'notice' || kind === 'error' || kind === 'thinking' || kind === 'tool_call') return null
     // speaker 名字行不做 scope 过滤：角色视角也能看到所有角色的名字
     // （内容 turn 由 CSS 按视角隐藏，名字作为对话流的"演员表"保留）。
@@ -729,11 +732,23 @@ export function FemButton({ wide, listScripts, createFemSession, saveScript }: F
 
 // ── view-perspective button (session header) ──────────────────────────────
 
-/** Session-header action: switch between god view and per-actor views. */
-export function FemViewButton({ useSession, useSessions }: PropsRuntime<'conversation.session.header.actions'>) {
+/** FemViewButton 注入能力。 */
+interface FemViewInjected {
+  /** 打开任意会话（视角菜单跳转投影窗/主会话）。 */
+  openSession(id: string): void
+  /** 查询主会话的投影窗 id 列表（上帝窗 + 角色窗）。 */
+  listProjectionWindows(sid: string): Promise<{ god?: string; actors: Record<string, string> }>
+}
+
+/** Session-header action: switch between god view and per-actor views.
+ *  视角菜单：戏外=主会话本体 / 上帝=上帝投影窗 / 角色=角色投影窗。
+ *  dsh 原生切换显示（主会话与子代理窗同一 UI 位置）。 */
+export function FemViewButton({ useSession, useSessions, openSession, listProjectionWindows }: PropsRuntime<'conversation.session.header.actions'> & FemViewInjected) {
   const sessionId = useSession(snapshot => snapshot.sessionId)
   const view = useView(sessionId)
   const [open, setOpen] = useState(false)
+  // 投影窗 id 缓存：{ god?: string, actors: {name: id} }（host 侧幂等创建）。
+  const [proj, setProj] = useState<{ god?: string; actors: Record<string, string> }>({ actors: {} })
   // The button lives on Fem sessions only: the sessions list records the
   // preset each session's agent was composed from (agent-preset/selected
   // keeps it current after a runtime switch), so the menu is ready from boot
@@ -765,6 +780,41 @@ export function FemViewButton({ useSession, useSessions }: PropsRuntime<'convers
       .catch(() => { /* menu falls back to actors seen in chat */ })
     return () => { cancelled = true }
   }, [sessionId])
+
+  // 投影窗 id 列表（host 幂等创建；视角菜单跳转目标）。
+  useEffect(() => {
+    if (!isFem || sessionId === undefined) return
+    let cancelled = false
+    void listProjectionWindows(sessionId)
+      .then(w => { if (!cancelled) setProj(w) })
+      .catch(() => { /* 投影窗未建（未运行过剧本）：菜单降级为旧 CSS 过滤 */ })
+    return () => { cancelled = true }
+  }, [sessionId, isFem, listProjectionWindows, scriptActors.length])
+
+  // 点击视角项：打开对应窗（戏外=主会话 / 上帝=上帝窗 / 角色=角色窗）。
+  // 投影窗不可用时（未运行剧本）降级为旧 CSS 过滤视图。
+  const pickView = (id: string): void => {
+    setOpen(false)
+    if (id === 'offstage') {
+      // 戏外 = 主会话本体（当前会话）；view 状态标记 offstage，
+      // CSS 过滤隐藏角色内容（待主模型恢复后主会话表面回归干净）。
+      setView(sessionId, 'offstage')
+      return
+    }
+    if (id === 'god' && proj.god !== undefined) {
+      setView(sessionId, 'god')
+      openSession(proj.god)
+      return
+    }
+    const actorId = proj.actors[id]
+    if (actorId !== undefined) {
+      setView(sessionId, id)
+      openSession(actorId)
+      return
+    }
+    // 降级：无投影窗时保持旧行为（CSS 过滤显示）。
+    setView(sessionId, id)
+  }
 
   const snapshot = useSession(s => s)
 
@@ -798,6 +848,17 @@ export function FemViewButton({ useSession, useSessions }: PropsRuntime<'convers
     }
     if (view === 'god') {
       style.textContent = ''
+      return
+    }
+    if (view === 'offstage') {
+      // 戏外视角：隐藏全部角色 turn（主会话表面只留用户/系统行）。
+      const hiddenSelectors: string[] = []
+      for (const turn of Object.keys(turnScopes)) {
+        hiddenSelectors.push(`[data-chat-flow-key^="13:assistant-step${turn}:"]`)
+      }
+      style.textContent = hiddenSelectors.length > 0
+        ? `${hiddenSelectors.join(',\n')} { display: none !important }`
+        : ''
       return
     }
     const hiddenSelectors: string[] = []
@@ -834,7 +895,7 @@ export function FemViewButton({ useSession, useSessions }: PropsRuntime<'convers
   // (roles backfilled from chat lines) and never shows on other modes, even
   // after a run populated the host's actor cache.
   if (!isFem) return null
-  const label = view === 'god' ? '上帝视角' : view
+  const label = view === 'god' ? '上帝视角' : view === 'offstage' ? '戏外 · 主模型' : view
   const menu = open
     ? (
         <div style={{
@@ -852,22 +913,23 @@ export function FemViewButton({ useSession, useSessions }: PropsRuntime<'convers
           zIndex: 100,
           fontSize: '13px',
         }}>
-          {[{ id: 'god', label: '👁 上帝视角' }, ...actors.map(actor => ({ id: actor, label: actor }))].map(item => (
+          {[
+            { id: 'offstage', label: '🎬 戏外 · 主模型' },
+            { id: 'god', label: '👁 上帝视角' },
+            ...actors.map(actor => ({ id: actor, label: `🎭 ${actor}` })),
+          ].map(item => (
             <button
               key={item.id}
               type="button"
-              onClick={() => {
-                setOpen(false)
-                setView(sessionId, item.id)
-              }}
+              onClick={() => { pickView(item.id) }}
               style={{
                 display: 'block',
                 width: '100%',
                 padding: '6px 10px',
                 border: 'none',
                 borderRadius: '6px',
-                background: item.id === view ? 'var(--dsw-accent, #4a9eff)' : 'transparent',
-                color: item.id === view ? '#fff' : 'var(--dsw-text-primary, #222)',
+                background: item.id === view || (item.id === 'offstage' && view === 'offstage') ? 'var(--dsw-accent, #4a9eff)' : 'transparent',
+                color: item.id === view || (item.id === 'offstage' && view === 'offstage') ? '#fff' : 'var(--dsw-text-primary, #222)',
                 cursor: 'pointer',
                 textAlign: 'left',
                 whiteSpace: 'nowrap',
@@ -997,6 +1059,18 @@ export function apply(ctx: any): void {
     },
   })
 
+  // FemViewButton 注入：打开任意会话（视角菜单跳转投影窗用）+ 投影窗 id 查询。
+  const viewInjected = (): FemViewInjected => ({
+    openSession: (id: string): void => { sessions?.open?.(id) },
+    listProjectionWindows: async (sid: string): Promise<{ god?: string; actors: Record<string, string> }> => {
+      const response = await fetch(`/dsh-femwa/projection-windows?sessionId=${encodeURIComponent(sid)}`)
+      if (!response.ok) throw new Error(`projection-windows HTTP ${response.status}`)
+      const data = await response.json() as { ok?: boolean; god?: string; actors?: Record<string, string> }
+      if (data.ok !== true) throw new Error(data.error ?? 'projection-windows failed')
+      return { god: data.god, actors: data.actors ?? {} }
+    },
+  })
+
   slots.inject('sidebar.footer.action', () => slots.register(
     {
       name: 'sidebar.footer.action',
@@ -1018,6 +1092,7 @@ export function apply(ctx: any): void {
       name: 'conversation.session.header.actions',
       id: 'dsh-femwa-view',
       order: 10,
+      inject: viewInjected,
     },
     FemViewButton,
   ))
@@ -1092,6 +1167,22 @@ export function apply(ctx: any): void {
     FemEditorView,
   ))
 
+  // 投影窗 composer：selector 匹配 fem-proj-* 会话 → 可输入 composer
+  // （替代 dsh 默认的 SubagentReadOnlyComposer 只读链）。priority -20
+  // < subagent 的 -10：先匹配我们，未命中才落到只读链。
+  slots.inject('conversation.composer', () => slots.register(
+    {
+      name: 'conversation.composer',
+      priority: -20,
+      select: (owner: { session?: { sessionId?: string } }): { isProjection: boolean } | null => {
+        const sid = owner.session?.sessionId
+        if (typeof sid === 'string' && sid.startsWith('fem-proj-')) return { isProjection: true }
+        return null
+      },
+    },
+    ProjectionComposer,
+  ))
+
   // 流式预览条：独立 React 根（常驻，不依赖任何 tab 挂载）。
   try {
     const previewHost = document.createElement('div')
@@ -1157,6 +1248,90 @@ function StreamPreviewBar() {
       <span style={{ color: 'var(--dsw-text-tertiary, #999)' }}>…</span>
     </div>,
     document.body,
+  )
+}
+
+// ── 投影窗 composer（角色/上帝视角的可输入输入框）────────────────────────
+// dsh 对 origin=subagent 会话默认挂 SubagentReadOnlyComposer（只读）；
+// 投影窗（fem-proj-*）需要可输入。本次：输入 → POST /dsh-femwa/projection-input
+// （消息 append 到投影窗表面显示）；真实路由（发给谁/打断）留后续 todo。
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function ProjectionComposer({ useSession }: any) {
+  const sessionId = useSession((s: { sessionId?: string }) => s.sessionId) as string | undefined
+  const [text, setText] = useState('')
+  const [busy, setBusy] = useState(false)
+  const submit = (): void => {
+    const value = text.trim()
+    if (value.length === 0 || busy || sessionId === undefined) return
+    setBusy(true)
+    void fetch('/dsh-femwa/projection-input', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId, text: value }),
+    })
+      .then(response => response.json())
+      .then((data: { ok?: boolean }) => {
+        if (data.ok === true) setText('')
+      })
+      .catch(() => { /* 保持输入，不丢草稿 */ })
+      .finally(() => setBusy(false))
+  }
+  return (
+    <div style={{
+      display: 'flex',
+      gap: '8px',
+      padding: '10px 16px 12px',
+      maxWidth: 'calc(var(--dsh-chat-content-width, 748px) + 32px)',
+      margin: '0 auto',
+      width: '100%',
+      boxSizing: 'border-box',
+    }}>
+      <textarea
+        value={text}
+        onChange={(e) => setText(e.currentTarget.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault()
+            submit()
+          }
+        }}
+        placeholder="输入消息…（Enter 发送，Shift+Enter 换行）"
+        rows={1}
+        spellCheck={false}
+        style={{
+          flex: 1,
+          padding: '8px 12px',
+          border: '1px solid var(--dsw-border, #ddd)',
+          borderRadius: '10px',
+          background: 'var(--dsw-surface-2, #f5f5f5)',
+          color: 'var(--dsw-text-primary, #222)',
+          fontSize: '13px',
+          lineHeight: 1.5,
+          resize: 'none',
+          fontFamily: 'inherit',
+          boxSizing: 'border-box',
+          minHeight: '36px',
+        }}
+      />
+      <button
+        type="button"
+        onClick={submit}
+        disabled={busy || text.trim().length === 0}
+        style={{
+          padding: '0 16px',
+          border: 'none',
+          borderRadius: '10px',
+          background: 'var(--dsw-accent, #4a9eff)',
+          color: '#fff',
+          cursor: 'pointer',
+          fontSize: '13px',
+          fontWeight: 600,
+          whiteSpace: 'nowrap',
+        }}
+      >
+        发送
+      </button>
+    </div>
   )
 }
 

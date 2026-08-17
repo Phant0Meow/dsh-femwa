@@ -516,6 +516,9 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
     lastEvents: [],
   }
 
+  /** 投影窗注册表：sid → { god, actors }（角色/上帝视角的子代理窗）。 */
+  const projections = createProjectionRegistry(ctx)
+
   const recordError = (sessionId: SessionId, text: string): void => {
     const key = String(sessionId)
     const list = runState.errors.get(key) ?? []
@@ -626,11 +629,16 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
     const d = (data ?? {}) as Record<string, unknown>
     switch (eventType) {
       case 'flow_start': {
-        // Script actors feed the view-perspective menu.
+        // Script actors feed the view-perspective menu + projection windows.
         const actors = Array.isArray(d.actors)
           ? d.actors.filter((x): x is string => typeof x === 'string')
           : []
-        if (actors.length > 0) runState.sessionActors.set(String(sessionId), actors)
+        if (actors.length > 0) {
+          runState.sessionActors.set(String(sessionId), actors)
+          // 上帝窗 + 角色窗（幂等创建/复用；主会话 header.cwd 作投影窗 cwd）
+          const header = session.header as { cwd?: string } | undefined
+          projections.ensure(String(sessionId), actors, header?.cwd ?? process.cwd())
+        }
         break
       }
       case 'node_start': {
@@ -648,7 +656,7 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
         if (nodeType === 'human') {
           const prompt = typeof d.prompt === 'string' && d.prompt.trim().length > 0 ? d.prompt : undefined
           if (prompt !== undefined) {
-            appendChat(ctx, session, `📢 ${prompt}`, 'prompt', undefined, nodeName === undefined ? undefined : runState.nodeScopes.get(nodeName))
+            appendChatProjected(ctx, session, projections, `📢 ${prompt}`, 'prompt', undefined, nodeName === undefined ? undefined : runState.nodeScopes.get(nodeName))
           }
         }
         break
@@ -663,7 +671,7 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
         }
         const showprompt = typeof d.showprompt === 'string' && d.showprompt.trim().length > 0 ? d.showprompt : undefined
         if (showprompt !== undefined) {
-          appendChat(ctx, session, `📢 ${showprompt}`, 'prompt', undefined, nodeName === undefined ? undefined : runState.nodeScopes.get(nodeName))
+          appendChatProjected(ctx, session, projections, `📢 ${showprompt}`, 'prompt', undefined, nodeName === undefined ? undefined : runState.nodeScopes.get(nodeName))
         }
         break
       }
@@ -674,7 +682,7 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
         const attempt = typeof d.attempt === 'number' ? d.attempt : 0
         const nodeName = typeof d.node_name === 'string' ? d.node_name : undefined
         if (errors.length > 0) {
-          appendChat(ctx, session, `⚠️ ${errors[0]}（第 ${attempt} 次重试）`, 'notice',
+          appendChatProjected(ctx, session, projections, `⚠️ ${errors[0]}（第 ${attempt} 次重试）`, 'notice',
             undefined, nodeName === undefined ? undefined : runState.nodeScopes.get(nodeName))
         }
         break
@@ -686,7 +694,7 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
         }
         const prompt = typeof d.prompt === 'string' ? d.prompt.slice(0, 120) : ''
         const nodeName = typeof d.node_name === 'string' ? d.node_name : undefined
-        appendChat(ctx, session, prompt.length > 0 ? `🎭 等待你的回应：${prompt}` : '🎭 等待你的回应', 'human_wait',
+        appendChatProjected(ctx, session, projections, prompt.length > 0 ? `🎭 等待你的回应：${prompt}` : '🎭 等待你的回应', 'human_wait',
           undefined, nodeName === undefined ? undefined : runState.nodeScopes.get(nodeName))
         break
       }
@@ -710,7 +718,7 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
         if (output !== undefined) {
           const nodeName = typeof d.node_name === 'string' ? d.node_name : undefined
           const actor = nodeName === undefined ? undefined : runState.nodeActors.get(nodeName) ?? nodeName
-          appendChat(ctx, session, output, 'role', actor, nodeName === undefined ? undefined : runState.nodeScopes.get(nodeName))
+          appendChatProjected(ctx, session, projections, output, 'role', actor, nodeName === undefined ? undefined : runState.nodeScopes.get(nodeName))
         }
         break
       }
@@ -728,7 +736,7 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
           runState.nodeScopes.set(reqNode, reqScope)
         }
         console.log(`[dsh-femwa] ai_request received node=${String(d.node_name ?? '')} wait_key=${String(d.wait_key ?? '')}`)
-        void runAiSubagent(ctx, resolved, bridge, session, d, recordError, defaultModel, runState.nodeActors).catch((error: unknown) => {
+        void runAiSubagent(ctx, resolved, bridge, session, d, recordError, defaultModel, runState.nodeActors, projections).catch((error: unknown) => {
           recordError(session.id, `子 agent 执行失败：${String(error)}`)
           void bridge.send('human_input', {
             wait_key: String(d.wait_key ?? ''),
@@ -743,7 +751,7 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
         // 完整跑完：清掉 checkpoint，下次 run 从头开始
         void clearCheckpoint(resolved.femwaRoot, String(sessionId))
           .catch((error: unknown) => console.log(`[dsh-femwa] checkpoint clear failed: ${String(error)}`))
-        appendChat(ctx, session, '✅ 剧本已跑完', 'notice')
+        appendChatProjected(ctx, session, projections, '✅ 剧本已跑完', 'notice')
         break
       }
       case 'flow_error': {
@@ -752,13 +760,13 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
         runState.running = false
         const text = `剧本出错：${String(d.error ?? 'unknown error')}`
         recordError(session.id, text)
-        appendChat(ctx, session, text, 'error')
+        appendChatProjected(ctx, session, projections, text, 'error')
         break
       }
       case 'flow_stopped': {
         runState.running = false
         // 暂停（引擎侧为 stop 半实现）与停止共用 flow_stopped：按发起方区分文案。
-        appendChat(ctx, session, runState.pausedByUser ? '⏸ 剧本已暂停' : '⏹ 剧本已停止', 'notice')
+        appendChatProjected(ctx, session, projections, runState.pausedByUser ? '⏸ 剧本已暂停' : '⏹ 剧本已停止', 'notice')
         runState.pausedByUser = false
         break
       }
@@ -1115,6 +1123,64 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
         })
       },
     })
+    webServer.register({
+      kind: 'exact',
+      path: '/dsh-femwa/projection-windows',
+      handler: (req: IncomingMessage, res: ServerResponse): void => {
+        // 视角菜单数据源：主会话的上帝窗 + 角色窗 id 列表。
+        const url = new URL(req.url ?? '/', 'http://localhost')
+        const sessionId = url.searchParams.get('sessionId')
+        if (sessionId === null || sessionId.length === 0) {
+          writeJson(res, 400, { ok: false, error: 'sessionId is required' })
+          return
+        }
+        const windows = projections.get(sessionId)
+        if (windows === undefined) {
+          writeJson(res, 200, { ok: true, god: undefined, actors: {} })
+          return
+        }
+        const actors: Record<string, string> = {}
+        for (const [actor, win] of windows.actors) actors[actor] = String(win.id)
+        writeJson(res, 200, {
+          ok: true,
+          god: windows.god === undefined ? undefined : String(windows.god.id),
+          actors,
+        })
+      },
+    })
+    webServer.register({
+      kind: 'exact',
+      path: '/dsh-femwa/projection-input',
+      handler: (req: IncomingMessage, res: ServerResponse): void => {
+        void (async () => {
+          // 投影窗输入（本次：消息 append 到投影窗表面显示，不路由）。
+          // 后续 todo 接入真实路由（发给谁/打断）。
+          const raw = await readBody(req) as Record<string, unknown>
+          const sessionId = typeof raw.sessionId === 'string' && raw.sessionId.trim().length > 0 ? raw.sessionId : ''
+          const text = typeof raw.text === 'string' && raw.text.trim().length > 0 ? raw.text.trim() : ''
+          if (sessionId.length === 0 || text.length === 0) {
+            writeJson(res, 400, { ok: false, error: 'sessionId and text are required' })
+            return
+          }
+          const sessions = ctx.get('sessions') as { get(id: SessionId): Session | undefined } | undefined
+          const win = sessions?.get(SessionId(sessionId))
+          if (win === undefined) {
+            writeJson(res, 404, { ok: false, error: `session ${sessionId} not found` })
+            return
+          }
+          // 打开当前 turn（无则新开），append user 消息（surface）。
+          const lastTurn = [...win.events].reverse().find(e => e.type === 'turn/start')
+          const turn = lastTurn === undefined ? 1 : (lastTurn.data as { turn?: number }).turn ?? 1
+          win.append('user/message', {
+            content: [{ type: 'text', text }],
+            source: { kind: 'user' },
+          }, { surfaceOp: 'append' })
+          writeJson(res, 200, { ok: true })
+        })().catch((error: unknown) => {
+          writeJson(res, 500, { ok: false, error: String(error) })
+        })
+      },
+    })
     console.log('[dsh-femwa] create-session + scripts + save-script + script + errors routes registered')
   } else {
     console.log('[dsh-femwa] webServer unavailable; routes not registered')
@@ -1162,6 +1228,29 @@ function appendChat(
   } catch (error: unknown) {
     console.log(`[dsh-femwa] appendChat failed: ${String(error)}`)
   }
+}
+
+/** 事件桥的 chat 行双写：主会话（历史完整）+ 投影窗（角色窗按 scope 命中）。
+ * windows 为空（投影窗未建）时仅写主会话，行为与旧版一致。 */
+function appendChatProjected(
+  ctx: Context,
+  session: Session,
+  projections: ProjectionRegistry,
+  text: string,
+  kind: 'role' | 'notice' | 'human_wait' | 'prompt' | 'error' | 'thinking',
+  actor?: string,
+  visible?: string[],
+): void {
+  appendChat(ctx, session, text, kind, actor, visible)
+  const windows = projections.get(String(session.id))
+  if (windows === undefined) return
+  projectionAppend(windows, 'dsh-femwa/chat', {
+    ...actor === undefined ? {} : { actor },
+    text,
+    kind,
+    ...visible === undefined ? {} : { visible },
+    seq: Date.now(),
+  }, undefined, visible)
 }
 
 /** 子代理会话目录移出 dsh sessions 树（备份区 user_data/subagent_sessions/）。
@@ -1317,6 +1406,7 @@ async function runAiSubagent(
   recordError: (sessionId: SessionId, text: string) => void,
   defaultModel?: { currentSelection(): unknown },
   nodeActors: ReadonlyMap<string, string> = new Map(),
+  projections?: ProjectionRegistry,
 ): Promise<void> {
   const waitKey = String(request.wait_key ?? '')
   if (waitKey.length === 0) return
@@ -1392,7 +1482,16 @@ async function runAiSubagent(
   const scopeInfo = Array.isArray(request.scope_info)
     ? request.scope_info.filter((x): x is string => typeof x === 'string')
     : undefined
+  // 角色名字行：投影进上帝窗 + scope 命中的角色窗（主会话表面不再接收）。
+  const windows = projections.get(sid) ?? projections.ensure(sid, scopeInfo ?? [], (session.header as { cwd?: string } | undefined)?.cwd ?? process.cwd())
   appendChat(ctx, session, actor, 'speaker', actor, scopeInfo)
+  projectionAppend(windows, 'dsh-femwa/chat', {
+    kind: 'speaker',
+    actor,
+    text: actor,
+    ...scopeInfo === undefined ? {} : { visible: scopeInfo },
+    seq: Date.now(),
+  }, undefined, scopeInfo)
   const sid = String(session.id)
   const baseTurn = (turnBaseBySession.get(sid) ?? 100_000) + 1
   turnBaseBySession.set(sid, baseTurn + 100)
@@ -1414,12 +1513,9 @@ async function runAiSubagent(
       return
     }
     turnStarted = true
-    try {
-      session.append('turn/start', { turn: baseTurn })
-    } catch (error: unknown) {
-      console.log(`[dsh-femwa] mirror turn/start failed: ${String(error)}`)
-    }
-    // 持久化 turn→scope 映射（重启后视角过滤从此事件重建）。
+    // 投影窗：上帝窗全量 + scope 命中的角色窗。
+    projectionAppend(windows, 'turn/start', { turn: baseTurn }, undefined, scopeInfo)
+    // 主会话保留持久化 turn→scope 映射（重启后视角/投影重建用）。
     try {
       session.append('dsh-femwa/turn-scope', { turn: baseTurn, scope: scopeInfo ?? [] })
     } catch (error: unknown) {
@@ -1435,23 +1531,17 @@ async function runAiSubagent(
   }
   const ensureStepStart = (step: number): void => {
     if (currentStep === step) return
-    // 幂等兜底：log 里已有相同 turn:step 的 step/start（可能由 dsh 内部
-    // 机制补发）就不重复 append——重复会让 assistant-step / trajectory
-    // 节点收到两个 start Match（历史加载失败）。
-    const dup = session.events.some(e => e.type === 'step/start'
+    // 幂等兜底：投影窗 log 里已有相同 turn:step 的 step/start 就不重复。
+    const dup = windows.god?.events.some(e => e.type === 'step/start'
       && (e.data as { turn?: number }).turn === baseTurn
-      && (e.data as { step?: number }).step === step)
+      && (e.data as { step?: number }).step === step) ?? false
     if (dup) {
       currentStep = step
       return
     }
     currentStep = step
     ensureTurnStart()
-    try {
-      session.append('step/start', { turn: baseTurn, step })
-    } catch (error: unknown) {
-      console.log(`[dsh-femwa] mirror step/start failed: ${String(error)}`)
-    }
+    projectionAppend(windows, 'step/start', { turn: baseTurn, step }, undefined, scopeInfo)
   }
   const onChildEvent = (watched: Session, watchedEvent: SessionEvent): void => {
     if (String(watched.id) !== String(run.id)) return
@@ -1464,12 +1554,12 @@ async function runAiSubagent(
         broadcastSse('ai_token', { node_name: nodeName, actor, token: chunk.text })
       }
     }
-    // 镜像到父会话：dsh 原生 assistant 节点渲染完整 turn（思考折叠/工具卡片/
-    // 回答），zero 自绘 UI。turn/step 号重映射避免多节点撞号。
-    // 视角过滤在前端显示层（CSS 隐藏）。
+    // 镜像到投影窗：dsh 原生 assistant 节点渲染完整 turn（思考折叠/工具卡片/
+    // 回答），零自绘 UI。上帝窗全量；角色窗按 scope 命中。主会话表面不再
+    // 接收角色内容（主模型上下文保持干净）。
     if (!FORWARD_CHILD_EVENTS.has(watchedEvent.type)) return
     // 镜像裁剪（方案丙）：chunk 只镜像块边界（block-start/block-end 携带完整
-    // 块内容），delta/usage/finish 不落主会话日志——历史重放行数大幅下降，
+    // 块内容），delta/usage/finish 不落日志——历史重放行数大幅下降，
     // 渲染由 block-end 的完整块 + assistant/message 兜底；流式走 SSE 通道。
     if (watchedEvent.type === 'assistant/chunk') {
       const ctype = (watchedEvent.data as { chunk?: { type?: string } }).chunk?.type
@@ -1489,15 +1579,10 @@ async function runAiSubagent(
     const data = { ...raw }
     if ('turn' in data) data.turn = mappedTurn
     if ('step' in data && typeof data.step === 'number') data.step = data.step
-    try {
-      // 仅 surface-eligible 事件（assistant/message、tool/result）要求
-      // surfaceOp 标记；其余事件（chunk/step 边界等）不能带。
-      const surface = SURFACE_OP_EVENTS.has(watchedEvent.type)
-      session.append(watchedEvent.type as never, data,
-        surface ? { surfaceOp: 'append' } : undefined)
-    } catch (error: unknown) {
-      console.log(`[dsh-femwa] mirror child event failed (${watchedEvent.type}): ${String(error)}`)
-    }
+    // surface-eligible 事件（assistant/message、tool/result）要求 surfaceOp。
+    const surface = SURFACE_OP_EVENTS.has(watchedEvent.type)
+    projectionAppend(windows, watchedEvent.type, data,
+      surface ? { surfaceOp: 'append' } : undefined, scopeInfo)
   }
   const disposeListener = ctx.on('session/event', onChildEvent)
   try {
@@ -1716,6 +1801,147 @@ async function readSessionScriptText(femwaRoot: string, sessionId: string): Prom
     }
   }
   return undefined
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// 投影窗（子代理视角窗）：角色/上帝视角从「主会话 CSS 过滤」迁移到
+// 「dsh 原生子代理会话窗」。投影窗 = 无 agent 会话 + origin:subagent +
+// parentSession=主会话 + subagent/descriptor（dsh 原生身份，可进子代理目录、
+// 标题=label、持久化自动）。事件按 turn-scope 投影进对应窗，主会话表面
+// 不再接收角色内容（为「主会话=戏外视角」铺路）。
+// ═══════════════════════════════════════════════════════════════════════
+
+/** 投影窗 actor 消毒：非 [A-Za-z0-9_-] 替换为 _（角色名可能是中文）。 */
+function projectionActorKey(actor: string): string {
+  return actor.replace(/[^A-Za-z0-9_-]/g, '_')
+}
+
+/** 投影窗 id：上帝窗 god / 角色窗 <actorKey>。id 规则化 → 重启后可推导。 */
+function projectionId(sid: string, actor: string): string {
+  return `fem-proj-${sid}-${projectionActorKey(actor)}`
+}
+
+/** 投影窗是否已带 subagent/descriptor（幂等：fold 取第一个事件为权威，不得重复）。 */
+function projectionHasDescriptor(session: Session): boolean {
+  return session.events.some(e => e.type === 'subagent/descriptor')
+}
+
+/** 创建/复用投影窗会话。幂等：已存在（live 或持久化恢复）直接返回。 */
+function ensureProjectionWindow(
+  ctx: Context,
+  sid: string,
+  actor: string,
+  cwd: string,
+): Session | undefined {
+  const sessions = ctx.get('sessions') as
+    | { get(id: SessionId): Session | undefined; create(id: string, options: { seed?: unknown[]; meta: Record<string, unknown> }): Session }
+    | undefined
+  if (sessions === undefined) return undefined
+  const id = projectionId(sid, actor)
+  try {
+    const existing = sessions.get(SessionId(id))
+    if (existing !== undefined) {
+      // 补 descriptor（旧会话/重启恢复的投影窗可能缺身份）
+      if (!projectionHasDescriptor(existing)) {
+        existing.append('subagent/descriptor', {
+          version: 2,
+          mode: 'one-shot',
+          provider: 'dsh-femwa',
+          label: actor === 'god' ? '👁 上帝视角' : `🎭 ${actor}`,
+        })
+      }
+      return existing
+    }
+    const created = sessions.create(id, {
+      meta: { cwd, parentSession: sid, origin: 'subagent' },
+    })
+    created.append('subagent/descriptor', {
+      version: 2,
+      mode: 'one-shot',
+      provider: 'dsh-femwa',
+      label: actor === 'god' ? '👁 上帝视角' : `🎭 ${actor}`,
+    })
+    console.log(`[dsh-femwa] projection window created: ${id} (${actor})`)
+    return created
+  } catch (error: unknown) {
+    console.log(`[dsh-femwa] ensureProjectionWindow(${actor}) failed: ${String(error)}`)
+    return undefined
+  }
+}
+
+/** 上帝窗 + 该剧本全部角色窗的集合（创建/复用）。 */
+function ensureProjectionWindows(
+  ctx: Context,
+  sid: string,
+  actors: string[],
+  cwd: string,
+): { god?: Session; actors: Map<string, Session> } {
+  const god = ensureProjectionWindow(ctx, sid, 'god', cwd)
+  const map = new Map<string, Session>()
+  for (const actor of actors) {
+    const win = ensureProjectionWindow(ctx, sid, actor, cwd)
+    if (win !== undefined) map.set(actor, win)
+  }
+  return { god, actors: map }
+}
+
+/** 按 actor 把事件投影进对应窗：上帝窗全量；角色窗按 scope 命中。
+ *  targetActors = 空数组 → 仅上帝窗；undefined → 上帝窗 + 全部角色窗（全局可见类）。 */
+function projectionAppend(
+  windows: { god?: Session; actors: Map<string, Session> },
+  type: string,
+  data: Record<string, unknown>,
+  surfaceOp?: Record<string, unknown>,
+  targetActors?: string[],
+): void {
+  const appendTo = (win: Session | undefined): void => {
+    if (win === undefined) return
+    try {
+      win.append(type as never, data, surfaceOp as never)
+    } catch (error: unknown) {
+      console.log(`[dsh-femwa] projectionAppend(${type}) failed: ${String(error)}`)
+    }
+  }
+  appendTo(windows.god)
+  if (targetActors === undefined) {
+    for (const win of windows.actors.values()) appendTo(win)
+  } else {
+    for (const actor of targetActors) appendTo(windows.actors.get(actor))
+  }
+}
+
+/** 单会话投影窗注册表：sid → 投影窗集合（含角色窗）。 */
+interface ProjectionRegistry {
+  windows: Map<string, { god?: Session; actors: Map<string, Session> }>
+  ensure(sid: string, actors: string[], cwd: string): { god?: Session; actors: Map<string, Session> }
+  get(sid: string): { god?: Session; actors: Map<string, Session> } | undefined
+}
+
+function createProjectionRegistry(ctx: Context): ProjectionRegistry {
+  const windows = new Map<string, { god?: Session; actors: Map<string, Session> }>()
+  return {
+    windows,
+    ensure(sid, actors, cwd) {
+      const existing = windows.get(sid)
+      if (existing !== undefined) {
+        // 补充新角色窗（多剧本/角色追加）
+        for (const actor of actors) {
+          if (!existing.actors.has(actor)) {
+            const win = ensureProjectionWindow(ctx, sid, actor, cwd)
+            if (win !== undefined) existing.actors.set(actor, win)
+          }
+        }
+        if (existing.god === undefined) existing.god = ensureProjectionWindow(ctx, sid, 'god', cwd)
+        return existing
+      }
+      const created = ensureProjectionWindows(ctx, sid, actors, cwd)
+      windows.set(sid, created)
+      return created
+    },
+    get(sid) {
+      return windows.get(sid)
+    },
+  }
 }
 
 /** Resolve the engine's LLM key from dsh credentials (absent → AI nodes fail). */
