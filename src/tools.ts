@@ -81,15 +81,19 @@ export function registerFemwaTools(
   ctx: Context,
   deps: FemwaToolDeps,
 ): () => void {
-  const tools = ctx.get('tools') as {
+  // cordis 服务注入后直接挂 ctx 属性（dsh-tool-todo 等插件同样用法）。
+  const tools = (ctx as unknown as { tools?: {
     register(def: {
       name: string
       description: string
       parameters: unknown
-      output: { schema: unknown }
+      output: {
+        schema: unknown
+        render(args: unknown, value: { ok: boolean; error?: string }): Array<{ type: 'text'; text: string }>
+      }
       execute(args: unknown, exec: { agent?: Agent; signal: AbortSignal }): Promise<unknown>
     }): () => void
-  } | undefined
+  } }).tools
   if (tools === undefined) {
     console.log('[dsh-femwa] tools service unavailable; femwa-mount/femwa-run not registered')
     return () => undefined
@@ -102,7 +106,15 @@ export function registerFemwaTools(
       name: schema.name,
       description: schema.description,
       parameters: schema.parameters,
-      output: { schema: { type: 'object', properties: {}, additionalProperties: true } },
+      output: {
+        schema: { type: 'object', additionalProperties: true },
+        render: (_args: unknown, value: { ok: boolean; error?: string }) => [{
+          type: 'text',
+          text: value.ok === true
+            ? JSON.stringify(value)
+            : `❌ ${value.error ?? '未知错误'}`,
+        }],
+      },
       execute: async (args, exec) => {
         const sid = callerSessionId(deps, exec.agent)
         if (sid === null) {

@@ -79,8 +79,8 @@ declare module '@deepseek-ai/cordis' {
   }
 }
 
-/** Required services: agent registry + session store. */
-export const inject = ['agents', 'sessions', 'agentDefaultModel']
+/** Required services: agent registry + session store + tools (femwa-mount/run). */
+export const inject = ['agents', 'sessions', 'agentDefaultModel', 'tools']
 
 export const Config = z.object({
   /** Master switch. */
