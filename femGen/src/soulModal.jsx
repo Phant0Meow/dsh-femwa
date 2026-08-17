@@ -6,7 +6,7 @@
 import React, { useState } from 'react';
 import { inp, btnP, btnS } from './common';
 
-function SoulModal({ open, onClose, onCreated }) {
+function SoulModal({ open, onClose, onCreated, createUrl = '/api/souls/create' }) {
   const [soulForm, setSoulForm] = useState({
     soul_id: '',
     soul_name: '',
@@ -25,7 +25,7 @@ function SoulModal({ open, onClose, onCreated }) {
     setSoulFormSubmitting(true);
     setSoulFormError('');
     try {
-      const res = await fetch('/api/souls/create', {
+      const res = await fetch(createUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(soulForm),

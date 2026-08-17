@@ -275,6 +275,18 @@ def main():
                 send_response(req_id, True, {"delivered": True})
             else:
                 send_response(req_id, True, {"delivered": False})
+        elif cmd == "create_soul":
+            # 插件模式 soul 创建：user_id/created_by 固定为默认用户 u001（前端不再输入）。
+            from femCompiler.db_utils import create_soul as _create_soul
+            soul_id = str(args_obj.get("soul_id", "")).strip()
+            soul_name = str(args_obj.get("soul_name", "")).strip()
+            description = str(args_obj.get("description", ""))
+            user_id = str(args_obj.get("user_id", "")).strip() or "u001"
+            if not soul_id:
+                send_response(req_id, False, error="soul_id is required")
+                return
+            _create_soul(soul_id, soul_name, description, user_id)
+            send_response(req_id, True, {"soul_id": soul_id})
         elif cmd == "shutdown":
             with state_lock:
                 runner = state["runner"]

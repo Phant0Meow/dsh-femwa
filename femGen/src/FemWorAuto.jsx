@@ -38,11 +38,13 @@ function getBackendBaseUrl() {
   return `${host}:${port}`;
 }
 
-export default function FEMEditor({ plugin = false, onRun, onStop, initialScript, initialCheckpoint, initialRunning = false, onSnapshot } = {}) {
+export default function FEMEditor({ plugin = false, onRun, onStop, initialScript, initialCheckpoint, initialRunning = false, onSnapshot, onExport, onImport, savedPath } = {}) {
 // 插件模式：由 dsh-femwa 注入（plugin=true）——运行/停止走插件回调，
 // SSE 连插件广播路由；独立模式保留原后端调用（getBackendBaseUrl）。
 // initialScript/initialCheckpoint/initialRunning：会话恢复（刷新/重启/运行中打开）。
 // onSnapshot(fems)：画布编辑防抖后实时写会话快照（双视图同步）。
+// savedPath：会话剧本文件地址（导出/导入产生）——空=未保存（提示+绝对寻址）。
+// onExport(fems, name)：导出=用户选目录保存→地址存会话；onImport(content, filename)：导入=上传保存→地址存会话。
 //console.log('✅ FEMEditor 已进入渲染');
   const [locationPath, setLocationPath] = useState(['mainflow']);
   const mode =
@@ -1935,6 +1937,13 @@ if (draggedNode.type === 'for_out' && n.id === draggedNode.forNodeId) {
       try {
         const text = event.target.result;
         applyFEMText(text);
+        // 插件模式：同时上传保存到服务端（按文件名存 projects/）→ 会话只存地址。
+        // 独立模式：仅读入画布（原行为）。
+        if (plugin && typeof onImport === 'function') {
+          onImport(text, file.name).catch((err) => {
+            console.warn('[导入 .fems] 服务端保存失败（画布已加载）:', err);
+          });
+        }
       } catch (err) {
         setFemError(err.message);
       }
@@ -2390,6 +2399,7 @@ nodes={nodes}
           open={soulModalOpen}
           onClose={() => setSoulModalOpen(false)}
           onCreated={() => setSoulModalOpen(false)}
+          createUrl={plugin ? '/dsh-femwa/souls' : getBackendBaseUrl() + '/api/souls/create'}
         />
       </ErrorBoundary>
     );
@@ -2726,10 +2736,22 @@ nodes={nodes}
               导入 .fems
             </button>
             <button
-              onClick={() => {
+              onClick={async () => {
                 console.log('[导出 .fems] 开始即时生成');
                 const exportText = handleGraphToFem();
                 console.log('[导出 .fems] 生成完成, 长度:', exportText.length);
+                if (plugin && typeof onExport === 'function') {
+                  // 插件模式：系统目录选择器选保存位置 → 服务端保存 → 地址存会话。
+                  try {
+                    const path = await onExport(exportText, proj.name || 'flow');
+                    console.log('[导出 .fems] 已保存到:', path);
+                  } catch (err) {
+                    console.warn('[导出 .fems] 保存失败:', err);
+                    alert(String(err?.message ?? err));
+                  }
+                  return;
+                }
+                // 独立模式：浏览器下载（原行为）。
                 const blob = new Blob([exportText], {
                   type: 'text/plain',
                 });
@@ -3558,6 +3580,20 @@ if (enrichedNode.type === 'par_out') {
           </div>
 
       {/* FEM Preview */}
+      {plugin && savedPath === undefined && (
+        <div style={{
+          fontSize: 11,
+          color: '#b45309',
+          background: '#fef3c7',
+          border: '1px solid #fde68a',
+          borderRadius: 6,
+          padding: '4px 8px',
+          marginBottom: 4,
+          lineHeight: 1.4,
+        }}>
+          ⚠ 剧本未保存。外接依赖文件只支持绝对地址。
+        </div>
+      )}
       <FemPreview
         value={femText}
         onChange={(v) => { setFemText(v); setFemDirty(true); }}
@@ -3635,6 +3671,7 @@ if (enrichedNode.type === 'par_out') {
         onCreated={(data) => {
           setSoulModalOpen(false);
         }}
+        createUrl={plugin ? '/dsh-femwa/souls' : getBackendBaseUrl() + '/api/souls/create'}
       />
     </div> {/* 闭合最外层 flex 容器 */}
     </ErrorBoundary>

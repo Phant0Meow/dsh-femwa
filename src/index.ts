@@ -220,6 +220,8 @@ interface CreateSessionBody {
 interface SaveScriptBody {
   name?: unknown
   content?: unknown
+  /** 绝对路径直写（导出流程：用户经系统目录选择器选定目录 + 文件名）。 */
+  path?: unknown
 }
 
 /** Read a JSON request body (empty body tolerated). */
@@ -793,6 +795,34 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
     })
     webServer.register({
       kind: 'exact',
+      path: '/dsh-femwa/souls',
+      handler: (req: IncomingMessage, res: ServerResponse): void => {
+        void (async () => {
+          if (req.method !== 'POST') {
+            writeJson(res, 405, { ok: false, error: 'method not allowed' })
+            return
+          }
+          const body = await readBody(req) as Record<string, unknown>
+          const soul_id = typeof body.soul_id === 'string' ? body.soul_id.trim() : ''
+          if (soul_id.length === 0) {
+            writeJson(res, 400, { ok: false, error: 'soul_id is required' })
+            return
+          }
+          // 插件模式 soul 创建：归属/创建者固定默认用户 u001（前端不再输入）。
+          const result = await bridge.send('create_soul', {
+            soul_id,
+            soul_name: typeof body.soul_name === 'string' ? body.soul_name.trim() : '',
+            description: typeof body.description === 'string' ? body.description : '',
+            user_id: 'u001',
+          }, 5000)
+          writeJson(res, 200, { ok: true, soul_id, result })
+        })().catch((error: unknown) => {
+          writeJson(res, 500, { ok: false, error: String(error) })
+        })
+      },
+    })
+    webServer.register({
+      kind: 'exact',
       path: '/dsh-femwa/stop',
       handler: (_req: IncomingMessage, res: ServerResponse): void => {
         // Hard-stop the running workflow (interrupt semantics): the engine
@@ -956,15 +986,28 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
       path: '/dsh-femwa/session-script',
       handler: (req: IncomingMessage, res: ServerResponse): void => {
         void (async () => {
-          // femGen 画布编辑的实时快照写（防抖由前端控制）。
+          // 会话剧本记录写（两种形态）：
+          //  - {sessionId, fems}：画布编辑防抖的原文快照（保留已有地址）
+          //  - {sessionId, scriptPath}：导出/导入获得地址 → 只存地址（清原文）
           const raw = await readBody(req) as unknown as Record<string, unknown>
           const sessionId = typeof raw.sessionId === 'string' && raw.sessionId.trim().length > 0 ? raw.sessionId : ''
-          const fems = typeof raw.fems === 'string' && raw.fems.trim().length > 0 ? raw.fems : ''
-          if (sessionId.length === 0 || fems.length === 0) {
-            writeJson(res, 400, { ok: false, error: 'sessionId and fems are required' })
+          if (sessionId.length === 0) {
+            writeJson(res, 400, { ok: false, error: 'sessionId is required' })
             return
           }
-          await writeSessionScript(resolved.femwaRoot, sessionId, fems)
+          const prev = await readSessionScript(resolved.femwaRoot, sessionId)
+          const scriptPath = typeof raw.scriptPath === 'string' && raw.scriptPath.trim().length > 0 ? raw.scriptPath.trim() : ''
+          const fems = typeof raw.fems === 'string' && raw.fems.trim().length > 0 ? raw.fems : ''
+          if (scriptPath.length > 0) {
+            // 保存动作：会话记录替换为地址，不保留原文。
+            await writeSessionScript(resolved.femwaRoot, sessionId, { path: scriptPath })
+          } else if (fems.length > 0) {
+            // 画布编辑防抖：写原文，保留已有地址（运行检测再决定去留）。
+            await writeSessionScript(resolved.femwaRoot, sessionId, { ...prev?.path === undefined ? {} : { path: prev.path }, text: fems })
+          } else {
+            writeJson(res, 400, { ok: false, error: 'fems or scriptPath is required' })
+            return
+          }
           writeJson(res, 200, { ok: true })
         })().catch((error: unknown) => {
           writeJson(res, 500, { ok: false, error: String(error) })
@@ -984,7 +1027,8 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
             writeJson(res, 400, { ok: false, error: 'sessionId is required' })
             return
           }
-          const script = await readSessionScript(resolved.femwaRoot, sessionId)
+          const record = await readSessionScript(resolved.femwaRoot, sessionId)
+          const script = await readSessionScriptText(resolved.femwaRoot, sessionId)
           let checkpoint = await readCheckpoint(resolved.femwaRoot, sessionId)
           let dirty = false
           for (const [key, value] of Object.entries(checkpoint)) {
@@ -1004,6 +1048,7 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
             ok: true,
             hasScript: script !== undefined,
             script: script ?? undefined,
+            scriptPath: record?.path ?? undefined,
             checkpoint,
             running: runState.running && String(runState.sessionId ?? '') === sessionId,
           })
@@ -1041,6 +1086,33 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
           }
         }, 15_000)
         res.on('close', () => clearInterval(heartbeat))
+      },
+    })
+    webServer.register({
+      kind: 'exact',
+      path: '/dsh-femwa/pick-directory',
+      handler: (_req: IncomingMessage, res: ServerResponse): void => {
+        void (async () => {
+          // 导出流程：让用户选剧本保存目录（dsh directory-picker seam：
+          // native=系统目录选择对话框 / browse=应用内浏览）。返回目录绝对路径。
+          const picker = ctx.get('directoryPicker') as
+            | { capability(): { kind: string; pick?(signal: AbortSignal): Promise<string | null>; list?(path?: string): Promise<unknown> } }
+            | undefined
+          if (picker === undefined) {
+            writeJson(res, 500, { ok: false, error: 'directoryPicker service unavailable' })
+            return
+          }
+          const cap = picker.capability()
+          if (cap.kind === 'native' && typeof cap.pick === 'function') {
+            const dir = await cap.pick(new AbortController().signal)
+            writeJson(res, 200, { ok: true, directory: dir })
+          } else {
+            // browse 后端无系统对话框：让前端填路径（此处仅声明能力不足）。
+            writeJson(res, 501, { ok: false, error: 'directoryPicker backend is browse; path entry unsupported yet', kind: cap.kind })
+          }
+        })().catch((error: unknown) => {
+          writeJson(res, 500, { ok: false, error: String(error) })
+        })
       },
     })
     console.log('[dsh-femwa] create-session + scripts + save-script + script + errors routes registered')
@@ -1517,10 +1589,20 @@ async function handleSaveScript(
     writeJson(res, 400, { ok: false, error: 'content is required' })
     return
   }
+  const { mkdirSync, writeFileSync } = await import('node:fs')
+  const rawPath = typeof body.path === 'string' && body.path.trim().length > 0 ? body.path.trim() : ''
+  if (rawPath.length > 0) {
+    // 导出流程：用户经系统目录选择器选定目录 + 文件名 → 绝对路径直写。
+    // 确保扩展名 .fems（用户目录选择器只选目录，文件名由前端拼接）。
+    const path = rawPath.toLowerCase().endsWith('.fems') ? rawPath : `${rawPath}.fems`
+    writeFileSync(path, content, 'utf8')
+    console.log(`[dsh-femwa] saved script to ${path}`)
+    writeJson(res, 200, { ok: true, path })
+    return
+  }
   // Sanitize the file name: keep safe chars, force .fems.
   const safe = name.replace(/[\\/:*?"<>|]/g, '_').replace(/\.fems$/i, '')
   const projectsDir = `${resolved.femwaRoot}\\user_data\\projects`
-  const { mkdirSync, writeFileSync } = await import('node:fs')
   mkdirSync(projectsDir, { recursive: true })
   const path = `${projectsDir}\\${safe}.fems`
   writeFileSync(path, content, 'utf8')
@@ -1587,27 +1669,53 @@ async function clearCheckpoint(femwaRoot: string, sessionId: string): Promise<vo
   }
 }
 
-/** 会话级剧本快照路径：femGen 刷新/重启后恢复画布用（user_data/sessions/）。 */
+/** 会话级剧本记录路径（femGen 刷新/重启后恢复画布用；JSON 单文件）。 */
 function sessionScriptPath(femwaRoot: string, sessionId: string): string {
-  return join(femwaRoot, 'user_data', 'sessions', `${sessionId}.fems`)
+  return join(femwaRoot, 'user_data', 'sessions', `${sessionId}.json`)
 }
 
-/** 把画布运行的最新剧本写入会话快照（覆盖式）。 */
-async function writeSessionScript(femwaRoot: string, sessionId: string, text: string): Promise<void> {
+/** 会话剧本记录：path=剧本文件地址（导出/导入产生），text=浏览器端剧本原文
+ * （未保存态；或已保存但前端修改过、运行检测不一致时保存的实际运行版本）。
+ * 读取优先级：text（实际运行的版本）→ path 指向文件内容。 */
+interface SessionScriptRecord {
+  path?: string
+  text?: string
+}
+
+/** 写会话剧本记录（覆盖式）。 */
+async function writeSessionScript(femwaRoot: string, sessionId: string, record: SessionScriptRecord): Promise<void> {
   const { mkdir, writeFile } = await import('node:fs/promises')
   const path = sessionScriptPath(femwaRoot, sessionId)
   await mkdir(join(path, '..'), { recursive: true })
-  await writeFile(path, text, 'utf8')
+  await writeFile(path, JSON.stringify(record, null, 2), 'utf8')
 }
 
-/** 读会话剧本快照；不存在返回 undefined。 */
-async function readSessionScript(femwaRoot: string, sessionId: string): Promise<string | undefined> {
+/** 读会话剧本记录；不存在返回 undefined。 */
+async function readSessionScript(femwaRoot: string, sessionId: string): Promise<SessionScriptRecord | undefined> {
   const { readFile } = await import('node:fs/promises')
   try {
-    return await readFile(sessionScriptPath(femwaRoot, sessionId), 'utf8')
+    const raw = await readFile(sessionScriptPath(femwaRoot, sessionId), 'utf8')
+    const parsed = JSON.parse(raw) as Partial<SessionScriptRecord>
+    return { ...parsed.path === undefined ? {} : { path: parsed.path }, ...parsed.text === undefined ? {} : { text: parsed.text } }
   } catch {
     return undefined
   }
+}
+
+/** 读会话剧本的最终文本：text 优先（实际运行版本）→ path 指向的文件内容 → undefined。 */
+async function readSessionScriptText(femwaRoot: string, sessionId: string): Promise<string | undefined> {
+  const record = await readSessionScript(femwaRoot, sessionId)
+  if (record === undefined) return undefined
+  if (record.text !== undefined && record.text.trim().length > 0) return record.text
+  if (record.path !== undefined) {
+    try {
+      const { readFile } = await import('node:fs/promises')
+      return await readFile(record.path, 'utf8')
+    } catch {
+      return undefined
+    }
+  }
+  return undefined
 }
 
 /** Resolve the engine's LLM key from dsh credentials (absent → AI nodes fail). */
@@ -1636,10 +1744,31 @@ async function startRunOnSession(
   if (apiKey === undefined) {
     console.log(`[dsh-femwa] credential ${resolved.apiKeyRef} not resolved; AI nodes will fail`)
   }
-  // 会话级剧本快照：无论 fems 直传还是 scriptPath，都记录最新剧本，
-  // femGen 打开标签页时按 session 恢复画布（运行中打开也能看到剧本）。
-  await writeSessionScript(resolved.femwaRoot, String(sessionId), scriptText)
-    .catch((error: unknown) => console.log(`[dsh-femwa] session script snapshot failed: ${String(error)}`))
+  // 会话剧本记录 + 运行时一致性检测：引擎永远跑「前端文本」；记录形态取决于
+  // 地址文件与前端文本是否一致——一致 → 只存地址（不保留原文）；不一致 →
+  // 地址与原文并存（text=浏览器端实际运行版本）。读历史时 text 优先。
+  const sid = String(sessionId)
+  const prev = await readSessionScript(resolved.femwaRoot, sid)
+  const effectivePath = scriptPath ?? prev?.path
+  try {
+    if (effectivePath !== undefined) {
+      const { readFile } = await import('node:fs/promises')
+      let fileText: string | undefined
+      try {
+        fileText = await readFile(effectivePath, 'utf8')
+      } catch {
+        fileText = undefined // 地址文件被删：降级为原文态（不报错）
+      }
+      const same = fileText !== undefined && fileText.replace(/\r\n/g, '\n') === scriptText.replace(/\r\n/g, '\n')
+      await writeSessionScript(resolved.femwaRoot, sid, same
+        ? { path: effectivePath }
+        : { path: effectivePath, text: scriptText })
+    } else {
+      await writeSessionScript(resolved.femwaRoot, sid, { text: scriptText })
+    }
+  } catch (error: unknown) {
+    console.log(`[dsh-femwa] session script record failed: ${String(error)}`)
+  }
   if (reset) {
     // 手动「运行」：作废旧 checkpoint，从头跑。
     await clearCheckpoint(resolved.femwaRoot, String(sessionId)).catch(() => undefined)
@@ -1658,9 +1787,10 @@ async function startRunOnSession(
   try {
     // base_dir = the script's own directory (FemWA CLI semantics): @func
     // relative files (e.g. werewolf_utils.py beside the script) resolve
-    // against it. Text-mode scripts fall back to the project root.
-    const baseDir = scriptPath !== undefined
-      ? scriptPath.replace(/[\\/][^\\/]*$/, '')
+    // against it. 已保存/导入（有地址）→ 剧本文件所在目录；未保存（纯文本）
+    // → 项目根（todo #2 再收紧为「未保存只支持绝对地址」）。
+    const baseDir = effectivePath !== undefined
+      ? effectivePath.replace(/[\\/][^\\/]*$/, '')
       : resolved.femwaRoot
     await bridge.send('run', {
       fems: scriptText,
