@@ -180,6 +180,8 @@ const [userApiModel, setUserApiModel] = useState(() => {
   // ── 新建 SOUL ID 浮层状态 ──
   const [soulModalOpen, setSoulModalOpen] = useState(false);
   const [soulForm, setSoulForm] = useState({ soul_id: '', soul_name: '', description: '', user_id: '', password: '' });
+  const [soulFormError, setSoulFormError] = useState('');
+  const [soulFormSubmitting, setSoulFormSubmitting] = useState(false);
 
 
   // Import file ref
@@ -3630,7 +3632,7 @@ if (enrichedNode.type === 'par_out') {
       />
 
 
-      {/* ── 新建 SOUL ID 浮层（插件模式暂不提供 souls 管理入口）── */}
+      {/* SOUL modal: shared by plugin & standalone modes */}
       <SoulModal
         open={soulModalOpen}
         onClose={() => setSoulModalOpen(false)}
