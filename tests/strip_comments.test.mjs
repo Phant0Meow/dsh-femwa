@@ -1,6 +1,6 @@
 // 全局注释剥离专项测试：内存版 stripComments / stripLineComments
 import fs from 'node:fs';
-import { stripComments, stripLineComments, parseFEMS } from './femParser.test.mjs';
+import { stripComments, stripLineComments, parseFEMS, extractHashSketch } from './femParser.test.mjs';
 
 let pass = 0, fail = 0;
 function check(name, actual, expect) {
@@ -84,6 +84,81 @@ try {
 const original = '# 注释\nmeta:\n    name = "x#y"\n';
 stripComments(original.split('\n'));
 check('原文不被修改', original, '# 注释\nmeta:\n    name = "x#y"\n');
+
+// ═══ #sketch 注释块还原（编译第零步）═══
+
+// 单元：extractHashSketch 还原行为
+const skRaw = [
+  'mainflow:',
+  '    [START] -> [A] ->',
+  '#sketch:',
+  '#  [A] = 100, 50',
+  '#  [B] = 200, 0',
+  '',
+  '    -> [END]',
+];
+const skRestored = extractHashSketch(skRaw).join('\n');
+check(
+  'extractHashSketch 还原 #sketch 块',
+  skRestored,
+  'mainflow:\n    [START] -> [A] ->\nsketch:\n  [A] = 100, 50\n  [B] = 200, 0\n\n    -> [END]'
+);
+check(
+  'extractHashSketch 不动普通行',
+  extractHashSketch(['# 普通注释', 'meta:', '    name = "x"']).join('\n'),
+  '# 普通注释\nmeta:\n    name = "x"'
+);
+
+// 集成：顶层 #sketch 注释块 → mainflow.layout
+const skScript = `meta:
+    name = "sketch-test"
+mainflow:
+    [START] -> [A] -> [END]
+#sketch:
+#  [A] = 100, 50
+#  [B] = 200, 0
+`;
+{
+  const r = parseFEMS(skScript);
+  check('顶层 #sketch 块解析出 layout', JSON.stringify(r.mainflow.layout), JSON.stringify({ '[A]': { dx: 100, dy: 50 }, '[B]': { dx: 200, dy: 0 } }));
+}
+
+// 集成：模块内 #sketch 注释块（生成端格式：# 在行首 + 原缩进）→ 模块 layout
+const skModule = `meta:
+    name = "mod-sketch"
+module 子流程:
+    flow:
+        [IN] -> [M1] -> [OUT]
+#    sketch:
+#      [M1] = 30, 40
+mainflow:
+    [START] -> &子流程 -> [END]
+`;
+{
+  const r = parseFEMS(skModule);
+  const mod = r.modules.find((m) => m.name === '子流程');
+  check('模块内 #sketch 块解析出 layout', JSON.stringify(mod && mod.layout), JSON.stringify({ '[M1]': { dx: 30, dy: 40 } }));
+}
+
+// 集成：块内手写 # 注释（剥一个 # 后残余）被正常去注释，不污染 layout
+const skInnerComment = `meta:
+    name = "sketch-comment"
+mainflow:
+    [START] -> [A] -> [END]
+#sketch:
+#  [A] = 1, 2
+#  # 这是块内手写注释
+`;
+{
+  const r = parseFEMS(skInnerComment);
+  check('块内手写注释不污染 layout', JSON.stringify(r.mainflow.layout), JSON.stringify({ '[A]': { dx: 1, dy: 2 } }));
+}
+
+// 集成：无 sketch 时 layout 为空对象
+{
+  const r = parseFEMS('meta:\n    name = "no-sketch"\nmainflow:\n    [START] -> [END]\n');
+  check('无 sketch 块时 layout 为空', JSON.stringify(r.mainflow.layout), '{}');
+}
 
 console.log(`\n===== 结果: ${pass}/${pass + fail} 通过 =====`);
 process.exit(fail === 0 ? 0 : 1);

@@ -92,6 +92,33 @@ function findPromptRanges(lines) {
   return ranges;
 }
 
+// ═══════════════════════════════════════════════════════════════
+// ═══ #sketch 注释块还原（编译第零步，必须先于 stripComments）═══
+// ═══════════════════════════════════════════════════════════════
+// 生成端把 sketch 块写成注释（每行行首加 #）；这里检测 #sketch 标志，
+// 把整个块取出、每行剥掉行首一个 #（# 后的空格即原缩进），还原为
+// 普通 sketch: 块，再走正常链路解析。块内残余 #（手写注释）交由
+// stripComments 正常去掉。
+function extractHashSketch(lines) {
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const raw = lines[i];
+    if (/^#\s*sketch\s*:/.test(raw)) {
+      out.push(raw.replace(/^#/, ''));       // 标志行剥一个 # → sketch:
+      i++;
+      while (i < lines.length && /^#/.test(lines[i])) {
+        out.push(lines[i].replace(/^#/, '')); // 块内容行同样剥一个 #
+        i++;
+      }
+    } else {
+      out.push(raw);
+      i++;
+    }
+  }
+  return out;
+}
+
 // 全局注释剥离：parseFEMS 的第一步
 function stripComments(lines) {
   const ranges = findPromptRanges(lines);
@@ -104,9 +131,10 @@ function stripComments(lines) {
 }
 
 function parseFEMS(text) {
+  // 编译第零步：#sketch 注释块还原（必须先于全局去注释）
   // 编译第一步：内存版全局去注释（# 和 // 到行尾；prompt 块与引号内豁免）
   // 只处理内存副本，用户原文/窗口文本不受影响
-  const lines = stripComments(text.split('\n'));
+  const lines = stripComments(extractHashSketch(text.split('\n')));
   const blocks = splitTopBlocks(lines);
 
   const result = {
@@ -1728,6 +1756,7 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
 
 export {
   normalizeSymbols, parseFEMS, splitTopBlocks, stripComments, stripLineComments,
+  extractHashSketch,
   parseMetaBlock, parseVarsBlock, parseCodeBlock,
   parseActorsBlock, parseMemoryOrContextBlock,
   parseActionBlock, parseModuleBlock, parseMainflowBlock,

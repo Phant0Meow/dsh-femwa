@@ -223,7 +223,7 @@ a.outVars.split('\n').forEach((v) => {
     console.log('[emitModule] 模块:', mod.name, 'cycleEdges:', modCycleMap.size, 'back:', modBack.size);
     emitFlowLines(mod.nodes || [], mod.edges || [], indentLevel + 2, lines, modCycleMap, modBack);
     lines.push('');
-    // ── sketch（节点排版位置，相对于 IN 锚点）──
+    // ── sketch（节点排版位置，相对于 IN 锚点；注释形式，后端忽略）──
     const modAnchor = (mod.nodes || []).find(
       n => n.type === 'special' && (n.specialType === 'IN' || n.specialType === 'START')
     );
@@ -231,9 +231,9 @@ a.outVars.split('\n').forEach((v) => {
       n => n.id !== modAnchor?.id && n.type !== 'for_out'
     );
     if (modAnchor && modSketchNodes.length > 0) {
-      lines.push(`${pfx}  sketch:`);
+      lines.push(`#${pfx}  sketch:`);
       modSketchNodes.forEach(n => {
-        lines.push(`${pfx}    ${n.label} = ${Math.round(n.x - modAnchor.x)}, ${Math.round(n.y - modAnchor.y)}`);
+        lines.push(`#${pfx}    ${n.label} = ${Math.round(n.x - modAnchor.x)}, ${Math.round(n.y - modAnchor.y)}`);
       });
       lines.push('');
     }
@@ -260,13 +260,13 @@ a.outVars.split('\n').forEach((v) => {
   //console.log('[buildFEM] 主流程 emitFlowLines, 传入 back:', back.size, '边');
   emitFlowLines(nodes, edges, 1, lines, cycleEdgesMap, back);
 
-  // ── mainflow sketch（节点排版位置，相对于 START 锚点）──
+  // ── mainflow sketch（节点排版位置，相对于 START 锚点；注释形式，后端忽略）──
   const mainAnchor = nodes.find(n => n.type === 'special' && n.specialType === 'START');
   const mainSketchNodes = nodes.filter(n => n.id !== mainAnchor?.id && n.type !== 'for_out');
   if (mainAnchor && mainSketchNodes.length > 0) {
-    lines.push('\nsketch:');
+    lines.push('\n#sketch:');
     mainSketchNodes.forEach(n => {
-      lines.push(`  ${n.label} = ${Math.round(n.x - mainAnchor.x)}, ${Math.round(n.y - mainAnchor.y)}`);
+      lines.push(`#  ${n.label} = ${Math.round(n.x - mainAnchor.x)}, ${Math.round(n.y - mainAnchor.y)}`);
     });
     lines.push('');
   }
