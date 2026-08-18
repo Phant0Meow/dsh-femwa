@@ -2097,6 +2097,22 @@ async function handleCreateSession(
         if (presets?.mount === undefined) return
         try {
           await presets.mount(agentCtx, FEM_PRESET)
+          // 注入语法文档路径（插件自包含布局，路径随插件位置变化——动态算）。
+          // scoped section 只对主会话 agent 生效（子代理不继承，角色不需要）。
+          const systemPrompt = (agentCtx as unknown as { systemPrompt?: { section(s: { name: string; order: number; text: string }): () => void } }).systemPrompt
+          if (systemPrompt !== undefined) {
+            try {
+              systemPrompt.section({
+                name: 'femwa:docs',
+                order: 50,
+                text: `fems 剧本语言完整语法文档在：${packageRoot}语法文档.md。`
+                  + '写剧本前用文件工具阅读它（read/read_image），尤其关注 meta/actors/code/vars/action/module/mainflow、'
+                  + 'scope 视角、par/fork 并行分支、@mind 运行时分发、file: 地址规则（相对=剧本目录/未保存只支持绝对）。',
+              })
+            } catch (error: unknown) {
+              console.log(`[dsh-femwa] syntax doc section inject failed: ${String(error)}`)
+            }
+          }
         } catch (error: unknown) {
           console.log(`[dsh-femwa] preset mount failed: ${String(error)}`)
         }
