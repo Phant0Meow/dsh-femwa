@@ -56,17 +56,6 @@ declare module '@deepseek-ai/dsh-session/types' {
       /** role = AI character line; notice = engine/flow status; human_wait = waiting for the user; prompt = node hint/announcement; error = engine error (red, system-like); thinking = subagent cot (folded). */
       kind: 'role' | 'notice' | 'human_wait' | 'prompt' | 'error' | 'thinking'
     }
-    /**
-     * 镜像 turn → scope 持久映射（视角过滤重启恢复用；合成 turn/start 时写入）。
-     * @mode emit
-     * @param data - mapped turn and the node's visible actor list.
-     */
-    'dsh-femwa/turn-scope': {
-      /** Mapped main-session turn number. */
-      turn: number
-      /** Actor names this turn is visible to. */
-      scope: string[]
-    }
   }
 }
 
@@ -497,19 +486,18 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
     | { currentSelection(): unknown }
     | undefined
 
-  // Admit the plugin's custom event types ('dsh-femwa/chat', 'dsh-femwa/turn-scope')
-  // into the session event vocabulary at runtime (the persistence read path
-  // otherwise refuses logs containing them). Every type the plugin appends to a
-  // session log must be registered here — missing one means that session's
-  // history fails to load. Registration must precede any session load, so it
-  // happens at apply time. Only builds that ship the registration surface
-  // (upstreamed feature / meow fork) have it; on stock builds the plugin keeps
-  // working for live sessions.
+  // Admit the plugin's custom event type ('dsh-femwa/chat') into the session
+  // event vocabulary at runtime (the persistence read path otherwise refuses
+  // logs containing it). Every type the plugin appends to a session log must
+  // be registered here — missing one means that session's history fails to
+  // load. (turn→scope used to be a log event too; it now persists to the
+  // plugin's user_data/turn_scopes/<sessionId>.json instead.) Registration
+  // must precede any session load, so it happens at apply time. Only builds
+  // that ship the registration surface (upstreamed feature / meow fork) have
+  // it; on stock builds the plugin keeps working for live sessions.
   const registerSessionEventType = (sessionNS as { registerSessionEventType?: (type: string) => () => void }).registerSessionEventType
   if (registerSessionEventType !== undefined) {
-    for (const type of ['dsh-femwa/chat', 'dsh-femwa/turn-scope'] as const) {
-      ctx.effect(() => registerSessionEventType(type), `dsh-femwa: session event type ${type}`)
-    }
+    ctx.effect(() => registerSessionEventType('dsh-femwa/chat'), 'dsh-femwa: session event type')
   } else {
     console.log('[dsh-femwa] this dsh build lacks registerSessionEventType; loading history of dsh-femwa sessions is unsupported here (see README)')
   }
@@ -931,26 +919,24 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
         }
         let scopes = turnScopesBySession.get(sessionId)
         if (scopes === undefined) {
-          // 重启后内存 Map 已丢：从主会话日志的 dsh-femwa/turn-scope 事件重建。
-          const live = (ctx.get('sessions') as { get(id: SessionId): Session | undefined } | undefined)?.get(SessionId(sessionId))
-          if (live !== undefined) {
+          // 重启后内存 Map 已丢：从插件文件重建（user_data/turn_scopes/<sid>.json）。
+          void readTurnScopeFile(resolved.femwaRoot, sessionId).then((record) => {
             const rebuilt = new Map<number, string[]>()
-            for (const event of live.events) {
-              if (event.type === 'dsh-femwa/turn-scope') {
-                const d = event.data as { turn: number; scope: string[] }
-                rebuilt.set(d.turn, d.scope)
-              }
+            for (const key of Object.keys(record)) {
+              const scope = record[key]
+              if (Array.isArray(scope)) rebuilt.set(Number(key), scope)
             }
-            if (rebuilt.size > 0) {
-              turnScopesBySession.set(sessionId, rebuilt)
-              scopes = rebuilt
-            }
-          }
+            if (rebuilt.size > 0) turnScopesBySession.set(sessionId, rebuilt)
+            const out: Record<string, string[]> = {}
+            for (const [turn, scope] of rebuilt) out[String(turn)] = scope
+            writeJson(res, 200, { ok: true, scopes: out })
+          }).catch((error: unknown) => {
+            writeJson(res, 500, { ok: false, error: String(error) })
+          })
+          return
         }
         const out: Record<string, string[]> = {}
-        if (scopes !== undefined) {
-          for (const [turn, scope] of scopes) out[String(turn)] = scope
-        }
+        for (const [turn, scope] of scopes) out[String(turn)] = scope
         writeJson(res, 200, { ok: true, scopes: out })
       },
     })
@@ -1748,19 +1734,18 @@ async function runAiSubagent(
     turnStarted = true
     // 投影窗：上帝窗全量 + scope 命中的角色窗。
     projectionAppend(windows, 'turn/start', { turn: baseTurn }, undefined, scopeInfo)
-    // 主会话保留持久化 turn→scope 映射（重启后视角/投影重建用）。
-    try {
-      session.append('dsh-femwa/turn-scope', { turn: baseTurn, scope: scopeInfo ?? [] })
-    } catch (error: unknown) {
-      console.log(`[dsh-femwa] mirror turn-scope failed: ${String(error)}`)
-    }
-    // 记录镜像 turn 的 scope（合成 turn/start 时；子代理自身没有 turn/start）
+    // 记录镜像 turn 的 scope（合成 turn/start 时；子代理自身没有 turn/start）。
+    // 持久化到插件文件而非会话日志事件——少一个需注册的自定义类型，
+    // 重建也不再依赖主会话日志。fire-and-forget：写失败仅打日志。
     let scopes = turnScopesBySession.get(sid)
     if (scopes === undefined) {
       scopes = new Map()
       turnScopesBySession.set(sid, scopes)
     }
     scopes.set(baseTurn, scopeInfo ?? [])
+    void writeTurnScopeFile(resolved.femwaRoot, sid, scopes).catch((error: unknown) => {
+      console.log(`[dsh-femwa] write turn-scope file failed: ${String(error)}`)
+    })
   }
   const ensureStepStart = (step: number): void => {
     if (currentStep === step) return
@@ -1984,6 +1969,33 @@ async function clearCheckpoint(femwaRoot: string, sessionId: string): Promise<vo
     await unlink(checkpointPath(femwaRoot, sessionId))
   } catch {
     // absent checkpoint is the common case; nothing to clear
+  }
+}
+
+/** turn→scope 映射文件路径：一 Fem 会话一个 JSON（重启后 /dsh-femwa/turn-scopes 重建用）。 */
+function turnScopePath(femwaRoot: string, sessionId: string): string {
+  return join(femwaRoot, 'user_data', 'turn_scopes', `${sessionId}.json`)
+}
+
+/** Persist the session's whole turn→scope map（跨 run 累积；turnBase 递增保证键不冲突）。 */
+async function writeTurnScopeFile(femwaRoot: string, sessionId: string, scopes: Map<number, string[]>): Promise<void> {
+  const { mkdir, writeFile } = await import('node:fs/promises')
+  const path = turnScopePath(femwaRoot, sessionId)
+  const out: Record<string, string[]> = {}
+  for (const [turn, scope] of scopes) out[String(turn)] = scope
+  await mkdir(join(path, '..'), { recursive: true })
+  await writeFile(path, JSON.stringify({ sessionId, updatedAt: Date.now(), scopes: out }, null, 2), 'utf8')
+}
+
+/** Read the persisted turn→scope map as a plain object (absent file → {}). */
+async function readTurnScopeFile(femwaRoot: string, sessionId: string): Promise<Record<string, string[]>> {
+  const { readFile } = await import('node:fs/promises')
+  try {
+    const raw = await readFile(turnScopePath(femwaRoot, sessionId), 'utf8')
+    const parsed = JSON.parse(raw) as { scopes?: Record<string, string[]> }
+    return parsed.scopes ?? {}
+  } catch {
+    return {}
   }
 }
 
