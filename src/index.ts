@@ -137,6 +137,14 @@ const FEM_PRESET = 'dsh-femwa'
  */
 const presetOverrides = new Map<string, string>()
 
+/**
+ * femwa:docs section 的 effect disposer 表（按 sessionId）：
+ * - 防重：同名 section 在同一 agent scope 重复注册会抛错（systemPrompt 约束）；
+ * - 切走 preset 时调用 disposer 清除，普通会话不留 Fem 文档段。
+ * 会话销毁时 section 随 agent ctx 的 effect 自动清理（条目残留无害，disposer 幂等）。
+ */
+const femwaDocsSections = new Map<string, () => void>()
+
 /** One session's frozen creation facts, the minimum presetOf needs. */
 interface PresetBearingIdentity {
   readonly id: SessionId
@@ -153,6 +161,84 @@ function presetOf(session: PresetBearingIdentity): string | undefined {
 function isFemAgent(agent: Agent): boolean {
   return presetOf(agent.session) === FEM_PRESET
     && agent.session.header.parentSession === undefined
+}
+
+/**
+ * 向一个 agent ctx 注入 femwa:docs section（语法文档指路，scoped：只对主会话
+ * agent 生效，子代理不继承，角色不需要）。setup（create-session）与
+ * agent-preset/selected 兜底（下拉菜单 recompose 路径）两条路径共用。
+ * @returns section 的 effect disposer；无 systemPrompt 或注册失败（如同名
+ * 重复）返回 undefined。
+ */
+function injectFemwaDocs(agentCtx: Context): (() => void) | undefined {
+  const systemPrompt = (agentCtx as unknown as { systemPrompt?: { section(s: { name: string; order: number; text: string }): () => void } }).systemPrompt
+  if (systemPrompt === undefined) return undefined
+  try {
+    return systemPrompt.section({
+      name: 'femwa:docs',
+      order: 50,
+      text: `fems 剧本语言完整语法文档在：${packageRoot}语法文档.md（速查表和最小模板已在你的 persona 里；memory/context/module/file: 地址规则等冷门语法查这里）。`
+        + `示例剧本在：${packageRoot}examples/（goal-loop.fems 循环+变量退出 / group-chat.fems par+@func 随机间隔 / discussion.fems for+if+par+人类拍板 / town.fems 动态 scope+add/remove 移动）。`
+        + '写剧本前先读一个最接近需求的示例照着改；写复杂剧本前建议把 examples/ 整体读一遍，学习 scope/vars/flow 的常见套路。'
+        + 'file: 地址规则：相对路径=相对剧本文件所在目录解析；剧本未保存（纯文本直接运行）时只支持绝对路径。',
+    })
+  } catch (error: unknown) {
+    console.log(`[dsh-femwa] femwa:docs section inject failed: ${String(error)}`)
+    return undefined
+  }
+}
+
+// ── 运行结果通知（femwa:notify section，注入主模型上下文、不污染用户可见聊天）───
+// 机制：systemPrompt.section 的 text 支持函数，每次主模型调用组装 system prompt
+// 时动态求值（packages/core/system-prompt section+assemble）。运行结束事件把
+// 摘要写入 runNotices，section text 读它；无结果时返回空串（空 section 被过滤）。
+// 摘要不清空：保持到下一次运行覆盖（用户 2026-08-20 拍板"不清空"）。
+
+/** 最近一次剧本运行结果摘要（按主会话 id）→ femwa:notify section 的动态 text 源。 */
+const runNotices = new Map<string, string>()
+
+/** femwa:notify section 的 effect disposer 表（按 sessionId，防同名重复注册）。 */
+const runNoticeSections = new Map<string, () => void>()
+
+/**
+ * 向一个 agent ctx 注入 femwa:notify section（运行结果摘要，scoped：只对主会话
+ * agent 生效，子代理不继承）。text 用函数每次 assemble 动态读 runNotices——没有
+ * 运行结果时返回空串，被 renderPrompt 过滤。system prompt 不进用户可见聊天，
+ * 满足"注入上下文、不污染界面"。仅注册不更新：run 事件更新 runNotices 即可。
+ * @returns section 的 effect disposer；无 systemPrompt 或注册失败返回 undefined。
+ */
+function injectRunNotice(agentCtx: Context, sid: string): (() => void) | undefined {
+  const systemPrompt = (agentCtx as unknown as { systemPrompt?: { section(s: { name: string; order: number; text: string | (() => string) }): () => void } }).systemPrompt
+  if (systemPrompt === undefined) return undefined
+  try {
+    return systemPrompt.section({
+      name: 'femwa:notify',
+      order: 60,
+      text: () => runNotices.get(sid) ?? '',
+    })
+  } catch (error: unknown) {
+    console.log(`[dsh-femwa] femwa:notify section inject failed: ${String(error)}`)
+    return undefined
+  }
+}
+
+/**
+ * 确保某 Fem 主会话已注入 femwa:notify section（幂等）。flow_start 时调用——
+ * 只在真正跑过剧本的会话上挂载。拿不到主会话 agent（极罕见）则跳过不阻断。
+ */
+function ensureRunNotice(ctx: Context, sessionId: SessionId): void {
+  const sid = String(sessionId)
+  if (runNoticeSections.has(sid)) return
+  const agent = (ctx as { agents?: { get(id: SessionId): { ctx: Context } | undefined } }).agents?.get(sessionId)
+  if (agent === undefined) {
+    console.log(`[dsh-femwa] femwa:notify inject skipped: main agent for ${sid} not found`)
+    return
+  }
+  const dispose = injectRunNotice(agent.ctx, sid)
+  if (dispose !== undefined) {
+    runNoticeSections.set(sid, dispose)
+    console.log(`[dsh-femwa] femwa:notify section injected (flow_start)`)
+  }
 }
 
 // ── HTTP helpers (create-session route) ───────────────────────────────────
@@ -411,16 +497,21 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
     | { currentSelection(): unknown }
     | undefined
 
-  // Admit 'dsh-femwa/chat' into the session event vocabulary at runtime (the
-  // persistence read path otherwise refuses logs containing it). Registration
-  // must precede any session load, so it happens at apply time. Only builds
-  // that ship the registration surface (upstreamed feature / meow fork) have
-  // it; on stock builds the plugin keeps working for live sessions.
+  // Admit the plugin's custom event types ('dsh-femwa/chat', 'dsh-femwa/turn-scope')
+  // into the session event vocabulary at runtime (the persistence read path
+  // otherwise refuses logs containing them). Every type the plugin appends to a
+  // session log must be registered here — missing one means that session's
+  // history fails to load. Registration must precede any session load, so it
+  // happens at apply time. Only builds that ship the registration surface
+  // (upstreamed feature / meow fork) have it; on stock builds the plugin keeps
+  // working for live sessions.
   const registerSessionEventType = (sessionNS as { registerSessionEventType?: (type: string) => () => void }).registerSessionEventType
   if (registerSessionEventType !== undefined) {
-    ctx.effect(() => registerSessionEventType('dsh-femwa/chat'), 'dsh-femwa: session event type')
+    for (const type of ['dsh-femwa/chat', 'dsh-femwa/turn-scope'] as const) {
+      ctx.effect(() => registerSessionEventType(type), `dsh-femwa: session event type ${type}`)
+    }
   } else {
-    console.log('[dsh-femwa] this dsh build lacks registerSessionEventType; loading history of dsh-femwa/chat sessions is unsupported here (see README)')
+    console.log('[dsh-femwa] this dsh build lacks registerSessionEventType; loading history of dsh-femwa sessions is unsupported here (see README)')
   }
 
   // Crash diagnostics: log uncaught exceptions/rejections instead of taking
@@ -509,6 +600,29 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
   ctx.on('agent-preset/selected', (sessionId: SessionId, agentPreset: string) => {
     presetOverrides.set(String(sessionId), agentPreset)
     console.log(`[dsh-femwa] preset override ${sessionId} -> ${agentPreset}`)
+    // femwa:docs 注入兜底：下拉菜单切 Fem 模式走 recompose，不执行 create-session 的
+    // setup 回调（section 只在那条路径注入过）——这里补注入；切走时清除。
+    const sid = String(sessionId)
+    if (agentPreset !== FEM_PRESET) {
+      const dispose = femwaDocsSections.get(sid)
+      if (dispose !== undefined) {
+        dispose()
+        femwaDocsSections.delete(sid)
+        console.log(`[dsh-femwa] femwa:docs section removed (preset -> ${agentPreset})`)
+      }
+      return
+    }
+    if (femwaDocsSections.has(sid)) return
+    const agent = ctx.agents.get(sessionId)
+    if (agent === undefined) {
+      console.log(`[dsh-femwa] femwa:docs inject skipped: agent for ${sessionId} not found`)
+      return
+    }
+    const dispose = injectFemwaDocs(agent.ctx)
+    if (dispose !== undefined) {
+      femwaDocsSections.set(sid, dispose)
+      console.log(`[dsh-femwa] femwa:docs section injected (recompose path)`)
+    }
   })
 
   // 2) Input bridge: user messages on the running Fem session become engine
@@ -546,16 +660,25 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
   ctx.on('dsh-femwa/event', (eventType: string, data: unknown) => {
     const sessionId = runState.sessionId
     if (sessionId === undefined) return
+    // flow_stopped 附加 paused 标记（pausedByUser 判定）：
+    // 暂停（bridge 半实现=stop）与停止共用 flow_stopped 事件，前端据此
+    // 区分「继续」（paused=true）vs「运行」（idle）按钮——AI 工具
+    // pause/resume 与 femGen 按钮共享同一状态机，不打架。
+    const payload = eventType === 'flow_stopped'
+      ? { ...((data ?? {}) as Record<string, unknown>), paused: runState.pausedByUser }
+      : data
     // 可视化运行通道：原样转发引擎事件（画布按 node_name 匹配节点做高亮/详情）。
-    broadcastSse(eventType, data)
+    broadcastSse(eventType, payload)
     // 事件缓冲：SSE 新连接（运行中打开编辑器标签）先重放已发生的事件。
-    runState.lastEvents.push({ type: eventType, data })
+    runState.lastEvents.push({ type: eventType, data: payload })
     if (runState.lastEvents.length > 100) runState.lastEvents.shift()
     const session = sessionsStore?.get(sessionId)
     if (session === undefined) return
-    const d = (data ?? {}) as Record<string, unknown>
+    const d = (payload ?? {}) as Record<string, unknown>
     switch (eventType) {
       case 'flow_start': {
+        // 运行开始：确保主会话已挂 femwa:notify section（运行结果摘要注入上下文）。
+        ensureRunNotice(ctx, sessionId)
         // Script actors feed the view-perspective menu + projection windows.
         const actors = Array.isArray(d.actors)
           ? d.actors.filter((x): x is string => typeof x === 'string')
@@ -679,6 +802,8 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
         void clearCheckpoint(resolved.femwaRoot, String(sessionId))
           .catch((error: unknown) => console.log(`[dsh-femwa] checkpoint clear failed: ${String(error)}`))
         appendChatProjected(ctx, session, projections, '✅ 剧本已跑完', 'notice')
+        // 通知主模型：跑完、断点已清（重跑从头开始，不可 resume）。
+        runNotices.set(String(sessionId), `Fem 剧本运行结果：✅ 已完整跑完。checkpoint 已清除——若要重跑，从头开始（不能用 resume 续跑）。`)
         break
       }
       case 'flow_error': {
@@ -688,12 +813,19 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
         const text = `剧本出错：${String(d.error ?? 'unknown error')}`
         recordError(session.id, text)
         appendChatProjected(ctx, session, projections, text, 'error')
+        // 通知主模型：报错摘要（错误信息含类型/行号/错误行，供据此迭代修剧本）。
+        runNotices.set(String(sessionId), `Fem 剧本运行结果：❌ 运行出错。错误信息：${String(d.error ?? 'unknown error')}`)
         break
       }
       case 'flow_stopped': {
         runState.running = false
         // 暂停（引擎侧为 stop 半实现）与停止共用 flow_stopped：按发起方区分文案。
         appendChatProjected(ctx, session, projections, runState.pausedByUser ? '⏸ 剧本已暂停' : '⏹ 剧本已停止', 'notice')
+        // 通知主模型：暂停/停止，均保留 checkpoint，可用 resume 续跑。
+        runNotices.set(String(sessionId),
+          runState.pausedByUser
+            ? 'Fem 剧本运行结果：⏸ 已暂停（保留断点，可以用 resume 续跑）。'
+            : 'Fem 剧本运行结果：⏹ 已停止（保留断点，可以用 resume 续跑）。')
         runState.pausedByUser = false
         break
       }
@@ -724,6 +856,18 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
       path: '/dsh-femwa/run',
       handler: (req: IncomingMessage, res: ServerResponse): void => {
         void handleRunOnSession(req, res, ctx, resolved, bridge, runState).catch((error: unknown) => {
+          writeJson(res, 500, { ok: false, error: String(error) })
+        })
+      },
+    })
+    webServer.register({
+      kind: 'exact',
+      path: '/dsh-femwa/models',
+      handler: (_req: IncomingMessage, res: ServerResponse): void => {
+        // 前端 actor source 下拉数据源：dsh 当前可用 provider/模型列表。
+        void collectLlmModels(ctx, resolved).then((payload) => {
+          writeJson(res, 200, { ok: true, ...payload })
+        }).catch((error: unknown) => {
           writeJson(res, 500, { ok: false, error: String(error) })
         })
       },
@@ -933,18 +1077,40 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
           const prev = await readSessionScript(resolved.femwaRoot, sessionId)
           const scriptPath = typeof raw.scriptPath === 'string' && raw.scriptPath.trim().length > 0 ? raw.scriptPath.trim() : ''
           const fems = typeof raw.fems === 'string' && raw.fems.trim().length > 0 ? raw.fems : ''
+          const baseRev = typeof raw.baseRev === 'number' ? raw.baseRev : undefined
+          const pageId = typeof raw.pageId === 'string' ? raw.pageId : ''
           if (scriptPath.length > 0) {
-            // 保存动作：会话记录替换为地址，不保留原文。
-            await writeSessionScript(resolved.femwaRoot, sessionId, { path: scriptPath })
+            // 保存动作：会话记录替换为地址，不保留原文（导出/导入=显式动作，无条件写）。
+            const result = await writeSessionScript(resolved.femwaRoot, sessionId, { path: scriptPath })
+            broadcastSse('script_changed', { sessionId })
+            writeJson(res, 200, { ok: true, rev: result.ok ? result.rev : undefined })
           } else if (fems.length > 0) {
-            // 画布编辑防抖：写原文，保留已有地址（运行检测再决定去留）。
-            await writeSessionScript(resolved.femwaRoot, sessionId, { ...prev?.path === undefined ? {} : { path: prev.path }, text: fems })
+            // 画布编辑防抖：写原文，保留已有地址。带 baseRev → 乐观锁：
+            // 多端并发编辑后写者输 → 409 + 服务端当前记录，前端弹窗让用户裁决。
+            const result = await writeSessionScript(
+              resolved.femwaRoot,
+              sessionId,
+              { ...prev?.path === undefined ? {} : { path: prev.path }, text: fems },
+              baseRev,
+            )
+            if (!result.ok) {
+              writeJson(res, 409, { ok: false, error: 'conflict', record: result.record })
+              return
+            }
+            // 广播其他端重载（pageId=写者自身，前端跳过自己的广播防回环）。
+            broadcastSse('script_changed', { sessionId, pageId })
+            writeJson(res, 200, { ok: true, rev: result.rev })
           } else {
             writeJson(res, 400, { ok: false, error: 'fems or scriptPath is required' })
             return
           }
-          writeJson(res, 200, { ok: true })
         })().catch((error: unknown) => {
+          // 防御：响应已发出后再出错，绝不能二次 writeJson（ERR_HTTP_HEADERS_SENT
+          // 会作为 unhandledRejection 把整个 dsh 进程带崩——2026-08-21 实测教训）。
+          if (res.headersSent) {
+            console.warn('[dsh-femwa] session-script handler failed after response:', String(error))
+            return
+          }
           writeJson(res, 500, { ok: false, error: String(error) })
         })
       },
@@ -984,6 +1150,7 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
             hasScript: script !== undefined,
             script: script ?? undefined,
             scriptPath: record?.path ?? undefined,
+            rev: record?.rev ?? 0,
             checkpoint,
             running: runState.running && String(runState.sessionId ?? '') === sessionId,
           })
@@ -1119,46 +1286,92 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
     void bridge.stop()
   }, 'dsh-femwa: bridge lifecycle')
 
-  // 6) 主模型专用工具：femwa-mount（挂载剧本到会话）/ femwa-run（运行剧本）。
+  // 6) 主模型专用工具：femwa-mount（挂载剧本到会话）/ femwa-run（控制运行）。
   //    执行体复用现有链路（writeSessionScript / startRunOnSession），只注入依赖。
+  // 公共解析：会话校验 + 读挂载剧本（text 优先）+ 编译校验（check 命令）。
+  // from_scratch 与 resume 共用——AI 看到的=AI 跑的=编译过的。
+  const resolveMounted = async (sessionId: string): Promise<{ sid: SessionId; scriptText: string; effectivePath?: string }> => {
+    const sid = SessionId(sessionId)
+    const sessionsStore = ctx.get('sessions') as { get(id: SessionId): Session | undefined } | undefined
+    const session = sessionsStore?.get(sid)
+    if (session === undefined) {
+      throw new Error(`会话 ${sessionId} 不存在`)
+    }
+    if (presetOf(session) !== FEM_PRESET) {
+      throw new Error('当前会话不是 Fem 剧本模式')
+    }
+    if (runState.running) {
+      throw new Error('已有剧本在运行中，请先停止')
+    }
+    const scriptText = await readSessionScriptText(resolved.femwaRoot, sessionId)
+    if (scriptText === undefined) {
+      throw new Error('会话未挂载剧本：请先 femwa-mount 或用 femGen 编辑器写入剧本')
+    }
+    const prev = await readSessionScript(resolved.femwaRoot, sessionId)
+    const effectivePath = prev?.path
+    // 编译校验（femwa-run 路径）：编译错误作为工具返回结果给主模型，
+    // 带细节（parse_script 的行号/变量名）指导改剧本；不启动运行、无状态残留。
+    const baseDir = effectivePath !== undefined
+      ? effectivePath.replace(/[\\/][^\\/]*$/, '')
+      : ''
+    try {
+      await bridge.send('check', { fems: scriptText, base_dir: baseDir }, 30_000)
+    } catch (error: unknown) {
+      throw new Error(`剧本编译失败：${String(error instanceof Error ? error.message : error)}`)
+    }
+    return { sid, scriptText, effectivePath }
+  }
   const toolDeps: FemwaToolDeps = {
     mountScript: async (sessionId, scriptPath) => {
       await writeSessionScript(resolved.femwaRoot, sessionId, { path: scriptPath })
       console.log(`[dsh-femwa] femwa-mount ${sessionId} <- ${scriptPath}`)
+      // 双链路②：记录已更新 → 推信号让已打开的编辑器重读。否则旧画布的
+      // 3s 防抖回写会用内存旧本盖掉新写入的地址，重新挂载等于白挂。
+      broadcastSse('script_changed', { sessionId })
     },
-    runScript: async (sessionId, scriptPath) => {
-      const sid = SessionId(sessionId)
-      const sessionsStore = ctx.get('sessions') as { get(id: SessionId): Session | undefined } | undefined
-      const session = sessionsStore?.get(sid)
-      if (session === undefined) {
-        throw new Error(`会话 ${sessionId} 不存在`)
+    runScript: async (sessionId) => {
+      // from_scratch：从头运行已挂载的剧本（清 checkpoint，reset=true）。
+      const { sid, scriptText, effectivePath } = await resolveMounted(sessionId)
+      await startRunOnSession(ctx, resolved, bridge, runState, sid, scriptText, effectivePath, true)
+    },
+    stopScript: async (sessionId) => {
+      if (!runState.running) {
+        throw new Error('当前没有剧本在运行，无需停止')
       }
-      if (presetOf(session) !== FEM_PRESET) {
-        throw new Error('当前会话不是 Fem 剧本模式')
+      runState.pausedByUser = false
+      await bridge.send('stop', {}, 5000)
+      console.log(`[dsh-femwa] femwa-run stop ${sessionId}`)
+    },
+    pauseScript: async (sessionId) => {
+      if (!runState.running) {
+        throw new Error('当前没有剧本在运行，无需暂停')
       }
-      if (runState.running) {
-        throw new Error('已有剧本在运行中，请先停止')
-      }
-      if (scriptPath !== undefined) {
-        const { readFileSync } = await import('node:fs')
-        const scriptText = readFileSync(scriptPath, 'utf8')
-        await startRunOnSession(ctx, resolved, bridge, runState, sid, scriptText, scriptPath)
-      } else {
-        // 省略 scriptPath：运行已挂载的剧本（会话记录 path，无则 text）。
-        const prev = await readSessionScript(resolved.femwaRoot, sessionId)
-        if (prev === undefined || (prev.path === undefined && prev.text === undefined)) {
-          throw new Error('会话未挂载剧本：请先 femwa-mount 或用 scriptPath 指定')
-        }
-        if (prev.path !== undefined) {
-          const { readFileSync } = await import('node:fs')
-          const scriptText = readFileSync(prev.path, 'utf8')
-          await startRunOnSession(ctx, resolved, bridge, runState, sid, scriptText, prev.path)
-        } else {
-          await startRunOnSession(ctx, resolved, bridge, runState, sid, prev.text!)
-        }
-      }
+      runState.pausedByUser = true
+      await bridge.send('pause', {}, 5000)
+      console.log(`[dsh-femwa] femwa-run pause ${sessionId}`)
+    },
+    resumeScript: async (sessionId) => {
+      // resume：不 reset 的 run——自动带 checkpoint 从断点续跑（前端「继续」同款链路）。
+      const { sid, scriptText, effectivePath } = await resolveMounted(sessionId)
+      await startRunOnSession(ctx, resolved, bridge, runState, sid, scriptText, effectivePath, false)
     },
     isFemMainSession: (agent) => isFemAgent(agent),
+    soulList: async () => {
+      // femwa-soul list：主模型写剧本选角前查角色库（bridge 直读 DB）。
+      const result = await bridge.send('list_souls', {}, 5000) as { souls?: Array<{ soul_id: string; soul_name: string }> } | undefined
+      return { souls: result?.souls ?? [] }
+    },
+    soulCreate: async (soulId, soulName, description) => {
+      // femwa-soul create：新建全局角色（归属/创建者固定 u001，与前端 soul 弹窗同链路）。
+      return bridge.send('create_soul', { soul_id: soulId, soul_name: soulName, description, user_id: 'u001' }, 5000)
+    },
+    readScript: async (sessionId) => {
+      const record = await readSessionScript(resolved.femwaRoot, sessionId)
+      if (record === undefined) return undefined
+      const finalText = await readSessionScriptText(resolved.femwaRoot, sessionId)
+      if (finalText === undefined) return undefined
+      return { path: record.path, text: record.text, finalText }
+    },
   }
   ctx.effect(() => registerFemwaTools(ctx, toolDeps), 'dsh-femwa: main-model tools')
 }
@@ -1367,6 +1580,51 @@ const FORWARD_CHILD_EVENTS = new Set([
 /** surface-eligible 事件（会话 API 要求 surfaceOp 标记）；其余事件不能带。 */
 const SURFACE_OP_EVENTS = new Set(['assistant/message', 'tool/result'])
 
+/** 主会话当前实际模型（未声明 source 的子代理跟随它）：
+ * ① 主会话最近一次请求头（含 UI 会话内切换，对齐 dsh web selectionFor 语义）
+ * → ② 用户保存的默认选择（agentDefaultModel）→ ③ undefined（调用方回退配置）。
+ * 显式返回模型而非依赖 dsh 隐式默认，堵死"子代理落到部署默认（如 Pro）"的隐患。 */
+function resolveMainModel(
+  parent: { session: { requestHeader?(): { config?: { provider?: unknown; model?: unknown } } | undefined } },
+  defaultModel?: { currentSelection(): unknown },
+): { provider: string; model: string } | undefined {
+  const header = parent.session.requestHeader?.()
+  const h = header?.config
+  if (h !== undefined && typeof h.provider === 'string' && h.provider.length > 0
+    && typeof h.model === 'string' && h.model.length > 0) {
+    return { provider: h.provider, model: h.model }
+  }
+  const selection = defaultModel?.currentSelection() as { provider?: unknown; model?: unknown } | undefined
+  if (selection !== undefined && typeof selection.provider === 'string' && selection.provider.length > 0
+    && typeof selection.model === 'string' && selection.model.length > 0) {
+    return { provider: selection.provider, model: selection.model }
+  }
+  return undefined
+}
+
+/** 剧本 source → 子代理 agentOptions（provider/model）。
+ * 空 source 跟随主模型（mainModel 缺失时才回退配置默认）；裸 id 走默认
+ * provider（dshProvider）；provider/model 双写完全指定。
+ * 编译期已校验白名单（引擎 validate_actor_sources），这里只做格式解析。 */
+function resolveSourceModel(
+  resolved: ResolvedConfig,
+  source: unknown,
+  mainModel?: { provider: string; model: string },
+): { agentOptions: { provider: string; model: string } } {
+  const raw = typeof source === 'string' ? source.trim() : ''
+  if (raw.length === 0) {
+    if (mainModel !== undefined) {
+      return { agentOptions: { provider: mainModel.provider, model: mainModel.model } }
+    }
+    return { agentOptions: { provider: resolved.dshProvider, model: resolved.model } }
+  }
+  const slash = raw.indexOf('/')
+  if (slash >= 0) {
+    return { agentOptions: { provider: raw.slice(0, slash), model: raw.slice(slash + 1) } }
+  }
+  return { agentOptions: { provider: resolved.dshProvider, model: raw } }
+}
+
 async function runAiSubagent(
   ctx: Context,
   resolved: ResolvedConfig,
@@ -1415,12 +1673,17 @@ async function runAiSubagent(
       controller.abort(new Error(`子 agent 空闲超时（${Math.round(resolved.subagentIdleTimeoutMs / 1000)}s 无输出）`))
     }, resolved.subagentIdleTimeoutMs)
   }
+  // 未声明 source 的子代理跟随主模型（最近请求头 → 保存默认 → 配置兜底），
+  // 绝不落到 dsh 部署隐式默认（防"主模型 Flash 子代理跑 Pro"类问题）。
+  const mainModel = resolveMainModel(parent, defaultModel)
   const run = await subagents.start(resolved.subagentProvider, {
     label: `fem-node-${String(request.node_name ?? '')}`,
     prompt: [{ type: 'text', text: prompt }],
     parent,
     signal: controller.signal,
-    agentOptions: { provider: resolved.dshProvider, model: resolved.model },
+    // source → (provider, model)：剧本 actor 声明（编译期已校验白名单）。
+    // 裸 id 走默认 provider（dshProvider）；provider/model 双写完全指定；空跟随主模型。
+    ...resolveSourceModel(resolved, request.source, mainModel),
     // Actor-level tool access: the script's `tools: true/false` on the actor
     // wins; undeclared actors fall back to defaultActorTools (default true so
     // coding workflows keep their tools). An enabled actor with no whitelist
@@ -1446,6 +1709,7 @@ async function runAiSubagent(
   // Watchdog starts once the child exists; every child-session event rearms
   // it. Listener is scoped to the child's session id and disposed in finally.
   armIdle()
+  const sid = String(session.id)
   const nodeName = String(request.node_name ?? '')
   const actor = nodeActors.get(nodeName) ?? nodeName
   // turn 首行：发言者名字（之后 cot/工具调用/回答由 dsh 原生 UI 渲染）
@@ -1462,7 +1726,6 @@ async function runAiSubagent(
     ...scopeInfo === undefined ? {} : { visible: scopeInfo },
     seq: Date.now(),
   }, undefined, scopeInfo)
-  const sid = String(session.id)
   const baseTurn = (turnBaseBySession.get(sid) ?? 100_000) + 1
   turnBaseBySession.set(sid, baseTurn + 100)
   const mapTurn = (childTurn: unknown): number =>
@@ -1731,18 +1994,36 @@ function sessionScriptPath(femwaRoot: string, sessionId: string): string {
 
 /** 会话剧本记录：path=剧本文件地址（导出/导入产生），text=浏览器端剧本原文
  * （未保存态；或已保存但前端修改过、运行检测不一致时保存的实际运行版本）。
+ * rev=乐观锁版本号：每次写入自增；前端快照写带 baseRev 做多端并发裁决。
  * 读取优先级：text（实际运行的版本）→ path 指向文件内容。 */
 interface SessionScriptRecord {
   path?: string
   text?: string
+  rev?: number
 }
 
-/** 写会话剧本记录（覆盖式）。 */
-async function writeSessionScript(femwaRoot: string, sessionId: string, record: SessionScriptRecord): Promise<void> {
+type WriteSessionScriptResult =
+  | { ok: true; rev: number }
+  | { ok: false; reason: 'conflict'; record: SessionScriptRecord }
+
+/** 写会话剧本记录（覆盖式，自动 rev+1）。expectRev 非空时做乐观锁校验：
+ * 与服务端当前 rev 不符 → 拒绝写入并返回当前记录（多端并发编辑，后写者输）。 */
+async function writeSessionScript(
+  femwaRoot: string,
+  sessionId: string,
+  record: SessionScriptRecord,
+  expectRev?: number,
+): Promise<WriteSessionScriptResult> {
   const { mkdir, writeFile } = await import('node:fs/promises')
+  const prev = await readSessionScript(femwaRoot, sessionId)
+  if (expectRev !== undefined && (prev?.rev ?? 0) !== expectRev) {
+    return { ok: false, reason: 'conflict', record: prev ?? {} }
+  }
+  const next: SessionScriptRecord = { ...record, rev: (prev?.rev ?? 0) + 1 }
   const path = sessionScriptPath(femwaRoot, sessionId)
   await mkdir(join(path, '..'), { recursive: true })
-  await writeFile(path, JSON.stringify(record, null, 2), 'utf8')
+  await writeFile(path, JSON.stringify(next, null, 2), 'utf8')
+  return { ok: true, rev: next.rev }
 }
 
 /** 读会话剧本记录；不存在返回 undefined。 */
@@ -1751,7 +2032,11 @@ async function readSessionScript(femwaRoot: string, sessionId: string): Promise<
   try {
     const raw = await readFile(sessionScriptPath(femwaRoot, sessionId), 'utf8')
     const parsed = JSON.parse(raw) as Partial<SessionScriptRecord>
-    return { ...parsed.path === undefined ? {} : { path: parsed.path }, ...parsed.text === undefined ? {} : { text: parsed.text } }
+    return {
+      ...parsed.path === undefined ? {} : { path: parsed.path },
+      ...parsed.text === undefined ? {} : { text: parsed.text },
+      ...parsed.rev === undefined ? {} : { rev: parsed.rev },
+    }
   } catch {
     return undefined
   }
@@ -1922,6 +2207,48 @@ async function resolveApiKey(ctx: Context, resolved: ResolvedConfig): Promise<st
   return cred !== undefined ? cred.value : undefined
 }
 
+interface LlmModelEntry { id: string; name?: string }
+interface LlmProviderEntry { id: string; name?: string; models: LlmModelEntry[] }
+/** 剧本 source 白名单 payload：引擎编译期校验 + 前端下拉的数据源。 */
+interface LlmModelsPayload {
+  /** 裸 id source 归属的默认 provider（插件配置 dshProvider）。 */
+  defaultProvider: string
+  providers: LlmProviderEntry[]
+}
+
+/** 聚合 dsh 当前可用 LLM provider/模型列表（前端下拉 + 引擎编译校验白名单）。
+ * llm 服务缺失或单个 provider 拉取失败 → 兜底默认/跳过，绝不整体失败。 */
+async function collectLlmModels(ctx: Context, resolved: ResolvedConfig): Promise<LlmModelsPayload> {
+  const fallback: LlmModelsPayload = {
+    defaultProvider: resolved.dshProvider,
+    providers: [{ id: resolved.dshProvider, models: [{ id: resolved.model }] }],
+  }
+  const llm = ctx.get('llm') as {
+    listProviders(): { id: string; name?: string }[]
+    listModels(provider: string): Promise<readonly { id: string; name?: string }[]>
+  } | undefined
+  if (llm === undefined || typeof llm.listProviders !== 'function' || typeof llm.listModels !== 'function') {
+    return fallback
+  }
+  let providers: LlmProviderEntry[]
+  try {
+    providers = []
+    for (const info of llm.listProviders()) {
+      try {
+        const models = await llm.listModels(info.id)
+        providers.push({ id: info.id, name: info.name, models: models.map((m) => ({ id: m.id, name: m.name })) })
+      } catch (error: unknown) {
+        console.log(`[dsh-femwa] listModels(${info.id}) failed: ${String(error)}`)
+      }
+    }
+  } catch (error: unknown) {
+    console.log(`[dsh-femwa] listProviders failed: ${String(error)}`)
+    return fallback
+  }
+  if (providers.length === 0) return fallback
+  return { defaultProvider: resolved.dshProvider, providers }
+}
+
 /** Start one engine run bound to a Fem session. Registers the run owner
  * BEFORE sending: a tiny script can finish before the run response returns,
  * and events would be dropped. A checkpoint from a previous interrupted run
@@ -1965,6 +2292,9 @@ async function startRunOnSession(
   } catch (error: unknown) {
     console.log(`[dsh-femwa] session script record failed: ${String(error)}`)
   }
+  // 记录随运行版本更新（rev 已变）：广播各端静默同步 rev/内容，
+  // 避免各页面下次快照写因 rev 滞后而误触 409 冲突弹窗。
+  broadcastSse('script_changed', { sessionId })
   if (reset) {
     // 手动「运行」：作废旧 checkpoint，从头跑。
     await clearCheckpoint(resolved.femwaRoot, String(sessionId)).catch(() => undefined)
@@ -1995,6 +2325,8 @@ async function startRunOnSession(
       user_api_url: resolved.apiUrl,
       user_api_model: resolved.model,
       dsh_ai_backend: resolved.dshAiBackend,
+      // source 编译期校验白名单：引擎 parse_script 时校验 actors 的 source 字段
+      models: await collectLlmModels(ctx, resolved),
       ...Object.keys(checkpoints).length > 0 ? { checkpoints } : {},
     }, 30_000)
   } catch (error: unknown) {
@@ -2098,21 +2430,8 @@ async function handleCreateSession(
         try {
           await presets.mount(agentCtx, FEM_PRESET)
           // 注入语法文档路径（插件自包含布局，路径随插件位置变化——动态算）。
-          // scoped section 只对主会话 agent 生效（子代理不继承，角色不需要）。
-          const systemPrompt = (agentCtx as unknown as { systemPrompt?: { section(s: { name: string; order: number; text: string }): () => void } }).systemPrompt
-          if (systemPrompt !== undefined) {
-            try {
-              systemPrompt.section({
-                name: 'femwa:docs',
-                order: 50,
-                text: `fems 剧本语言完整语法文档在：${packageRoot}语法文档.md。`
-                  + '写剧本前用文件工具阅读它（read/read_image），尤其关注 meta/actors/code/vars/action/module/mainflow、'
-                  + 'scope 视角、par/fork 并行分支、@mind 运行时分发、file: 地址规则（相对=剧本目录/未保存只支持绝对）。',
-              })
-            } catch (error: unknown) {
-              console.log(`[dsh-femwa] syntax doc section inject failed: ${String(error)}`)
-            }
-          }
+          const dispose = injectFemwaDocs(agentCtx)
+          if (dispose !== undefined) femwaDocsSections.set(String(id), dispose)
         } catch (error: unknown) {
           console.log(`[dsh-femwa] preset mount failed: ${String(error)}`)
         }
