@@ -303,16 +303,24 @@ class FemwaBridge {
   }
 
   /** Spawn the bridge and wire stdout line parsing. */
-  start(ctx: Context, config: { python: string; femwaRoot: string }): void {
+  start(ctx: Context, config: { python: string; femwaRoot: string }, attempt = 0): void {
     if (this.handle !== undefined) return
     const subprocess = ctx.get('subprocess') as {
       resolveExecutable(command: string, env?: Record<string, string>, signal?: AbortSignal): Promise<string>
       spawn(spec: unknown): SubprocessHandle
     } | undefined
     if (subprocess === undefined) {
-      console.log('[dsh-femwa] subprocess service unavailable; bridge not started')
+      // 插件树并发装配：本插件 apply 可能先于 base bundle 的 subprocess
+      // provider 完成（rc.2 快照插件更多、apply 更慢，固定 1s 延迟不再够）。
+      // 轮询等待而不是一次性放弃——最多 30s。
+      if (attempt < 30) {
+        setTimeout(() => this.start(ctx, config, attempt + 1), 1000)
+        return
+      }
+      console.log('[dsh-femwa] subprocess service unavailable after 30s; bridge not started')
       return
     }
+    if (attempt > 0) console.log(`[dsh-femwa] subprocess service ready after ${attempt}s wait; starting bridge`)
     // Bridge lives inside the FemWA project itself (self-contained plugin):
     // <femwaRoot>/python/femwa_bridge.py
     const bridgePath = join(config.femwaRoot, 'python', 'femwa_bridge.py')
@@ -1035,6 +1043,28 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
     })
     webServer.register({
       kind: 'exact',
+      path: '/dsh-femwa/editor-error',
+      handler: (req: IncomingMessage, res: ServerResponse): void => {
+        void (async () => {
+          // 编辑器前端解析/恢复失败上报：并入 errors 列表（用户可见）+ 可被
+          // femwa-mount/run 工具结果带回主模型，杜绝「静默吞错」。
+          const raw = await readBody(req) as unknown as Record<string, unknown>
+          const sessionId = typeof raw.sessionId === 'string' ? raw.sessionId : ''
+          const message = typeof raw.message === 'string' ? raw.message.trim() : ''
+          const source = typeof raw.source === 'string' && raw.source.length > 0 ? raw.source : 'editor'
+          if (sessionId.length === 0 || message.length === 0) {
+            writeJson(res, 400, { ok: false, error: 'sessionId and message are required' })
+            return
+          }
+          recordError(sessionId, `[编辑器·${source}] ${message}`)
+          writeJson(res, 200, { ok: true })
+        })().catch((error: unknown) => {
+          writeJson(res, 500, { ok: false, error: String(error) })
+        })
+      },
+    })
+    webServer.register({
+      kind: 'exact',
       path: '/dsh-femwa/actors',
       handler: (req: IncomingMessage, res: ServerResponse): void => {
         // Script actors of one session's latest run, for the view menu.
@@ -1307,9 +1337,28 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
     }
     return { sid, scriptText, effectivePath }
   }
+  // 编辑器上报错误的水位线：takeEditorErrors 每次取走后推进，工具结果只带增量。
+  const editorErrReportedAt = new Map<string, number>()
   const toolDeps: FemwaToolDeps = {
+    takeEditorErrors: (sessionId: string): string[] => {
+      const list = runState.errors.get(sessionId) ?? []
+      const since = editorErrReportedAt.get(sessionId) ?? 0
+      const fresh = list.filter((e) => e.ts > since)
+      editorErrReportedAt.set(sessionId, Date.now())
+      return fresh.map((e) => e.text)
+    },
     mountScript: async (sessionId, scriptPath) => {
-      await writeSessionScript(resolved.femwaRoot, sessionId, { path: scriptPath })
+      // 双链路①：path + text 一起写。恢复面读取是 text 优先（实际运行版本），
+      // mount 只写 path 的话，任何后续快照写回的 stale text 都会遮蔽新挂载的
+      // 剧本（2026-08-21「挂载后画布空白」bug 根因）。text 始终与文件内容一致。
+      const { readFile } = await import('node:fs/promises')
+      let text: string
+      try {
+        text = await readFile(scriptPath, 'utf8')
+      } catch (error) {
+        throw new Error(`无法读取剧本文件 ${scriptPath}：${String(error instanceof Error ? error.message : error)}`)
+      }
+      await writeSessionScript(resolved.femwaRoot, sessionId, { path: scriptPath, text })
       console.log(`[dsh-femwa] femwa-mount ${sessionId} <- ${scriptPath}`)
       // 双链路②：记录已更新 → 推信号让已打开的编辑器重读。否则旧画布的
       // 3s 防抖回写会用内存旧本盖掉新写入的地址，重新挂载等于白挂。
@@ -2078,9 +2127,11 @@ async function readSessionScriptText(femwaRoot: string, sessionId: string): Prom
 // 不再接收角色内容（为「主会话=戏外视角」铺路）。
 // ═══════════════════════════════════════════════════════════════════════
 
-/** 投影窗 actor 消毒：非 [A-Za-z0-9_-] 替换为 _（角色名可能是中文）。 */
+/** 投影窗 actor 消毒：非 [A-Za-z0-9_-] 字符替换为 _+码点十六进制（如 @ → _40、
+ *  中文字符各占一段），保证不同角色名消毒后必不相同——旧算法把所有非 ASCII
+ *  都压成 _，"@演员"/"@观众" 同得 "___"，两键共享同一投影窗导致事件双写。 */
 function projectionActorKey(actor: string): string {
-  return actor.replace(/[^A-Za-z0-9_-]/g, '_')
+  return Array.from(actor).map(ch => (/[A-Za-z0-9_-]/.test(ch) ? ch : `_${ch.codePointAt(0).toString(16)}`)).join('')
 }
 
 /** 投影窗 id：上帝窗 god / 角色窗 <actorKey>。id 规则化 → 重启后可推导。 */
