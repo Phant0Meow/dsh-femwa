@@ -328,8 +328,8 @@ export const THEME_CSS = `
   --fem-shadow-xl: rgba(0,0,0,0.6);
   --fem-shadow-blue: rgba(0,0,0,0.2);
 
-  /* ── 画布点阵：白色半透明（更柔和）── */
-  --fem-canvas-dot: rgba(255,255,255,0.07);
+  /* ── 画布点阵：白色半透明（round50 提亮回可见档：0.07 时在 #151517 上肉眼不可见）── */
+  --fem-canvas-dot: rgba(255,255,255,0.18);
 
   /* ── 角色色：莫兰迪提亮版（round15：用户反馈过灰，整体拉起饱和/明度；仍成对同族）── */
   --fem-type-ai: #8FB8F0;
@@ -377,8 +377,8 @@ export const THEME_CSS = `
   --fem-preview-text-2: #61666b;
   --fem-preview-border: rgba(255,255,255,0.12);
 
-  /* ── 画布点阵：更细腻的 0.6px 点（round2 再收小，透明度微补可见性）── */
-  --fem-canvas-dots: radial-gradient(circle, rgba(255,255,255,0.07) 0.6px, transparent 0.6px);
+  /* ── 画布点阵：与浅色同构（嵌套联动 + 同 1.2px 半径；round50 从 0.6px 恢复——round2 收小后深色点不可见）── */
+  --fem-canvas-dots: radial-gradient(circle, var(--fem-canvas-dot) 1.2px, transparent 1.2px);
 
   /* ── 节点边框（round10：金色调显著边框，与黑金连线呼应；选中仍变类型色）── */
   --fem-node-border: rgba(240,210,120,0.35);
