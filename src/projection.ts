@@ -257,13 +257,26 @@ export function projectionAppend(
   // 源级幂等（2026-08-23）：子代理镜像事件带 _srcSeq（子代理会话事件 seq），
   // 落窗前对账——同一子代理事件绝不写进同一窗第二遍（重复 block-start/end
   // 会让渲染层卡死，见小猫咪窗 2026-08-23）。chat 行无 _srcSeq 不受影响。
+  // 结构事件（turn/step 骨架）不带 _srcSeq（dsh 迁移器对 turn/end 强制两键，
+  // 见 mirrorMainEventToGod 同款注释），幂等改由结构等价键兜底：同
+  // type+turn(:step) 已存在即跳过。真实源 start 与合成 start 的竞态也靠它拦。
   const srcSeq = (data as { _srcSeq?: number })._srcSeq
+  const structKey = (eventType: string, d: Record<string, unknown>): string | undefined => {
+    if (typeof d.turn !== 'number') return undefined
+    if (eventType === 'turn/start' || eventType === 'turn/end') return `${eventType}:${d.turn}`
+    if ((eventType === 'step/start' || eventType === 'step/end') && typeof d.step === 'number') {
+      return `${eventType}:${d.turn}:${d.step}`
+    }
+    return undefined
+  }
+  const skey = structKey(type, data)
   const appendTo = (win: Session | undefined): void => {
     if (win === undefined) return
     if (srcSeq !== undefined) {
       const dup = win.events.some(e => (e.data as { _srcSeq?: number } | undefined)?._srcSeq === srcSeq)
       if (dup) return
     }
+    if (skey !== undefined && win.events.some(e => structKey(e.type, (e.data ?? {}) as Record<string, unknown>) === skey)) return
     try {
       appendEvent(win, type, data, surfaceOp)
     } catch (error: unknown) {
@@ -429,9 +442,31 @@ export function createGodMirror(deps: {
         && (e.data as { step?: number }).step === mStep)
       if (dup) return
     }
+    // end 侧结构查重（与 start 侧对称）：结构事件不再注入 _srcSeq（见下）后，
+    // 源级对账对它们失效，end 重复全靠这里拦——重复的 turn:end 同样破坏
+    // react-loop 结构。turn/step 号单调递增不复用，无误杀场景。
+    if (event.type === 'turn/end' && typeof mTurn === 'number') {
+      const dup = windows.god.events.some(e => e.type === 'turn/end'
+        && (e.data as { turn?: number }).turn === mTurn)
+      if (dup) return
+    }
+    if (event.type === 'step/end' && typeof mTurn === 'number' && typeof mStep === 'number') {
+      const dup = windows.god.events.some(e => e.type === 'step/end'
+        && (e.data as { turn?: number }).turn === mTurn
+        && (e.data as { step?: number }).step === mStep)
+      if (dup) return
+    }
     const rawSurface = (event as { surfaceOp?: unknown }).surfaceOp
     const surface = rawSurface === undefined ? undefined : { surfaceOp: rawSurface }
-    const data = { ...(event.data as Record<string, unknown>), _srcSeq: srcSeq }
+    // 结构事件（dsh react-loop 骨架）绝不注入 _srcSeq：session-persistence
+    // 迁移器对 turn/end 强制 hasOnlyKeys(['turn','reason'])，第三键即判
+    // "malformed pre-react-loop turn/end" 冷加载拒载整窗（2026-08-23 三投影窗
+    // 中毒根因）。对账缺口由 end 侧结构查重 + 水位文件补齐。
+    const structural = event.type === 'turn/start' || event.type === 'turn/end'
+      || event.type === 'step/start' || event.type === 'step/end'
+    const data = structural
+      ? { ...(event.data as Record<string, unknown>) }
+      : { ...(event.data as Record<string, unknown>), _srcSeq: srcSeq }
     try {
       appendEvent(windows.god, event.type, data, surface)
     } catch (error: unknown) {

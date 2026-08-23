@@ -399,15 +399,25 @@ export async function runAiSubagent(
     const raw = watchedEvent.data as Record<string, unknown>
     const mappedTurn = mapTurn(raw.turn)
     const mappedStep = typeof raw.step === 'number' ? raw.step : 0
-    // 子代理是 one-shot 会话，事件流没有 turn/start、step/start（只有
+    // 子代理是 one-shot 会话，事件流传统上没有 turn/start、step/start（只有
     // chunk/message/step/end/turn/end），而 dsh 原生 assistant 节点以
     // step/start 为 start——这里合成两个 start 事件，原生 turn 才能渲染。
+    // step/start 也进本条件（2026-08-23 晚）：新版子代理源流可能自带真实
+    // step/start——它必须落在合成 turn/start 之后，否则骨架乱序会被持久化
+    // 校验判 malformed（角色窗中毒形态之一）；真实与合成的重复由
+    // projectionAppend 的结构等价查重拦截。
     if (watchedEvent.type === 'turn/start' || watchedEvent.type === 'assistant/chunk'
-      || watchedEvent.type === 'assistant/message' || watchedEvent.type === 'step/end') {
+      || watchedEvent.type === 'assistant/message' || watchedEvent.type === 'step/end'
+      || watchedEvent.type === 'step/start') {
       ensureTurnStart()
       if (watchedEvent.type !== 'turn/start') ensureStepStart(mappedStep)
     }
-    const data = { ...raw, _srcSeq: Number(watchedEvent.seq) }
+    // 结构事件不注 _srcSeq：dsh 迁移器对 turn/end 强制 data 两键
+    // （hasOnlyKeys ['turn','reason']），第三键即冷加载拒载整窗。幂等由
+    // projectionAppend 的结构等价查重兜底。
+    const structural = watchedEvent.type === 'turn/start' || watchedEvent.type === 'turn/end'
+      || watchedEvent.type === 'step/start' || watchedEvent.type === 'step/end'
+    const data = structural ? { ...raw } : { ...raw, _srcSeq: Number(watchedEvent.seq) }
     if ('turn' in data) data.turn = mappedTurn
     if ('step' in data && typeof data.step === 'number') data.step = data.step
     // surface-eligible 事件（assistant/message、tool/result）要求 surfaceOp。
