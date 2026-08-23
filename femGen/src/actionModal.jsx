@@ -1,4 +1,4 @@
-// ═══════════════════════
+﻿// ═══════════════════════
 // ═══ actionModal.jsx ═══
 // ═══════════════════════
 import React, { useState, useEffect } from 'react';
@@ -54,7 +54,7 @@ function ActionModal({
       style={{
         position: 'fixed',
         inset: 0,
-        background: 'rgba(8,16,40,0.5)',
+        background: 'var(--fem-mask-blue)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -64,33 +64,33 @@ function ActionModal({
     >
       <div
         style={{
-          background: 'white',
-          borderRadius: 14,
+          background: 'var(--fem-surface)',
+          borderRadius: 'var(--fem-radius-xl)',
           width: 510,
           maxHeight: '88vh',
           overflow: 'auto',
-          boxShadow: '0 32px 80px rgba(0,0,0,0.25)',
-          fontFamily: 'DM Sans, sans-serif',
+          boxShadow: '0 32px 80px var(--fem-shadow-lg)',
+          fontFamily: 'var(--fem-font-sans)',
         }}
       >
         <div
           style={{
             padding: '18px 22px 14px',
-            borderBottom: '1px solid #edf0f8',
+            borderBottom: 'var(--fem-border-w) solid var(--fem-border)',
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
             position: 'sticky',
             top: 0,
-            background: 'white',
+            background: 'var(--fem-surface)',
             zIndex: 1,
           }}
         >
           <div>
-            <div style={{ fontWeight: 800, fontSize: 15.5, color: '#1b2540' }}>
+            <div style={{ fontWeight: 800, fontSize: 15.5, color: 'var(--fem-text-1)' }}>
               {init ? '编辑 Action' : '新建 Action'}
             </div>
-            <div style={{ fontSize: 10.5, color: '#a0aec0', marginTop: 1 }}>
+            <div style={{ fontSize: 10.5, color: 'var(--fem-text-4)', marginTop: 1 }}>
               定义后将出现在组件库中，可拖至画布
             </div>
           </div>
@@ -101,7 +101,7 @@ function ActionModal({
               border: 'none',
               fontSize: 22,
               cursor: 'pointer',
-              color: '#b0bad0',
+              color: 'var(--fem-text-4)',
               lineHeight: 1,
               padding: 4,
             }}
@@ -115,11 +115,11 @@ function ActionModal({
               value={f.name}
               onChange={(e) => handleNameChange(e.target.value)}
               placeholder="wolf_kill · speak · vote · resolve_night"
-              style={{ ...inp, borderColor: nameErr ? '#ef4444' : undefined }}
+              style={{ ...inp, borderColor: nameErr ? 'var(--fem-danger)' : undefined }}
               autoFocus
             />
             {nameErr && (
-              <div style={{ fontSize: 10.5, color: '#ef4444', marginTop: 4 }}>
+              <div style={{ fontSize: 10.5, color: 'var(--fem-danger)', marginTop: 4 }}>
                 {nameErr}
               </div>
             )}
@@ -133,16 +133,16 @@ function ActionModal({
                   style={{
                     flex: 1,
                     padding: '8px 2px',
-                    borderRadius: 7,
+                    borderRadius: 'var(--fem-radius-md)',
                     cursor: 'pointer',
                     fontSize: 11,
                     fontWeight: 800,
-                    fontFamily: 'JetBrains Mono, monospace',
-                    border: `2px solid ${
-                      f.executorType === tp.t ? tp.c : '#dde4ef'
+                    fontFamily: 'var(--fem-font-mono)',
+                    border: `var(--fem-border-w-selected) solid ${
+                      f.executorType === tp.t ? tp.c : 'var(--fem-border-strong)'
                     }`,
-                    background: f.executorType === tp.t ? tp.bg : 'white',
-                    color: f.executorType === tp.t ? tp.c : '#b0bad0',
+                    background: f.executorType === tp.t ? tp.bg : 'var(--fem-surface)',
+                    color: f.executorType === tp.t ? tp.c : 'var(--fem-text-4)',
                     transition: 'all 0.12s',
                   }}
                 >
@@ -211,7 +211,7 @@ function ActionModal({
                 style={{
                   ...inp,
                   resize: 'vertical',
-                  fontFamily: 'JetBrains Mono, monospace',
+                  fontFamily: 'var(--fem-font-mono)',
                   fontSize: 11.5,
                   lineHeight: 1.7,
                 }}
@@ -235,7 +235,7 @@ function ActionModal({
               style={{
                 ...inp,
                 resize: 'vertical',
-                fontFamily: 'JetBrains Mono, monospace',
+                fontFamily: 'var(--fem-font-mono)',
                 fontSize: 11.5,
                 lineHeight: 1.7,
               }}
@@ -246,7 +246,7 @@ function ActionModal({
               value={f.resolve || ''}
               onChange={(e) => u({ resolve: e.target.value.trim() })}
               placeholder="q.answer"
-              style={{ ...inp, fontFamily: 'JetBrains Mono, monospace' }}
+              style={{ ...inp, fontFamily: 'var(--fem-font-mono)' }}
             />
           </Field>
           <Field label="resolve 参数" hint="逗号分隔，如 prompt, llm_output, count">
@@ -254,7 +254,7 @@ function ActionModal({
               value={f.resolveArgs || ''}
               onChange={(e) => u({ resolveArgs: e.target.value.trim() })}
               placeholder="prompt, llm_output, count"
-              style={{ ...inp, fontFamily: 'JetBrains Mono, monospace' }}
+              style={{ ...inp, fontFamily: 'var(--fem-font-mono)' }}
             />
           </Field>
           <div style={{ display: 'flex', gap: 8 }}>
@@ -316,7 +316,7 @@ function ActionModal({
               gap: 8,
               marginTop: 18,
               paddingTop: 16,
-              borderTop: '1px solid #edf0f8',
+              borderTop: 'var(--fem-border-w) solid var(--fem-border)',
             }}
           >
             <button onClick={onClose} style={btnS}>

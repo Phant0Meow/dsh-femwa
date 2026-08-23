@@ -9,8 +9,8 @@ vars:
   count = 0
 
 actors:
-  ai @eve = soul:1
-  ai @cat = soul:2
+  ai @eve = soul:the1stlittlesoul
+  ai @cat = soul:littlecat
 
 action count_up @assign:
   out:

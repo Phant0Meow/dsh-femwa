@@ -114,7 +114,9 @@ a.outVars.split('\n').forEach((v) => {
     proj.actors.forEach((a) => {
       const name = a.name?.startsWith('@') ? a.name : `@${a.name}`;
       const parts = [];
-      parts.push(`soul:${a.soul || (a.type === 'ai' ? '1' : '0')}`);
+      // 仅在显式设置 soul 时输出；裸 actor（无 soul）保持裸写法——
+      // 数字兜底（'1'/'0'）会产出编译期「soul 不存在」的文本，已废除。
+      if (a.soul) parts.push(`soul:${a.soul}`);
       if (a.source) parts.push(`source:${a.source}`);
       if (a.type === 'ai' && a.tools === false) {
         parts.push('tools: false');
@@ -123,7 +125,8 @@ a.outVars.split('\n').forEach((v) => {
       } else if (a.type === 'ai' && Array.isArray(a.tools) && a.tools.length) {
         parts.push(`tools = [${a.tools.join(', ')}]`);
       }
-      lines.push(`  ${a.type} ${name} = ${parts.join(', ')}`);
+      // 无任何属性时输出纯裸写法（不残留悬空的 "="），round-trip 对裸 actor 无损
+      lines.push(parts.length > 0 ? `  ${a.type} ${name} = ${parts.join(', ')}` : `  ${a.type} ${name}`);
     });
     lines.push('');
   }

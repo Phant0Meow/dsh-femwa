@@ -108,6 +108,17 @@ def main():
     from femCompiler.FEM_parser import parse_script
     from femCompiler.FEM_runtime import FEMRunner
 
+    def make_soul_checker():
+        """构造 soul 存在性检查器：parse_script 编译期校验 actors 的 soul 用。
+        携带 _soul_ids 可用列表，报错文案末尾附上（db_utils 无列表函数时省略）。"""
+        from femCompiler.db_utils import check_soul_id_exists, list_all_soul_ids
+
+        def checker(sid: str) -> bool:
+            return check_soul_id_exists(sid)
+
+        checker._soul_ids = list_all_soul_ids()
+        return checker
+
     out_lock = threading.Lock()
 
     def emit(obj):
@@ -143,7 +154,8 @@ def main():
         def worker():
             runner = None
             try:
-                script = parse_script(fems_text, base_dir=base_dir)
+                script = parse_script(fems_text, base_dir=base_dir,
+                                      soul_checker=make_soul_checker())
                 runner = FEMRunner(
                     script,
                     base_dir=base_dir,
@@ -212,6 +224,24 @@ def main():
                     elif name.endswith(".fems"):
                         scripts.append(sub)
             send_response(req_id, True, {"scripts": scripts})
+        elif cmd == "check":
+            # 同步编译校验（femwa-run 工具路径）：编译错误作为工具返回结果，
+            # 带细节指导主模型改剧本；不启动运行、不产生状态。
+            fems_text = args_obj.get("fems", "")
+            if not fems_text.strip():
+                send_response(req_id, False, error="fems is empty")
+                return
+            base_dir = args_obj.get("base_dir")
+            try:
+                script = parse_script(
+                    fems_text,
+                    base_dir=base_dir if base_dir is not None else femwa_root,
+                    soul_checker=make_soul_checker(),
+                )
+                send_response(req_id, True, {"ok": True, "actions": len(script.actions)})
+            except Exception as exc:
+                traceback.print_exc(file=sys.stderr)
+                send_response(req_id, False, error=str(exc))
         elif cmd == "run":
             fems_text = args_obj.get("fems", "")
             if not fems_text.strip():
@@ -277,15 +307,24 @@ def main():
                 send_response(req_id, True, {"delivered": True})
             else:
                 send_response(req_id, True, {"delivered": False})
+        elif cmd == "list_souls":
+            # femwa-soul list：返回全部角色（精简 id+名字，主模型写剧本选角用）。
+            from femCompiler.db_utils import list_souls as _list_souls
+            send_response(req_id, True, {"souls": _list_souls()})
         elif cmd == "create_soul":
             # 插件模式 soul 创建：user_id/created_by 固定为默认用户 u001（前端不再输入）。
             from femCompiler.db_utils import create_soul as _create_soul
+            from femCompiler.db_utils import check_soul_id_exists
             soul_id = str(args_obj.get("soul_id", "")).strip()
             soul_name = str(args_obj.get("soul_name", "")).strip()
             description = str(args_obj.get("description", ""))
             user_id = str(args_obj.get("user_id", "")).strip() or "u001"
             if not soul_id:
                 send_response(req_id, False, error="soul_id is required")
+                return
+            if check_soul_id_exists(soul_id):
+                send_response(req_id, False,
+                              error=f'soul_id "{soul_id}" 已存在（角色库中已有同名角色，请换一个 soul_id）')
                 return
             _create_soul(soul_id, soul_name, description, user_id)
             send_response(req_id, True, {"soul_id": soul_id})

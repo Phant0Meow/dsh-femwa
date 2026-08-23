@@ -18,7 +18,7 @@ MIND_AI_FEMS = """meta:
   name = mind-ai
   session = new
 actors:
-  ai @eve = soul:1
+  ai @eve = soul:the1stlittlesoul
 vars:
   @seer = @eve
 action seer_check @mind(@seer):
@@ -32,7 +32,7 @@ MIND_HUMAN_FEMS = """meta:
   name = mind-human
   session = new
 actors:
-  human @p = soul:9, source:0
+  human @p = soul:human, source:0
 vars:
   @seer = @p
 action seer_check @mind(@seer):
@@ -46,8 +46,8 @@ MIND_DYNAMIC_FEMS = """meta:
   name = mind-dynamic
   session = new
 actors:
-  ai @eve = soul:1
-  human @p = soul:9, source:0
+  ai @eve = soul:the1stlittlesoul
+  human @p = soul:human, source:0
 vars:
   @seer = @eve
 action assign_role @assign:

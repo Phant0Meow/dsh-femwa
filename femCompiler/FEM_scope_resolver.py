@@ -24,6 +24,23 @@ def resolve_scope(
       [@God, @Diana, @someactor_var] + somevar_list
     返回 (user_scope, soul_scope)，所有 ID 均为字符串。
     """
+    # ── 0. 保留字段：all（大小写不敏感）= 全可见（所有 actors）──
+    if scope_str.strip().lower() == 'all':
+        user_scope, soul_scope = [], []
+        for name, actor in actors.items():
+            if hasattr(actor, 'type') and actor.type.value == 'ai':
+                sid = getattr(actor, 'soul', None)
+                if sid is not None:
+                    soul_scope.append(str(sid))
+            elif hasattr(actor, 'type') and actor.type.value == 'human':
+                source = getattr(actor, 'source', None)
+                if source is not None:
+                    user_scope.append(str(source))
+                sid = getattr(actor, 'soul', None)
+                if sid is not None:
+                    soul_scope.append(str(sid))
+        return sorted(set(user_scope)), sorted(set(soul_scope))
+
     # ── 1. 按 + 号分段（注意保护方括号内的内容）────
     parts = _split_scope_by_plus(scope_str)
 
@@ -159,6 +176,10 @@ def scope_str_to_actor_list(scope_str: str, actors: Dict[str, Any], var_manager)
     将 scope 字符串解析为演员名列表（用于前端展示）。
     例如 "[@God, @Diana] + my_list" -> ['@God', '@Diana', '@Ellis', '@Cat']
     """
+    # ── 0. 保留字段：all（大小写不敏感）= 全可见（所有 actors）──
+    if scope_str.strip().lower() == 'all':
+        return sorted(actors.keys())
+
     parts = _split_scope_by_plus(scope_str)
     actor_names = []
     for part in parts:

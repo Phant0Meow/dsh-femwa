@@ -10,6 +10,7 @@ import os
 import threading
 import sys
 from femBridges.llmProviders import stream_chat, detect_provider, get_provider_config
+from femCompiler.FEM_errors import FEMConfigError, FEMTransientError
 
 
 # 供应商列表（名称与 llm_providers 保持一致）
@@ -112,14 +113,18 @@ def call_ai_with_blocks(
         {"role": "user", "content": user_prompt},
     ]
 
-    # ── 2. 确定 API 密钥、模型与提供者（优先级：前端 > 环境变量 > 报错）──
+    # ── 2. 确定 API 密钥、模型与提供者（优先级：前端 > 环境变量 > 清晰报错）──
+    # 注意：本函数仅直连模式（dshAiBackend=false）调用；dsh 子 agent 模式
+    # （默认，3081 即此）走 ai_request 事件不经此路径，无 key 属正常，不会报错。
     if user_api_provider and user_api_provider in PROVIDER_LIST:
         provider = user_api_provider
     else:
         provider = detect_provider()
         if not provider:
-            print("[llmBridge] ❌ 未检测到任何 API Key，请设置 .env 文件或在浏览器中填写")
-            return None
+            raise FEMConfigError(
+                "直连模式未检测到任何 API Key：请设置 .env 中的 *_API_KEY 或传入 "
+                "user_api_key。dsh 子 agent 模式（dshAiBackend=true）无需 key，不走此路径。"
+            )
 
     env_prefix = PROVIDER_LIST[provider]['env_prefix']
 
@@ -132,8 +137,10 @@ def call_ai_with_blocks(
         if final_api_key:
             print(f"[llmBridge] 🏠 使用本地 .env 中的 {env_prefix}_API_KEY")
         else:
-            print(f"[llmBridge] ❌ 缺少 API Key: 未传入且环境变量 {env_prefix}_API_KEY 不存在")
-            return None
+            raise FEMConfigError(
+                f"直连模式缺少 API Key：未传入且环境变量 {env_prefix}_API_KEY 不存在。"
+                "dsh 子 agent 模式（默认）无需 key，不走此路径。"
+            )
 
     # Model
     if model and model != "default":
@@ -144,8 +151,10 @@ def call_ai_with_blocks(
         if final_model:
             print(f"[llmBridge] 🏠 使用环境变量中的模型: {final_model}")
         else:
-            print(f"[llmBridge] ❌ 缺少模型名: 未传入且环境变量 {env_prefix}_API_MODEL 不存在")
-            return None
+            raise FEMConfigError(
+                f"直连模式缺少模型名：未传入且环境变量 {env_prefix}_API_MODEL 不存在。"
+                "dsh 子 agent 模式（默认）无需 key，不走此路径。"
+            )
 
     # API URL
     if user_api_url:
@@ -156,8 +165,10 @@ def call_ai_with_blocks(
         if final_api_url:
             print(f"[llmBridge] 🏠 使用环境变量中的 API URL: {final_api_url}")
         else:
-            print(f"[llmBridge] ❌ 缺少 API URL: 未传入且环境变量 {env_prefix}_API_URL 不存在")
-            return None
+            raise FEMConfigError(
+                f"直连模式缺少 API URL：未传入且环境变量 {env_prefix}_API_URL 不存在。"
+                "dsh 子 agent 模式（默认）无需 key，不走此路径。"
+            )
 
     # ── 3. 调用统一流式生成器 ──
     try:
@@ -174,7 +185,7 @@ def call_ai_with_blocks(
         )
     except Exception as e:
         print(f"[llmBridge] ❌ 启动流式请求失败: {e}")
-        return None
+        raise FEMTransientError(f"LLM 流式请求启动失败（临时错误，可重试）: {e}") from e
 
     # ── 4. 流式接收并处理 ──
     answer = ""
@@ -233,4 +244,4 @@ def call_ai_with_blocks(
 
     except Exception as e:
         print(f"[llmBridge] ❌ 流式请求失败: {e}")
-        return None
+        raise FEMTransientError(f"LLM 流式请求失败（临时错误，可重试）: {e}") from e

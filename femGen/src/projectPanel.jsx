@@ -2,11 +2,58 @@
 // ═══════.  projectPanel.jsx     ═════════
 // ════════════════════════════════════════
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Field, PR, inp, btnP, btnS, TYPES } from './common';
+
+/** 拉取 dsh 可用模型列表（宿主 /dsh-femwa/models，聚合 ctx.llm）。
+ * 返回 [models, err]：models = {defaultProvider, providers:[{id, models:[{id}]}]} 或 null。 */
+export function useModelList() {
+  const [models, setModels] = useState(null);
+  const [err, setErr] = useState('');
+  useEffect(() => {
+    let alive = true;
+    fetch('/dsh-femwa/models')
+      .then((r) => r.json())
+      .then((d) => {
+        if (!alive) return;
+        if (d.ok) setModels(d);
+        else setErr(d.error || '无法获取模型列表');
+      })
+      .catch(() => {
+        if (alive) setErr('无法获取模型列表');
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return [models, err];
+}
+
+/** source 下拉选项：默认空（跟随主模型）+ 全部 provider/model；当前值不在列表时追加原值（防丢）。 */
+export function sourceOptions(models, current) {
+  const opts = [{ value: '', label: '跟随主模型（默认）' }];
+  if (models) {
+    for (const p of models.providers || []) {
+      for (const m of p.models || []) {
+        const v = `${p.id}/${m.id}`;
+        opts.push({ value: v, label: v });
+      }
+    }
+  }
+  const cur = (current || '').trim();
+  if (cur && !opts.some((o) => o.value === cur)) {
+    opts.push({ value: cur, label: `${cur}（自定义）` });
+  }
+  return opts;
+}
 
 function ProjPanel({ proj, actorNames, onChange }) {
   const u = (x) => onChange({ ...proj, ...x });
+  // 「输入工具」选中态（按 actor 名）：tools 数组清空时仍保持 custom 态，
+  // 与「未声明」（空数组=剧本未写）区分——否则点选后空数组被误判为未选。
+  const [customSel, setCustomSel] = useState({});
+  // dsh 可用模型列表（source 下拉数据源）
+  const [models, modelErr] = useModelList();
   return (
     <div>
       <Field label="项目名称">
@@ -98,7 +145,7 @@ function ProjPanel({ proj, actorNames, onChange }) {
             style={{
               fontSize: 10,
               fontWeight: 800,
-              color: '#9aaccb',
+              color: 'var(--fem-neutral)',
               textTransform: 'uppercase',
               letterSpacing: '0.09em',
             }}
@@ -113,8 +160,8 @@ function ProjPanel({ proj, actorNames, onChange }) {
                   {
                     name: '',
                     type: 'ai',
-                    soul: '1',
-                    source: 'deepseek',
+                    soul: '',
+                    source: '',
                     tools: [],
                   },
                 ],
@@ -141,9 +188,9 @@ function ProjPanel({ proj, actorNames, onChange }) {
             <div
               key={i}
               style={{
-                background: '#f8fafc',
-                border: `1px solid ${nameConflict ? '#ef4444' : '#e4ecf7'}`,
-                borderRadius: 8,
+                background: 'var(--fem-bg)',
+                border: `var(--fem-border-w) solid ${nameConflict ? 'var(--fem-danger)' : 'var(--fem-border)'}`,
+                borderRadius: 'var(--fem-radius-md)',
                 padding: '9px 10px',
                 marginBottom: 6,
               }}
@@ -184,7 +231,7 @@ function ProjPanel({ proj, actorNames, onChange }) {
                     flex: 1,
                     padding: '5px 8px',
                     fontSize: 11.5,
-                    borderColor: nameConflict ? '#ef4444' : undefined,
+                    borderColor: nameConflict ? 'var(--fem-danger)' : undefined,
                   }}
                 />
                 <button
@@ -195,7 +242,7 @@ function ProjPanel({ proj, actorNames, onChange }) {
                     background: 'none',
                     border: 'none',
                     cursor: 'pointer',
-                    color: '#f87171',
+                    color: 'var(--fem-danger-weak)',
                     fontSize: 17,
                     lineHeight: 1,
                   }}
@@ -205,7 +252,7 @@ function ProjPanel({ proj, actorNames, onChange }) {
               </div>
               {nameConflict && (
                 <div
-                  style={{ fontSize: 10, color: '#ef4444', marginBottom: 4 }}
+                  style={{ fontSize: 10, color: 'var(--fem-danger)', marginBottom: 4 }}
                 >
                   名称 "{actorName}" 与 action/module 重名
                 </div>
@@ -217,12 +264,27 @@ function ProjPanel({ proj, actorNames, onChange }) {
                   placeholder="soul:1"
                   style={{ ...inp, flex: 1, padding: '4px 7px', fontSize: 11 }}
                 />
-                <input
-                  value={a.source}
-                  onChange={(e) => upd({ source: e.target.value })}
-                  placeholder="deepseek"
-                  style={{ ...inp, flex: 1, padding: '4px 7px', fontSize: 11 }}
-                />
+                {a.type === 'ai' && models ? (
+                  <select
+                    value={a.source || ''}
+                    onChange={(e) => upd({ source: e.target.value })}
+                    title="来源模型（dsh 可用列表；空=插件配置默认）"
+                    style={{ ...inp, flex: 1, padding: '4px 7px', fontSize: 11 }}
+                  >
+                    {sourceOptions(models, a.source).map((o) => (
+                      <option key={o.value} value={o.value}>
+                        {o.label}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    value={a.source}
+                    onChange={(e) => upd({ source: e.target.value })}
+                    placeholder={a.type === 'ai' ? (modelErr || 'deepseek') : '数字ID'}
+                    style={{ ...inp, flex: 1, padding: '4px 7px', fontSize: 11 }}
+                  />
+                )}
               </div>
               {a.type === 'ai' && (
                 <div style={{ marginTop: 5 }}>
@@ -230,53 +292,82 @@ function ProjPanel({ proj, actorNames, onChange }) {
                     style={{
                       fontSize: 10,
                       fontWeight: 700,
-                      color: '#7a8aaa',
+                      color: 'var(--fem-text-3)',
                       marginBottom: 4,
                     }}
                   >
                     Tools
                   </div>
-                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                    {[
-                      'deep_think',
-                      'web_search',
-                      'shell',
-                      'weather',
-                      'web_fetch',
-                    ].map((t) => {
-                      // 布尔 tools：true=全部（全勾选），false=禁用（全不勾）；数组=白名单
-                      const toolsList = Array.isArray(a.tools)
-                        ? a.tools
-                        : (a.tools === true
-                          ? ['deep_think', 'web_search', 'shell', 'weather', 'web_fetch']
-                          : []);
-                      const checked = toolsList.includes(t);
-                      return (
-                        <label
-                          key={t}
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: 3,
-                            fontSize: 10.5,
-                            cursor: 'pointer',
-                          }}
-                        >
+                  {/* 全或无三态：true=全部 / false=关闭 / 数组=白名单（自定义列表）；未声明=不选（宿主默认全开） */}
+                  {(() => {
+                    const toolsMode = customSel[a.name]
+                      ? 'custom'
+                      : a.tools === true ? 'all'
+                        : a.tools === false ? 'off'
+                          : Array.isArray(a.tools) && a.tools.length > 0 ? 'custom'
+                            : null;
+                    const customText = Array.isArray(a.tools) ? a.tools.join(', ') : '';
+                    const clearCustom = () => {
+                      const next = { ...customSel };
+                      delete next[a.name];
+                      setCustomSel(next);
+                    };
+                    const modes = [
+                      { id: 'all', label: '所有工具' },
+                      { id: 'off', label: '关闭工具' },
+                      { id: 'custom', label: '输入工具' },
+                    ];
+                    return (
+                      <>
+                        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                          {modes.map((m) => (
+                            <label
+                              key={m.id}
+                              style={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 3,
+                                fontSize: 10.5,
+                                cursor: 'pointer',
+                              }}
+                            >
+                              <input
+                                type="radio"
+                                checked={toolsMode === m.id}
+                                onChange={() => {
+                                  if (m.id === 'all') {
+                                    clearCustom();
+                                    upd({ tools: true });
+                                  } else if (m.id === 'off') {
+                                    clearCustom();
+                                    upd({ tools: false });
+                                  } else {
+                                    setCustomSel({ ...customSel, [a.name]: true });
+                                    upd({ tools: [] });
+                                  }
+                                }}
+                              />
+                              {m.label}
+                            </label>
+                          ))}
+                        </div>
+                        {toolsMode === 'custom' && (
                           <input
-                            type="checkbox"
-                            checked={checked}
+                            value={customText}
                             onChange={(e) => {
-                              const newTools = e.target.checked
-                                ? [...toolsList, t]
-                                : toolsList.filter((x) => x !== t);
-                              upd({ tools: newTools });
+                              const list = e.target.value
+                                .split(',')
+                                .map((s) => s.trim())
+                                .filter(Boolean);
+                              upd({ tools: list });
                             }}
+                            placeholder="deep_think, web_search, shell"
+                            style={{ ...inp, marginTop: 6, padding: '4px 7px', fontSize: 11 }}
                           />
-                          {t}
-                        </label>
-                      );
-                    })}
-                  </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               )}
             </div>
@@ -285,7 +376,7 @@ function ProjPanel({ proj, actorNames, onChange }) {
       </div>
       <div style={{ marginTop: 16 }}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 9 }}>
-          <span style={{ fontSize: 10, fontWeight: 800, color: '#9aaccb', textTransform: 'uppercase', letterSpacing: '0.09em' }}>
+          <span style={{ fontSize: 10, fontWeight: 800, color: 'var(--fem-neutral)', textTransform: 'uppercase', letterSpacing: '0.09em' }}>
             Vars
           </span>
           <button
@@ -319,7 +410,7 @@ function ProjPanel({ proj, actorNames, onChange }) {
             />
             <button
               onClick={() => u({ vars: proj.vars.filter((_, j) => j !== i) })}
-              style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#f87171', fontSize: 17, lineHeight: 1 }}
+              style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--fem-danger-weak)', fontSize: 17, lineHeight: 1 }}
             >
               x
             </button>
@@ -340,7 +431,7 @@ function ProjPanel({ proj, actorNames, onChange }) {
             style={{
               fontSize: 10,
               fontWeight: 800,
-              color: '#9aaccb',
+              color: 'var(--fem-neutral)',
               textTransform: 'uppercase',
               letterSpacing: '0.09em',
             }}
@@ -392,7 +483,7 @@ function ProjPanel({ proj, actorNames, onChange }) {
                 background: 'none',
                 border: 'none',
                 cursor: 'pointer',
-                color: '#f87171',
+                color: 'var(--fem-danger-weak)',
                 fontSize: 17,
                 lineHeight: 1,
               }}

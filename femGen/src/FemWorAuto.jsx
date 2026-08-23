@@ -23,6 +23,42 @@ import { SoulModal } from './soulModal';
 import { BubbleOverlay } from './bubbleOverlay';
 import { FemPreview } from './femPreview';
 import { MobileLayout, useMobile } from './mobileView';
+import { FEM_THEMES } from './themes';
+
+// ═══ 金线流光 v8（round35：多层 dash 光带回撤定稿）═══
+// 蒙版/光珠方案在"带 transform 的元素"上被探针实证不可靠（E/F 格 0 白像素），
+// 回撤到唯一构造性保证"随弯+零溢出"的形态：**流光就是同一条路径的描边**——
+// 六层长度递增(16→76px)、透明度递减(1→0.04)的同路径 dash 短划，中心对齐
+// （负 animation-delay 后移 (len-16)/2 ÷90s），层叠+圆帽把台阶抹成连续渐变。
+// cycle 均 288；主题门控=.fem-edge-comet-layer CSS（默认 opacity:0，dsh-dark/dsh 点亮）。
+// 语义边（红/琥珀）不调用本组件。
+const SHIMMER_LAYERS = [
+  { len: 16, op: 1,    delay: 0 },
+  { len: 28, op: 0.5,  delay: -0.0667 },
+  { len: 40, op: 0.28, delay: -0.1333 },
+  { len: 52, op: 0.16, delay: -0.2 },
+  { len: 64, op: 0.08, delay: -0.2667 },
+  { len: 76, op: 0.04, delay: -0.3333 },
+];
+function EdgeShimmer({ d, w }) {
+  return (
+    <g className="fem-edge-comet" style={{ pointerEvents: 'none' }}>
+      {SHIMMER_LAYERS.map((L, i) => (
+        <path
+          key={i}
+          d={d}
+          fill="none"
+          stroke="var(--fem-edge-sheen)"
+          strokeLinecap="round"
+          strokeOpacity={L.op}
+          strokeWidth={w || 1}
+          className="fem-edge-comet-layer"
+          style={{ strokeDasharray: `${L.len} ${288 - L.len}`, animationDelay: `${L.delay}s` }}
+        />
+      ))}
+    </g>
+  );
+}
 
 // ═══ MAIN APP ═══
 // ── 后端地址工具函数 ──
@@ -38,14 +74,60 @@ function getBackendBaseUrl() {
   return `${host}:${port}`;
 }
 
-export default function FEMEditor({ plugin = false, onRun, onStop, initialScript, initialCheckpoint, initialRunning = false, onSnapshot, onExport, onImport, savedPath } = {}) {
+// 结构签名：只取拓扑相关字段做比较，忽略坐标 (x/y) 与瞬时态 (selected/dragging)——
+// 用于判定「图是否被结构性修改」；拖动节点只改坐标不算修改。
+function structuralSignature(nodes, edges) {
+  const ns = (nodes || []).map((n) => {
+    const c = { ...n };
+    delete c.x; delete c.y; delete c.selected; delete c.dragging; delete c.width; delete c.height;
+    return JSON.stringify(c);
+  }).sort();
+  const es = (edges || []).map((e) => {
+    const c = { ...e };
+    delete c.selected; delete c.dragging;
+    return JSON.stringify(c);
+  }).sort();
+  return JSON.stringify({ ns, es });
+}
+
+export default function FEMEditor({ plugin = false, onRun, onStop, initialScript, initialCheckpoint, initialRunning = false, onExport, onImport, savedPath, onBackToShell, onRestoreError, onPersistScript, getRecordScript } = {}) {
 // 插件模式：由 dsh-femwa 注入（plugin=true）——运行/停止走插件回调，
 // SSE 连插件广播路由；独立模式保留原后端调用（getBackendBaseUrl）。
 // initialScript/initialCheckpoint/initialRunning：会话恢复（刷新/重启/运行中打开）。
-// onSnapshot(fems)：画布编辑防抖后实时写会话快照（双视图同步）。
+// onPersistScript(fems)：定稿按钮（图生文本/文本生图）显式落盘会话记录；
+// 2026-08-22 起不再有画布防抖自动回写，原文以用户输入为准。
 // savedPath：会话剧本文件地址（导出/导入产生）——空=未保存（提示+绝对寻址）。
 // onExport(fems, name)：导出=用户选目录保存→地址存会话；onImport(content, filename)：导入=上传保存→地址存会话。
+// onBackToShell：插件模式手机端返回键回调（dsh-femwa 传 ctx.layout.toggleSidebar）。
 //console.log('✅ FEMEditor 已进入渲染');
+  // ── 主题：auto=跟随 dsh 本体（body[data-ds-dark-theme] 白天→dsh / 黑夜→dsh-dark），
+  //    或手动固定 dsh / dsh-dark。localStorage 'fem_theme' 持久化，默认 auto。──
+  const [themeSel, setThemeSel] = useState(() => {
+    try {
+      const saved = localStorage.getItem('fem_theme');
+      return FEM_THEMES.some((t) => t.id === saved) ? saved : 'auto';
+    } catch { return 'auto'; }
+  });
+  // dsh 本体黑夜标记（布尔属性，必须 hasAttribute 检测；组件挂载时 body 必已存在）
+  const [dsDark, setDsDark] = useState(() =>
+    document.body?.hasAttribute('data-ds-dark-theme') ?? false
+  );
+  // 实时跟随：dsh 切白天/黑夜时 MutationObserver 感知 body 属性变化
+  useEffect(() => {
+    const obs = new MutationObserver(() => {
+      setDsDark(document.body?.hasAttribute('data-ds-dark-theme') ?? false);
+    });
+    obs.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] });
+    return () => obs.disconnect();
+  }, []);
+  const theme = themeSel === 'auto' ? (dsDark ? 'dsh-dark' : 'dsh') : themeSel;
+  const cycleTheme = () => {
+    const idx = FEM_THEMES.findIndex((t) => t.id === themeSel);
+    const next = FEM_THEMES[(idx + 1) % FEM_THEMES.length].id;
+    setThemeSel(next);
+    try { localStorage.setItem('fem_theme', next); } catch { /* ignore */ }
+  };
+
   const [locationPath, setLocationPath] = useState(['mainflow']);
   const mode =
     locationPath.length === 1 && locationPath[0] === 'mainflow'
@@ -125,6 +207,15 @@ export default function FEMEditor({ plugin = false, onRun, onStop, initialScript
   // FEM preview editing
   const [femText, setFemText] = useState('');
   const [femDirty, setFemDirty] = useState(false);
+  // 「图被修改」标记：只有结构性变更（增删节点/连线/改标签等）才算；
+  // 拖动节点只改坐标不算。坐标由下次「图生文本」落进 #sketch。
+  const [graphDirty, setGraphDirty] = useState(false);
+  // 上次统一点（文本生图/图生文本/restore）的结构签名基线。
+  const lastSyncedGraphRef = useRef('');
+  // 运行守卫：存在未落盘修改时，先弹窗让用户选择定稿版本再运行。
+  const [runGuard, setRunGuard] = useState(null);
+  // 「放弃修改直接跑」的旁路开关（ref 同步生效，绕过旧闭包里尚未刷新的脏标志）。
+  const skipRunGuardRef = useRef(false);
   const [lastValidFem, setLastValidFem] = useState('');
   const [femError, setFemError] = useState(null);
   const [bubbleOverlay, setBubbleOverlay] = useState(null); // { nodeId }
@@ -645,19 +736,17 @@ const parOutNodeMap = useMemo(() => {
     return () => clearTimeout(timer);
   }, [saveToLocalStorage]);
 
-  // 插件模式：画布编辑防抖 → 实时写会话快照（双视图同步，3s 防抖避免频繁生成）。
+  // 2026-08-22 架构重构：插件模式不再自动把画布回写成文本。
+  // 原行为 = 任何画布变化 3s 后经 buildFEM 全量重生成并覆盖 record，
+  // 是「打开看一眼就污染原文」的元凶。现在统一只走两个定稿按钮：
+  // 文本生图（handleApplyFem）/ 图生文本（handleGraphToTextCommit）。
+
+  // 图修改检测：与上次统一点的结构基线比较（忽略坐标），漂移即置脏。
   useEffect(() => {
-    if (!plugin || typeof onSnapshot !== 'function') return;
-    const timer = setTimeout(() => {
-      try {
-        const fem = handleGraphToFemRef.current();
-        if (fem && fem.trim()) onSnapshot(fem);
-      } catch (e) {
-        console.warn('[FEMEditor] 会话快照同步失败:', e);
-      }
-    }, 3000);
-    return () => clearTimeout(timer);
-  }, [plugin, nodes, edges, flowStore, locationPath, actionStore, moduleStore, proj, onSnapshot]);
+    if (!plugin) return;
+    if (!lastSyncedGraphRef.current) return; // 尚未 restore，无基线
+    setGraphDirty(structuralSignature(nodes, edges) !== lastSyncedGraphRef.current);
+  }, [plugin, nodes, edges]);
 
   // 初始化时加载状态（插件模式跳过：画布状态按会话快照恢复，不读 localStorage）
   useEffect(() => {
@@ -695,6 +784,10 @@ const parOutNodeMap = useMemo(() => {
         console.log('[FEMEditor] 已从会话快照恢复画布, 长度:', initialScript.length);
       } catch (e) {
         console.warn('[FEMEditor] 会话快照恢复失败:', e);
+        // 不再静默：画布面板可见 + 上抛给插件层（回传主模型）。
+        const msg = e instanceof Error ? e.message : String(e);
+        setFemError(`会话快照恢复失败：${msg}`);
+        if (typeof onRestoreError === 'function') onRestoreError(msg);
       }
     }
     if (initialCheckpoint) {
@@ -1077,16 +1170,20 @@ if (specialType === 'FOR') {
   }, [soulForm]);
 
   // ── 工作流运行：启动运行 ──
-  const handleRunWorkflow = useCallback(async () => {
+  const handleRunWorkflow = useCallback(async (femOverride) => {
     console.log('[handleRunWorkflow] ====== 准备启动 ======');
     console.log('[handleRunWorkflow] flowStatus:', flowStatus);
     if (flowStatus === 'running') return;
-    // 不用检查 API Key
-    // ⚡ 运行前即时生成最新 FEM 文本（通过 ref 调用最新版，拿到同步返回值）
-    console.log('[handleRunWorkflow] 运行前自动同步: 图 -> 文本');
-    const fem = handleGraphToFemRef.current();
-    console.log('[handleRunWorkflow] 同步完成, fem 长度:', fem?.length);
-    console.log('[handleRunWorkflow] fem 前200字符:', fem?.slice(0, 200));
+    // 未落盘修改守卫：文本/图相对 record 有未应用的修改时不直接跑，
+    // 弹窗说明分歧点，用户选「回去核查」或「放弃修改直接跑」（record 为准）。
+    if (plugin && !skipRunGuardRef.current && (femDirty || graphDirty)) {
+      setRunGuard({ textDirty: femDirty, graphDirty });
+      return;
+    }
+    skipRunGuardRef.current = false;
+    // ⚡ 跑原文（2026-08-22 重构）：以输入框文本为准，不再运行前经 buildFEM 重生成；
+    // femOverride 供「放弃修改直接跑」传入 record 原文。
+    const fem = typeof femOverride === 'string' && femOverride.trim() ? femOverride : femText;
     if (!fem || !fem.trim()) {
       alert('请先编写或导入 FEM 脚本');
       return;
@@ -1174,7 +1271,27 @@ es.onmessage = (event) => {
       setFlowStatus('idle');
       setActiveNodeIds(new Set());
     }
-  }, [flowStatus, userApiKey, userApiProvider, userApiUrl]);
+  }, [flowStatus, userApiKey, userApiProvider, userApiUrl, plugin, femText, femDirty, graphDirty]);
+
+  // 「放弃修改，直接跑」：以 record 为定稿——拉取原文覆盖输入框与画布，
+  // 清掉两侧脏标记（applyFEMText 内部完成），然后带着 record 原文直接运行。
+  async function discardChangesAndRun() {
+    setRunGuard(null);
+    let record = null;
+    if (typeof getRecordScript === 'function') {
+      try { record = await getRecordScript(); } catch (e) { record = null; }
+    }
+    if (!record || !record.trim()) {
+      alert('无法从会话读取 record 原文，已取消运行');
+      return;
+    }
+    setFemText(record);
+    applyFEMText(record);
+    // 旁路守卫：applyFEMText 清标志是异步 setState，旧闭包里的脏标志还没刷新，
+    // 用 ref 开关让下一次 handleRunWorkflow 直接放行（本次定稿=record，语义一致）。
+    skipRunGuardRef.current = true;
+    await handleRunWorkflow(record);
+  }
 
   // ── 暂停工作流 ──
   const handlePauseWorkflow = useCallback(async () => {
@@ -1496,7 +1613,9 @@ case 'human_input_error':
 
 
       case 'flow_stopped':
-        setFlowStatus('idle');
+        // 暂停（pause 半实现=stop）与停止共用该事件：paused=true（插件
+        // 宿主按 pausedByUser 附加）→ 显示「继续」；否则 → 显示「运行」。
+        setFlowStatus(data?.paused === true ? 'paused' : 'idle');
         setActiveNodeIds(new Set());
         if (eventSourceRef.current) {
           eventSourceRef.current.close();
@@ -2021,9 +2140,12 @@ if (draggedNode.type === 'for_out' && n.id === draggedNode.forNodeId) {
     setEdges(newEdges);
     console.log('6. setState 完成');
     setFemDirty(false);
+    setGraphDirty(false);
     setFemError(null);
     setLastValidFem(text);
     setSel(null);
+    // 建立结构基线：此刻画布与原文一致，之后的结构性变化才计为「图被修改」。
+    lastSyncedGraphRef.current = structuralSignature(newNodes, newEdges);
     console.log('7. 全部完成');
   }
 
@@ -2073,16 +2195,27 @@ if (draggedNode.type === 'for_out' && n.id === draggedNode.forNodeId) {
     //console.log('[handleGraphToFem] buildFEM 完成, 长度:', newFem.length);
     //console.log('[handleGraphToFem] 前300字符:', newFem.slice(0, 300));
 
-    // 5. 更新状态
-    setFemText(newFem);
-    setLastValidFem(newFem);
-    setFemDirty(false);
-    setFemError(null);
-    //console.log('[handleGraphToFem] setState 已入队（异步生效）');
+    // 5. 纯生成，无副作用（2026-08-22 重构）：不再在这里改任何 state。
+    //    副作用（更新输入框/落盘/清标志）由定稿按钮的包装函数负责，
+    //    导出等只读场景直接拿返回值，不会误伤前端状态。
 
     // 6. 同步返回——调用方直接用，不依赖异步 state
     //console.log('[handleGraphToFem] ====== 完成 ======');
     return newFem;
+  }
+
+  // 图生文本定稿按钮：生成标准化文本 → 三处统一（输入框/画布/record）→ 清标志。
+  function handleGraphToTextCommit() {
+    const out = handleGraphToFem();
+    if (!out || !out.trim()) return;
+    setFemText(out);
+    setLastValidFem(out);
+    setFemError(null);
+    setFemDirty(false);
+    setGraphDirty(false);
+    lastSyncedGraphRef.current = structuralSignature(nodes, edges);
+    // 链路②：把生成文本写入会话 record（带 baseRev，冲突走 409 弹窗）。
+    if (typeof onPersistScript === 'function') onPersistScript(out);
   }
 
   // useRef 持有最新 handleGraphToFem 引用
@@ -2096,6 +2229,9 @@ if (draggedNode.type === 'for_out' && n.id === draggedNode.forNodeId) {
     console.log('[handleApplyFem] 开始, femText 长度:', femText?.length);
     try {
       applyFEMText(femText);
+      // 定稿链路①：把输入框原文原样写入会话 record（三处统一）。
+      // applyFEMText 内部已清双标志并刷新结构基线。
+      if (typeof onPersistScript === 'function') onPersistScript(femText);
     } catch (err) {
       console.error('[handleApplyFem] 异常:', err.message);
       setFemError(err.message);
@@ -2117,6 +2253,9 @@ const selNode = sel?.type === 'node' ? nm.get(sel.id) : null;
 
   // ── 响应式布局检测 ──
   const isMobile = useMobile(768);
+  // 插件模式手机端全屏态：默认全屏沉浸（盖住 dsh 外壳），返回键退出全屏并开 dsh 边栏
+  const [mobileFs, setMobileFs] = useState(true);
+  const themeName = FEM_THEMES.find((t) => t.id === themeSel)?.name || themeSel;
 
   // actorNames（手机端 ProjPanel 需要）
   const actorNames = (proj.actors || []).map((a) => a.name.replace('@', ''));
@@ -2207,12 +2346,51 @@ const selNode = sel?.type === 'node' ? nm.get(sel.id) : null;
     setModal({ type: 'editNode', action: selAction, nodeId: selNode.id });
   };
 
-  if (isMobile && !plugin) {
-    // 插件模式不提供移动端布局（dsh web 桌面为主）
+  if (isMobile) {
+    // 窄视口（手机/平板竖屏）：提供移动端布局。
+    // 插件模式同样支持——手机通过 tailscale 访问 dsh 时自动呈现手机版。
     return (
       <ErrorBoundary>
         <FontStyle scoped={plugin} />
+        {/* 运行守卫弹窗（移动端树）：zIndex 1000 > MobileLayout 的 900，确保可见 */}
+        {runGuard !== null && (
+          <div style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div style={{
+              maxWidth: 430, width: 'calc(100% - 48px)', padding: '18px 20px', borderRadius: 12,
+              background: 'var(--fem-surface, #fff)', border: '1px solid var(--fem-border, #e0e0e0)',
+              boxShadow: '0 8px 28px rgba(0,0,0,0.22)', fontSize: 13, lineHeight: 1.6,
+            }}>
+              <div style={{ fontWeight: 700, marginBottom: 6 }}>⚠️ 有未落盘修改</div>
+              <div style={{ color: 'var(--fem-text-secondary, #666)', marginBottom: 14 }}>
+                {runGuard.textDirty && runGuard.graphDirty
+                  ? '文本和画布图都被修改过，且互相不统一。'
+                  : runGuard.textDirty
+                    ? '文本被修改过，尚未应用到画布和 record。'
+                    : '画布图被修改过，尚未应用到文本和 record。'}
+                建议回去按对应的统一按钮（文本生图 / 图生文本）应用你要的版本；
+                也可以放弃这些修改，以最后保存的 record 为准直接运行。
+              </div>
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <button
+                  onClick={() => setRunGuard(null)}
+                  style={{ padding: '6px 12px', borderRadius: 8, border: '1px solid var(--fem-border, #ccc)', background: 'transparent', cursor: 'pointer' }}
+                >回去核查</button>
+                <button
+                  onClick={discardChangesAndRun}
+                  style={{ padding: '6px 12px', borderRadius: 8, border: '1px solid #d96b2b', background: '#d96b2b', color: '#fff', cursor: 'pointer' }}
+                >放弃修改，直接跑</button>
+              </div>
+            </div>
+          </div>
+        )}
         <MobileLayout
+          theme={theme}
+          zIndex={plugin && mobileFs ? 900 : undefined}
+          fixedMode={plugin ? mobileFs : true}
+          onBack={plugin ? () => { setMobileFs(false); onBackToShell?.(); } : undefined}
+          onExpand={plugin ? () => setMobileFs(true) : undefined}
+          themeName={themeName}
+          onCycleTheme={cycleTheme}
           proj={proj}
           actorNames={actorNames}
           onProjChange={setProj}
@@ -2246,11 +2424,12 @@ nodes={nodes}
                 style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none', overflow: 'visible', zIndex: 24 }}
               >
                 <defs>
-                  {[['a','#94a3b8'],['as','#3d5cf5'],['a_for','#4f6ef7'],['al','#ef4444'],['aj','#f59e0b']].map(([id,col]) => (
+                  {[['a','var(--fem-edge-flow)'],['as','var(--fem-edge-sel)'],['a_for','var(--fem-edge)'],['al','var(--fem-danger)'],['aj','var(--fem-warning)']].map(([id,col]) => (
                     <marker key={id} id={id} markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
                       <polygon points="0 0, 8 3, 0 6" fill={col} />
                     </marker>
                   ))}
+                  {/* 流光渐变定义已于 round35 随 v8 多层 dash 方案移除（无引用） */}
                 </defs>
                 {sortedEdges.map((e) => {
                   const s = nm.get(e.src), t = nm.get(e.tgt);
@@ -2266,33 +2445,39 @@ nodes={nodes}
                     const pathD = `M${s.x+ss.w},${cy} C${cx+ss.w*0.8},${s.y-ss.h*0.4} ${cx+ss.w*0.8},${s.y-ss.h*0.4} ${cx},${s.y}`;
                     return (
                       <g key={e.id}>
-                        <path d={pathD} fill="none" stroke="transparent" strokeWidth={12} style={{cursor:'pointer',pointerEvents:'stroke'}} onClick={(ev) => { ev.stopPropagation(); setSel({ type: 'edge', id: e.id }); }} />
-                        <path d={pathD} fill="none" stroke={isSel?'#3d5cf5':'#4f6ef7'} strokeWidth={isSel?2.5:1.5} strokeDasharray="5,3" markerEnd={`url(#${isSel?'as':'a_for'})`} style={{pointerEvents:'none'}} />
+                        <path d={pathD} fill="none" stroke="transparent" data-edge-id={e.id} strokeWidth={18} style={{cursor:'pointer',pointerEvents:'stroke'}} onClick={(ev) => { ev.stopPropagation(); setSel({ type: 'edge', id: e.id }); }} />
+                        <path d={pathD} fill="none" stroke={isSel?'var(--fem-edge-sel)':'var(--fem-edge)'} strokeDasharray="5,3" markerEnd={`url(#${isSel?'as':'a_for'})`} style={{pointerEvents:'none', strokeWidth: isSel?'var(--fem-edge-w-sel)':'var(--fem-edge-w-thin)'}} />
+                        {/* 流光：三层渐变光斑沿箭头方向流动（仅深色主题由 CSS 点亮） */}
+                        <EdgeShimmer d={pathD} w={0.85} />
                       </g>
                     );
                   }
                   const { pathDs, labelPos, srcDir, tgtDir } = computeEdgeGeometry(e, s, t, isCycleEdge, allCycleEdges, portEdgeGroupMap);
-                  const stroke = isSel ? '#3d5cf5' : isParBroken || isForBroken ? '#ef4444' : isCycleEdge || isParCycle ? '#4f6ef7' : '#94a3b8';
+                  const stroke = isSel ? 'var(--fem-edge-sel)' : isParBroken || isForBroken ? 'var(--fem-danger)' : isCycleEdge || isParCycle ? 'var(--fem-edge)' : 'var(--fem-edge-flow)';
                   const dashed = isParBroken || isForBroken ? '5,3' : isCycleEdge ? '7,3' : null;
                   const markerId = isSel ? 'as' : isParBroken || isForBroken ? 'al' : isCycleEdge ? 'a_for' : 'a';
                   return (
                     <g key={e.id}>
                       {pathDs.map((d, i) => (
-                        <path key={i} d={d} fill="none" stroke="transparent" strokeWidth={12} style={{cursor:'pointer',pointerEvents:'stroke'}} onClick={(ev) => { ev.stopPropagation(); setSel({ type: 'edge', id: e.id }); }} />
+                        <path key={i} d={d} fill="none" stroke="transparent" data-edge-id={e.id} strokeWidth={18} style={{cursor:'pointer',pointerEvents:'stroke'}} onClick={(ev) => { ev.stopPropagation(); setSel({ type: 'edge', id: e.id }); }} />
                       ))}
                       {pathDs.map((d, i) => (
-                        <path key={`v${i}`} d={d} fill="none" stroke={stroke} strokeWidth={isSel?2.5:1.5} strokeDasharray={dashed} markerEnd={i===pathDs.length-1?`url(#${markerId})`:undefined} style={{pointerEvents:'none'}} />
+                        <g key={`v${i}`}>
+                          <path d={d} fill="none" stroke={stroke} strokeDasharray={dashed} markerEnd={i===pathDs.length-1?`url(#${markerId})`:undefined} style={{pointerEvents:'none', strokeWidth: isSel?'var(--fem-edge-w-sel)':'var(--fem-edge-w-thin)'}} />
+                          {/* 流光：仅金线（红色语义边不发光） */}
+                          {!(isParBroken || isForBroken) && <EdgeShimmer d={d} w={0.85} />}
+                        </g>
                       ))}
                       {e.cond && labelPos && (
                         <g>
-                          <rect x={labelPos.x-22} y={labelPos.y-8} width={44} height={16} rx={4} fill="white" stroke={stroke} strokeWidth={1} />
-                          <text x={labelPos.x} y={labelPos.y+4} textAnchor="middle" fontSize={9} fill={stroke} fontFamily="JetBrains Mono,monospace" fontWeight={700}>{e.cond.length>8?e.cond.slice(0,7)+'…':e.cond}</text>
+                          <rect x={labelPos.x-22} y={labelPos.y-8} width={44} height={16} rx={4} fill="var(--fem-surface)" stroke={stroke} strokeWidth={1} />
+                          <text x={labelPos.x} y={labelPos.y+4} textAnchor="middle" fontSize={9} fill={stroke} fontFamily="var(--fem-font-mono)" fontWeight={700}>{e.cond.length>8?e.cond.slice(0,7)+'…':e.cond}</text>
                         </g>
                       )}
                     </g>
                   );
                 })}
-                {conn && (() => { const d = getTempConnLine(); return d ? <path d={d} fill="none" stroke="#3d5cf5" strokeWidth={2} strokeDasharray="6,3" style={{pointerEvents:'none'}} /> : null; })()}
+                {conn && (() => { const d = getTempConnLine(); return d ? <path d={d} fill="none" stroke="var(--fem-primary)" strokeWidth={2} strokeDasharray="6,3" style={{pointerEvents:'none'}} /> : null; })()}
               </svg>
               {nodes.map((n) => {
                 const enrichedNode = n.type === 'action' ? { ...n, action: actionMap.get(n.actionId) } : n;
@@ -2362,7 +2547,7 @@ nodes={nodes}
           femDirty={femDirty}
           onApplyFem={handleApplyFem}
           onRestoreFem={handleRestoreFem}
-          onGraphToFem={handleGraphToFem}
+          onGraphToFem={handleGraphToTextCommit}
           onOpenSoul={() => { setSoulForm({ soul_id: '', soul_name: '', description: '' }); setSoulFormError(''); setSoulModalOpen(true); }}
           backEdges={backEdges}
           onDeleteNode={handleDeleteSelNode}
@@ -2412,6 +2597,7 @@ nodes={nodes}
     <ErrorBoundary>
       <FontStyle scoped={plugin} />
       <div
+        data-fem-theme={theme}
         style={{
           display: 'flex',
           // 插件模式整体缩放锁定 75%（zoom 连布局尺寸一起缩；
@@ -2419,8 +2605,8 @@ nodes={nodes}
           width: '100%',
           height: plugin ? '100%' : '100vh',
           zoom: plugin ? 0.75 : 1,
-          background: '#edf1f8',
-          fontFamily: 'DM Sans, sans-serif',
+          background: 'var(--fem-app-bg)',
+          fontFamily: 'var(--fem-font-sans)',
           overflow: 'hidden',
         }}
       >
@@ -2428,8 +2614,8 @@ nodes={nodes}
         <div
           style={{
             width: 232,
-            background: 'white',
-            borderRight: '1px solid #e4ecf7',
+            background: 'var(--fem-panel-bg)',
+            borderRight: 'var(--fem-border-w) solid var(--fem-border)',
             display: 'flex',
             flexDirection: 'column',
             flexShrink: 0,
@@ -2438,24 +2624,29 @@ nodes={nodes}
         >
           <div
             style={{
-              padding: '16px 16px 13px',
-              borderBottom: '1px solid #e4ecf7',
+              height: 50,
+              display: 'flex',
+              flexDirection: 'column',
+              justifyContent: 'center',
+              padding: '0 16px',
+              borderBottom: 'var(--fem-border-w) solid var(--fem-border)',
+              flexShrink: 0,
             }}
           >
             <div
               style={{
                 fontWeight: 900,
                 fontSize: 18,
-                color: '#1b2540',
+                color: 'var(--fem-text-1)',
                 letterSpacing: '-0.03em',
               }}
             >
-              <span style={{ color: '#3d5cf5' }}>FEM</span> WAutomata
+              <span style={{ color: 'var(--fem-primary)' }}>FEM</span> WAutomata
             </div>
             <div
               style={{
                 fontSize: 10.5,
-                color: '#9aaccb',
+                color: 'var(--fem-neutral)',
                 marginTop: 2,
                 letterSpacing: '0.01em',
               }}
@@ -2464,7 +2655,7 @@ nodes={nodes}
             </div>
           </div>
 
-          <div style={{ display: 'flex', borderBottom: '1px solid #e4ecf7' }}>
+          <div style={{ display: 'flex', borderBottom: 'var(--fem-border-w) solid var(--fem-border)' }}>
             {[
               ['library', '组件库'],
               ['project', '项目设置'],
@@ -2482,11 +2673,11 @@ nodes={nodes}
                   fontWeight: 700,
                   textTransform: 'uppercase',
                   letterSpacing: '0.07em',
-                  color: tab === k ? '#3d5cf5' : '#9aaccb',
-                  borderBottom: `2.5px solid ${
-                    tab === k ? '#3d5cf5' : 'transparent'
+                  color: tab === k ? 'var(--fem-primary)' : 'var(--fem-neutral)',
+                  borderBottom: `var(--fem-border-w-selected) solid ${
+                    tab === k ? 'var(--fem-primary)' : 'transparent'
                   }`,
-                  fontFamily: 'DM Sans, sans-serif',
+                  fontFamily: 'var(--fem-font-sans)',
                   transition: 'all 0.12s',
                 }}
               >
@@ -2551,7 +2742,7 @@ nodes={nodes}
                     m.path.length === locationPath.length &&
                     m.path.every((s, i) => s === locationPath[i])
                 );
-                if (!currentMod) return <div style={{ color: '#c4d0e0', fontSize: 12 }}>未找到模块</div>;
+                if (!currentMod) return <div style={{ color: 'var(--fem-text-4-weak)', fontSize: 12 }}>未找到模块</div>;
                 const modAsProj = {
                   ...currentMod.meta,
                   name: currentMod.name,
@@ -2590,23 +2781,40 @@ nodes={nodes}
 
           {/* ── 底部工具栏 ── */}
           <div style={{
-            borderTop: '1px solid #e4ecf7',
+            borderTop: 'var(--fem-border-w) solid var(--fem-border)',
             padding: '10px 13px',
             display: 'flex',
             gap: 8,
             flexShrink: 0,
           }}>
             <button
+              onClick={cycleTheme}
+              title={`主题：${FEM_THEMES.find((t) => t.id === themeSel)?.desc || themeSel}（点击切换）`}
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4,
+                padding: '6px 8px', borderRadius: 'var(--fem-radius-md)',
+                fontSize: 11, fontWeight: 600,
+                fontFamily: 'var(--fem-font-sans)',
+                cursor: 'pointer', transition: 'all 0.12s',
+                border: 'var(--fem-border-w) solid var(--fem-border-strong)',
+                background: 'var(--fem-bg)',
+                color: 'var(--fem-text-2)',
+                flex: '0 0 auto',
+              }}
+            >
+              🎨 {FEM_THEMES.find((t) => t.id === themeSel)?.name || themeSel}
+            </button>
+            <button
               onClick={() => { setSoulForm({ soul_id: '', soul_name: '', description: '' }); setSoulFormError(''); setSoulModalOpen(true); }}
               style={{
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
-                padding: '6px 8px', borderRadius: 7,
+                padding: '6px 8px', borderRadius: 'var(--fem-radius-md)',
                 fontSize: 11, fontWeight: 600,
-                fontFamily: 'DM Sans, sans-serif',
+                fontFamily: 'var(--fem-font-sans)',
                 cursor: 'pointer', transition: 'all 0.12s',
-                border: '1px solid #dde4ef',
-                background: '#f8fafc',
-                color: '#5a6a8a',
+                border: 'var(--fem-border-w) solid var(--fem-border-strong)',
+                background: 'var(--fem-bg)',
+                color: 'var(--fem-text-2)',
                 flex: 1,
               }}
             >
@@ -2628,8 +2836,8 @@ nodes={nodes}
           <div
             style={{
               height: 50,
-              background: 'white',
-              borderBottom: '1px solid #e4ecf7',
+              background: 'var(--fem-panel-bg)',
+              borderBottom: 'var(--fem-border-w) solid var(--fem-border)',
               display: 'flex',
               alignItems: 'center',
               padding: '0 16px',
@@ -2637,7 +2845,7 @@ nodes={nodes}
               flexShrink: 0,
             }}
           >
-            <span style={{ fontSize: 11.5, color: '#7a8aaa', fontWeight: 600 }}>
+            <span style={{ fontSize: 11.5, color: 'var(--fem-text-3)', fontWeight: 600 }}>
               位置
             </span>
             <button
@@ -2655,16 +2863,16 @@ nodes={nodes}
               }
               style={{
                 padding: '4px 13px',
-                borderRadius: 6,
+                borderRadius: 'var(--fem-radius-sm)',
                 cursor: 'pointer',
                 fontSize: 12,
                 fontWeight: 700,
-                fontFamily: 'DM Sans, sans-serif',
-                border: `1.5px solid ${
-                  mode === 'mainflow' ? '#3d5cf5' : '#dde4ef'
+                fontFamily: 'var(--fem-font-sans)',
+                border: `var(--fem-border-w-strong) solid ${
+                  mode === 'mainflow' ? 'var(--fem-primary)' : 'var(--fem-border-strong)'
                 }`,
-                background: mode === 'mainflow' ? '#eff2ff' : 'white',
-                color: mode === 'mainflow' ? '#3d5cf5' : '#7a8aaa',
+                background: mode === 'mainflow' ? 'var(--fem-primary-soft-2)' : 'var(--fem-surface)',
+                color: mode === 'mainflow' ? 'var(--fem-primary)' : 'var(--fem-text-3)',
                 opacity: mode === 'mainflow' ? 0.7 : 1,
               }}
             >
@@ -2674,7 +2882,7 @@ nodes={nodes}
               <React.Fragment key={idx}>
                 {idx > 0 && (
                   <span
-                    style={{ color: '#b0bad0', fontSize: 12, fontWeight: 600 }}
+                    style={{ color: 'var(--fem-text-4)', fontSize: 12, fontWeight: 600 }}
                   >
                     &gt;
                   </span>
@@ -2688,13 +2896,13 @@ nodes={nodes}
                     }}
                     style={{
                       padding: '4px 10px',
-                      borderRadius: 6,
+                      borderRadius: 'var(--fem-radius-sm)',
                       cursor: 'pointer',
                       fontSize: 12,
                       fontWeight: 700,
-                      border: `1.5px solid #dde4ef`,
-                      background: 'white',
-                      color: '#7a8aaa',
+                      border: `var(--fem-border-w-strong) solid var(--fem-border-strong)`,
+                      background: 'var(--fem-surface)',
+                      color: 'var(--fem-text-3)',
                     }}
                   >
                     {seg}
@@ -2712,9 +2920,9 @@ nodes={nodes}
                 style={{
                   padding: '4px 12px',
                   fontSize: 11,
-                  background: '#dde4ef',
+                  background: 'var(--fem-border-strong)',
                   border: 'none',
-                  borderRadius: 7,
+                  borderRadius: 'var(--fem-radius-md)',
                   cursor: 'pointer',
                 }}
               >
@@ -2772,8 +2980,8 @@ nodes={nodes}
                   ...btnS,
                   fontSize: 12,
                   padding: '5px 14px',
-                  background: '#22c55e',
-                  color: '#fff',
+                  background: 'var(--fem-success)',
+                  color: 'var(--fem-on-accent)',
                   fontWeight: 600,
                   cursor: 'pointer',
                 }}
@@ -2787,8 +2995,8 @@ nodes={nodes}
                   ...btnS,
                   fontSize: 12,
                   padding: '5px 14px',
-                  background: '#3d5cf5',
-                  color: '#fff',
+                  background: 'var(--fem-btn-primary)',
+                  color: 'var(--fem-on-accent)',
                   fontWeight: 600,
                   cursor: 'pointer',
                 }}
@@ -2802,8 +3010,8 @@ nodes={nodes}
                   ...btnS,
                   fontSize: 12,
                   padding: '5px 14px',
-                  background: '#f59e0b',
-                  color: '#fff',
+                  background: 'var(--fem-warning)',
+                  color: 'var(--fem-on-accent)',
                   fontWeight: 600,
                   cursor: 'pointer',
                 }}
@@ -2825,7 +3033,7 @@ nodes={nodes}
               overscrollBehaviorY: 'contain', /*禁止浏览器返回手势的冲突*/
 
               backgroundImage:
-                'radial-gradient(circle, #bfcde2 1.2px, transparent 1.2px)',
+                'var(--fem-canvas-dots)',
               backgroundSize: '22px 22px',
               cursor: isPanning
                 ? 'grabbing'
@@ -2883,11 +3091,11 @@ nodes={nodes}
 >
                 <defs>
                   {[
-                    ['a', '#94a3b8'],
-                    ['as', '#3d5cf5'],
-                    ['a_for', '#4f6ef7'],
-                    ['al', '#ef4444'],
-                    ['aj', '#f59e0b'],
+                    ['a', 'var(--fem-edge-flow)'],
+                    ['as', 'var(--fem-edge-sel)'],
+                    ['a_for', 'var(--fem-edge)'],
+                    ['al', 'var(--fem-danger)'],
+                    ['aj', 'var(--fem-warning)'],
                   ].map(([id, col]) => (
                     <marker
                       key={id}
@@ -2901,6 +3109,7 @@ nodes={nodes}
                       <polygon points="0 0, 8 3, 0 6" fill={col} />
                     </marker>
                   ))}
+                  {/* 流光渐变定义已于 round35 随 v8 多层 dash 方案移除（无引用） */}
                 </defs>
 
                 {sortedEdges.map((e) => {
@@ -2931,7 +3140,8 @@ nodes={nodes}
                           d={pathD}
                           fill="none"
                           stroke="transparent"
-                          strokeWidth={12}
+                          data-edge-id={e.id}
+                          strokeWidth={18}
                           style={{ cursor: 'pointer', pointerEvents: 'stroke' }}
                           onMouseDown={(ev) => ev.stopPropagation()}
                           onClick={(ev) => {
@@ -2942,10 +3152,12 @@ nodes={nodes}
                         <path
                           d={pathD}
                           fill="none"
-                          stroke={isSel ? '#3d5cf5' : '#4f6ef7'}
-                          strokeWidth={isSel ? 2.5 : 2}
+                          stroke={isSel ? 'var(--fem-edge-sel)' : 'var(--fem-edge)'}
                           markerEnd="url(#a)"
+                          style={{ strokeWidth: isSel ? 'var(--fem-edge-w-sel)' : 'var(--fem-edge-w)' }}
                         />
+                        {/* 流光：回边同为金线 */}
+                        <EdgeShimmer d={pathD} w={1} />
                       </g>
                     );
                   }
@@ -2975,13 +3187,13 @@ nodes={nodes}
                   const isForOutEdge = nodes.some(n => (n.type === 'for_out' || n.type === 'par_out') && (n.id === e.src || n.id === e.tgt));
                   const isForBrokenFinal = isForBroken && !isForOutEdge;
 
-                  const col = isParBroken ? '#ef4444' :
-                              isParCycle ? '#4f6ef7' :
-                              isForOutEdge ? '#4f6ef7' :
-                              isCycleEdge ? '#4f6ef7' :
-                              isForBrokenFinal ? '#ef4444' :
-                              isSel ? '#3d5cf5' :
-                              '#94a3b8';
+                  const col = isParBroken ? 'var(--fem-danger)' :
+                              isParCycle ? 'var(--fem-edge)' :
+                              isForOutEdge ? 'var(--fem-edge)' :
+                              isCycleEdge ? 'var(--fem-edge)' :
+                              isForBrokenFinal ? 'var(--fem-danger)' :
+                              isSel ? 'var(--fem-edge-sel)' :
+                              'var(--fem-edge-flow)';
                   const mkr = isParBroken ? 'al' :
                               isParCycle ? 'a_for' :
                               isForBrokenFinal ? 'al' :
@@ -2997,7 +3209,8 @@ nodes={nodes}
                         d={geo.pathDs[geo.midIdx]}
                         fill="none"
                         stroke="transparent"
-                        strokeWidth={isParEdge ? 18 : 12}
+                        data-edge-id={e.id}
+                        strokeWidth={isParEdge ? 24 : 18}
                         style={{ cursor: 'pointer', pointerEvents: 'stroke' }}
                         onClick={(ev) => {
                           ev.stopPropagation();
@@ -3006,16 +3219,18 @@ nodes={nodes}
                       />
                       {/* 可见线条：多条平行 */}
                       {geo.pathDs.map((pathD, i) => (
-                        <path
-                          key={i}
-                          d={pathD}
-                          fill="none"
-                          stroke={col}
-                          strokeWidth={isSel ? 2.5 : 1.8}
-                          strokeDasharray={dashArray}
-                          markerEnd={`url(#${mkr})`}
-                          style={{ pointerEvents: 'none' }}
-                        />
+                        <g key={i}>
+                          <path
+                            d={pathD}
+                            fill="none"
+                            stroke={col}
+                            strokeDasharray={dashArray}
+                            markerEnd={`url(#${mkr})`}
+                            style={{ pointerEvents: 'none', strokeWidth: isSel ? 'var(--fem-edge-w-sel)' : 'var(--fem-edge-w)' }}
+                          />
+                          {/* 流光：仅金线（红色语义边不发光） */}
+                          {!isParBroken && !isForBrokenFinal && <EdgeShimmer d={pathD} w={1} />}
+                        </g>
                       ))}
                       {/* 条件标签：所有边都显示（包括回边），无白色背景框，用贝塞尔中点 */}
                       {e.cond && (
@@ -3026,7 +3241,7 @@ nodes={nodes}
                           fontSize={9.5}
                           fontWeight={700}
                           fill={col}
-                          fontFamily="JetBrains Mono, monospace"
+                          fontFamily="var(--fem-font-mono)"
                           style={{ pointerEvents: 'none' }}
                         >
                           {e.cond}
@@ -3041,7 +3256,7 @@ nodes={nodes}
                               cx={sp.x}
                               cy={sp.y}
                               r={4}
-                              fill="#3d5cf5"
+                              fill="var(--fem-primary)"
                               style={{ pointerEvents: 'none' }}
                             />
                           ) : null;
@@ -3058,7 +3273,7 @@ nodes={nodes}
                       <path
                         d={pathD}
                         fill="none"
-                        stroke="#3d5cf5"
+                        stroke="var(--fem-primary)"
                         strokeWidth={2}
                         strokeDasharray="6,3"
                         style={{ pointerEvents: 'none' }}
@@ -3200,14 +3415,14 @@ if (enrichedNode.type === 'par_out') {
                     <div
                       style={{
                         fontSize: 14,
-                        color: '#94a3b8',
+                        color: 'var(--fem-neutral)',
                         fontWeight: 600,
                       }}
                     >
                       从组件库添加 Action 到画布
                     </div>
                     <div
-                      style={{ fontSize: 11.5, color: '#c4d0e0', marginTop: 6 }}
+                      style={{ fontSize: 11.5, color: 'var(--fem-text-4-weak)', marginTop: 6 }}
                     >
                       点击节点端口连线 · 双击编辑 · Space+拖动平移画布 · Del
                       删除 · 拖拽组件到画布
@@ -3223,8 +3438,8 @@ if (enrichedNode.type === 'par_out') {
         <div
           style={{
             width: rightPanelWidth,
-            background: 'white',
-            borderLeft: '1px solid #e4ecf7',
+            background: 'var(--fem-panel-bg)',
+            borderLeft: 'var(--fem-border-w) solid var(--fem-border)',
             display: 'flex',
             flexDirection: 'column',
             flexShrink: 0,
@@ -3247,7 +3462,7 @@ if (enrichedNode.type === 'par_out') {
           <div
             style={{
               padding: '14px 16px',
-              borderBottom: '1px solid #e4ecf7',
+              borderBottom: 'var(--fem-border-w) solid var(--fem-border)',
               minHeight: 160,
             }}
           >
@@ -3255,7 +3470,7 @@ if (enrichedNode.type === 'par_out') {
               style={{
                 fontSize: 9.5,
                 fontWeight: 800,
-                color: '#9aaccb',
+                color: 'var(--fem-neutral)',
                 textTransform: 'uppercase',
                 letterSpacing: '0.1em',
                 marginBottom: 13,
@@ -3270,7 +3485,7 @@ if (enrichedNode.type === 'par_out') {
                   style={{
                     fontWeight: 700,
                     fontSize: 13,
-                    color: '#1b2540',
+                    color: 'var(--fem-text-1)',
                     marginBottom: 10,
                   }}
                 >
@@ -3283,7 +3498,7 @@ if (enrichedNode.type === 'par_out') {
                     {(selNode.specialType === 'FOR' || selNode.specialType === 'PAR') && (
                       <Field label="变化元素" hint={selNode.specialType === 'PAR' ? '并行遍历列表' : '列表全部循环一遍后走出口'}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                          <span style={{ fontSize: 12.5, color: '#5a6a8a', fontWeight: 600 }}>
+                          <span style={{ fontSize: 12.5, color: 'var(--fem-text-2)', fontWeight: 600 }}>
                             {selNode.specialType === 'PAR' ? 'par' : 'for'}
                           </span>
                           <input
@@ -3309,10 +3524,10 @@ if (enrichedNode.type === 'par_out') {
                         style={{
                           margin: '8px 0',
                           padding: '5px 8px',
-                          background: '#ecfdf5',
-                          borderRadius: 6,
+                          background: 'var(--fem-success-soft)',
+                          borderRadius: 'var(--fem-radius-sm)',
                           fontSize: 11,
-                          color: '#10b981',
+                          color: 'var(--fem-success-strong)',
                           fontWeight: 700,
                         }}
                       >
@@ -3324,10 +3539,10 @@ if (enrichedNode.type === 'par_out') {
                         style={{
                           margin: '8px 0',
                           padding: '5px 8px',
-                          background: '#fef2f2',
-                          borderRadius: 6,
+                          background: 'var(--fem-danger-soft)',
+                          borderRadius: 'var(--fem-radius-sm)',
                           fontSize: 11,
-                          color: '#ef4444',
+                          color: 'var(--fem-danger)',
                           fontWeight: 700,
                         }}
                       >
@@ -3342,10 +3557,10 @@ if (enrichedNode.type === 'par_out') {
                       style={{
                         margin: '8px 0',
                         padding: '5px 8px',
-                        background: '#f8fafc',
-                        borderRadius: 6,
+                        background: 'var(--fem-bg)',
+                        borderRadius: 'var(--fem-radius-sm)',
                         fontSize: 11,
-                        color: '#94a3b8',
+                        color: 'var(--fem-neutral)',
                         fontWeight: 700,
                       }}
                     >
@@ -3356,7 +3571,10 @@ if (enrichedNode.type === 'par_out') {
                   <>
                     {selNode.action ? (
                       <>
-                        <PR k="名称" v={selNode.action.name || '?'} />
+                        {selNode.label && (
+                          <PR k="节点名" v={selNode.label.replace(/[\[\]]/g, '')} />
+                        )}
+                        <PR k="Action 名" v={selNode.action.name || '?'} />
                         <PR
                           k="类型"
                           v={`@${selNode.action.executorType || 'ai'}`}
@@ -3427,14 +3645,14 @@ if (enrichedNode.type === 'par_out') {
                           selNode.type === 'special' &&
                           (selNode.specialType === 'START' ||
                             selNode.specialType === 'IN')
-                            ? '#c4d0e0'
-                            : '#ef4444',
+                            ? 'var(--fem-text-4-weak)'
+                            : 'var(--fem-danger)',
                         borderColor:
                           selNode.type === 'special' &&
                           (selNode.specialType === 'START' ||
                             selNode.specialType === 'IN')
-                            ? '#e4ecf7'
-                            : '#fecaca',
+                            ? 'var(--fem-border)'
+                            : 'var(--fem-danger-border)',
                       }}
                     >
                       删除
@@ -3451,10 +3669,10 @@ if (enrichedNode.type === 'par_out') {
                     style={{
                       margin: '8px 0',
                       padding: '5px 8px',
-                      background: '#fff0f0',
-                      borderRadius: 6,
+                      background: 'var(--fem-danger-soft)',
+                      borderRadius: 'var(--fem-radius-sm)',
                       fontSize: 11,
-                      color: '#ef4444',
+                      color: 'var(--fem-danger)',
                       fontWeight: 700,
                     }}
                   >
@@ -3471,10 +3689,10 @@ if (enrichedNode.type === 'par_out') {
                         style={{
                           margin: '8px 0',
                           padding: '5px 8px',
-                          background: '#fffbeb',
-                          borderRadius: 6,
+                          background: 'var(--fem-warning-soft)',
+                          borderRadius: 'var(--fem-radius-sm)',
                           fontSize: 11,
-                          color: '#f59e0b',
+                          color: 'var(--fem-warning)',
                           fontWeight: 700,
                         }}
                       >
@@ -3508,8 +3726,8 @@ if (enrichedNode.type === 'par_out') {
                   style={{
                     ...btnS,
                     width: '100%',
-                    color: '#ef4444',
-                    borderColor: '#fecaca',
+                    color: 'var(--fem-danger)',
+                    borderColor: 'var(--fem-danger-border)',
                     fontSize: 11.5,
                     padding: '5px 0',
                   }}
@@ -3530,7 +3748,7 @@ if (enrichedNode.type === 'par_out') {
                   item = lib.modules.find((m) => m.id === libSel.id);
                 }
                 if (!item)
-                  return <div style={{ color: '#c4d0e0' }}>未找到项</div>;
+                  return <div style={{ color: 'var(--fem-text-4-weak)' }}>未找到项</div>;
                 return (
                   <>
                     <div
@@ -3538,7 +3756,7 @@ if (enrichedNode.type === 'par_out') {
                         fontWeight: 700,
                         fontSize: 13,
                         marginBottom: 10,
-                        color: '#1b2540',
+                        color: 'var(--fem-text-1)',
                       }}
                     >
                       {libSel.type === 'module' ? `&${item.name}` : item.name}
@@ -3570,7 +3788,7 @@ if (enrichedNode.type === 'par_out') {
               })()
             ) : (
               <div
-                style={{ color: '#c4d0e0', fontSize: 11.5, lineHeight: 1.7 }}
+                style={{ color: 'var(--fem-text-4-weak)', fontSize: 11.5, lineHeight: 1.7 }}
               >
                 点击节点或连线查看属性
                 <br />
@@ -3583,10 +3801,10 @@ if (enrichedNode.type === 'par_out') {
       {plugin && savedPath === undefined && (
         <div style={{
           fontSize: 11,
-          color: '#b45309',
-          background: '#fef3c7',
-          border: '1px solid #fde68a',
-          borderRadius: 6,
+          color: 'var(--fem-warning-strong)',
+          background: 'var(--fem-warning-soft)',
+          border: 'var(--fem-border-w) solid var(--fem-warning-border)',
+          borderRadius: 'var(--fem-radius-sm)',
           padding: '4px 8px',
           marginBottom: 4,
           lineHeight: 1.4,
@@ -3601,7 +3819,7 @@ if (enrichedNode.type === 'par_out') {
         dirty={femDirty}
         onApply={handleApplyFem}
         onRestore={handleRestoreFem}
-        onGraphToFem={handleGraphToFem}
+        onGraphToFem={handleGraphToTextCommit}
       />
       </div> {/* 闭合右侧面板 */}
 
@@ -3663,6 +3881,38 @@ if (enrichedNode.type === 'par_out') {
         submitHumanInput={submitHumanInput}
       />
 
+
+      {/* 运行守卫弹窗：存在未落盘修改时，运行按钮被拦截，让用户选定稿版本 */}
+      {runGuard !== null && (
+        <div style={{ position: 'fixed', inset: 0, zIndex: 500, background: 'rgba(0,0,0,0.35)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          <div style={{
+            maxWidth: 430, width: 'calc(100% - 48px)', padding: '18px 20px', borderRadius: 12,
+            background: 'var(--fem-surface, #fff)', border: '1px solid var(--fem-border, #e0e0e0)',
+            boxShadow: '0 8px 28px rgba(0,0,0,0.22)', fontSize: 13, lineHeight: 1.6,
+          }}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>⚠️ 有未落盘修改</div>
+            <div style={{ color: 'var(--fem-text-secondary, #666)', marginBottom: 14 }}>
+              {runGuard.textDirty && runGuard.graphDirty
+                ? '文本和画布图都被修改过，且互相不统一。'
+                : runGuard.textDirty
+                  ? '文本被修改过，尚未应用到画布和 record。'
+                  : '画布图被修改过，尚未应用到文本和 record。'}
+              建议回去按对应的统一按钮（文本生图 / 图生文本）应用你要的版本；
+              也可以放弃这些修改，以最后保存的 record 为准直接运行。
+            </div>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setRunGuard(null)}
+                style={{ padding: '6px 12px', borderRadius: 8, border: '1px solid var(--fem-border, #ccc)', background: 'transparent', cursor: 'pointer' }}
+              >回去核查</button>
+              <button
+                onClick={discardChangesAndRun}
+                style={{ padding: '6px 12px', borderRadius: 8, border: '1px solid #d96b2b', background: '#d96b2b', color: '#fff', cursor: 'pointer' }}
+              >放弃修改，直接跑</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* SOUL modal: shared by plugin & standalone modes */}
       <SoulModal

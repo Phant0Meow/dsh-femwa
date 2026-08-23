@@ -351,6 +351,22 @@ def check_soul_id_exists(soul_id: str) -> bool:
     return row is not None
 
 
+def list_all_soul_ids() -> List[str]:
+    """列出全部 soul_id（编译期 soul 校验的可用列表用）"""
+    conn = _get_conn()
+    rows = conn.execute("SELECT soul_id FROM souls").fetchall()
+    conn.close()
+    return [str(r["soul_id"]) for r in rows]
+
+
+def list_souls() -> List[Dict[str, str]]:
+    """列出全部角色（精简：soul_id + soul_name；femwa-soul list 工具用）"""
+    conn = _get_conn()
+    rows = conn.execute("SELECT soul_id, soul_name FROM souls ORDER BY idx").fetchall()
+    conn.close()
+    return [{"soul_id": str(r["soul_id"]), "soul_name": str(r["soul_name"])} for r in rows]
+
+
 def check_user_id_exists(user_id: str) -> bool:
     """检查 user_id 是否已存在"""
     conn = _get_conn()

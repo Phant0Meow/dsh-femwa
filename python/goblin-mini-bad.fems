@@ -9,11 +9,11 @@ vars:
   count = 0
 
 actors:
-  ai @guildmaster = soul:1
-  ai @knight = soul:2
-  ai @mage = soul:3
-  ai @rogue = soul:4
-  human @player = soul:9, source:0
+  ai @guildmaster = soul:the1stlittlesoul
+  ai @knight = soul:littlecat
+  ai @mage = soul:AI助手
+  ai @rogue = soul:Portia
+  human @player = soul:human, source:0
 
 action noop @assign:
   out:

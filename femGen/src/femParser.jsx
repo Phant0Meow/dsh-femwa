@@ -311,6 +311,46 @@ function validateDeclarations(result) {
         }
       }
     }
+
+    // 3) 回流检测：回到「多条无条件出边」的节点会导致分支数爆炸——
+    //    每次回到这里往下运行都会从一变成多分支。条件出边（if 分流）
+    //    回流是安全的（只走为真的分支），不检测；for/par/fork/join 网关
+    //    的多出边是迭代/并发语义，跳过；重复边去重（par 出口链可能重复）。
+    const seenEdges = new Set();
+    const uniqEdges = (edges || []).filter((e) => {
+      const key = `${e.srcLabel}\u0000${e.tgtLabel}\u0000${e.cond || ''}`;
+      if (seenEdges.has(key)) return false;
+      seenEdges.add(key);
+      return true;
+    });
+    const hasIn = new Set(
+      uniqEdges
+        .filter((e) => e.srcLabel !== '[START]' && e.srcLabel !== '[IN]')
+        .map((e) => e.tgtLabel)
+    );
+    const gatewayNames = new Set(
+      (nodeDecls || [])
+        .filter((d) => d.specialType === 'FOR' || d.specialType === 'PAR' || d.specialType === 'FORK' || d.specialType === 'JOIN')
+        .map((d) => d.label)
+    );
+    const unconditionalOuts = new Map();
+    for (const e of uniqEdges) {
+      if (!e.cond) {
+        const list = unconditionalOuts.get(e.srcLabel) || [];
+        list.push(e.tgtLabel);
+        unconditionalOuts.set(e.srcLabel, list);
+      }
+    }
+    for (const [src, tgts] of unconditionalOuts) {
+      if (gatewayNames.has(src)) continue;
+      if (tgts.length >= 2 && hasIn.has(src)) {
+        throw new Error(
+          `${ctxName}: 节点 [${src}] 有多个出边，不能回到这种节点。` +
+          `原因是，每次回到这里往下运行都会从一变成多分支，分支数会爆炸。` +
+          `建议在本节点之后的分支中加空节点，让他们回到空节点。`
+        );
+      }
+    }
   }
 
   validateFlow(result.mainflow.nodeDecls, result.mainflow.edges, 'mainflow', null);
@@ -562,11 +602,20 @@ function parseActorsBlock(cls) {
     const prefixMatch = line.match(
       /^(ai|human)\s+(@?[\w\u4e00-\u9fff]+)\s*=\s*(.*)$/
     );
+    // 裸 actor：`ai|human @名`（无 `=`、无属性）→ soul/source 缺省。
+    // 与 Python 编译器 FEM_parser.py eval_actors 的裸 actor 分支对齐（soul 非必须，
+    // 无 soul 角色 = 无角色设定的裸执行者）。
+    const bareMatch = !prefixMatch ? line.match(/^(ai|human)\s+(@?[\w\u4e00-\u9fff]+)\s*$/) : null;
+    if (bareMatch) {
+      actors.push({ type: bareMatch[1], name: bareMatch[2], soul: '', source: '', tools: [] });
+      i++;
+      continue;
+    }
     if (!prefixMatch)
       throw new Error(
         `第 ${cl.lineNum + 1} 行: actors 格式错误: "${
           cl.text
-        }"。期望: ai|human @name = soul:X, source:Y, tools:[...]`
+        }"。期望: ai|human @name = soul:X, source:Y, tools:[...]，或裸写法 ai|human @name`
       );
     const type = prefixMatch[1];
     const name = prefixMatch[2];
@@ -613,8 +662,9 @@ function parseActorsBlock(cls) {
       }
     }
 
-    // 最后赋予默认值（不兜底修改原值）
-    if (soul === null) soul = '0';    // ai 默认 soul=1，但此处统一默认 0，实际逻辑按需调整
+    // 最后赋予默认值（不兜底修改原值）。soul 缺省 = 空串（裸 actor 语义：
+    // soul 非必须，序列化时对空 soul 保持沉默，绝不伪造数字 soul）。
+    if (soul === null) soul = '';
     if (source === null) source = '';
     if (tools === null) tools = [];
 
@@ -1167,8 +1217,8 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
         return `[${label}]`;
       }
 
-      // 纯标识符（如 tally, nextDay）→ 转成 [label]
-      if (/^[a-zA-Z_]\w*$/.test(s)) {
+      // 纯标识符（如 tally, nextDay；含中文节点名如 随机等一会儿）→ 转成 [label]
+      if (/^[\p{L}_][\p{L}\p{N}_]*$/u.test(s)) {
         const label = ensureNodeForRef(s);
         return `[${label}]`;
       }
@@ -1410,7 +1460,8 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
         if (!srcLine.endsWith('->')) {
           throw new Error(`第 ${flowLines[i].lineNum + 1} 行: join 内部每行必须以 -> 结尾。当前行: "${rawLine}"`);
         }
-        const sm = srcLine.match(/^\[(.+?)\]\s*->$/);
+        // label 禁止跨括号（防回溯把多段链式吞进单个节点名）
+        const sm = srcLine.match(/^\[([^\[\]]+?)\]\s*->$/);
         if (sm) {
           sources.push(sm[1]);
         } else {
@@ -1653,7 +1704,9 @@ console.log(`[DEBUG] resolveTarget: src="${srcLabel}", target="${targetRaw}", co
 
     // ⚠️ 重要：先匹配链式连接（[label] -> ...），再匹配节点声明（[label]: ...）
     // [label]:ref -> ... 链式（如 [AI_ATK]:ai_attack -> [AI_DONE]）
-    const dmChain = text.match(/^\[(.+?)\]:\s*(\S+)\s*->\s*(.+)$/);
+    // label 用 [^\[\]] 防回溯跨箭头：否则 `[START] -> [x]:a -> [END]` 会被
+    // 误判成声明行，把 "START] -> [x" 当成节点名（2026-08-22 flow 链式 bug 根因）。
+    const dmChain = text.match(/^\[([^\[\]]+?)\]:\s*(\S+)\s*->\s*(.+)$/);
     if (dmChain) {
       const label = dmChain[1];
       const ref = dmChain[2].trim();

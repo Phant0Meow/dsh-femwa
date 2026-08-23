@@ -50,7 +50,7 @@ function SoulModal({ open, onClose, onCreated, createUrl = '/api/souls/create' }
         position: 'fixed',
         inset: 0,
         zIndex: 3000,
-        background: 'rgba(0,0,0,0.35)',
+        background: 'var(--fem-mask-soft)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -58,24 +58,24 @@ function SoulModal({ open, onClose, onCreated, createUrl = '/api/souls/create' }
     >
       <div
         style={{
-          background: 'white',
-          borderRadius: 14,
+          background: 'var(--fem-surface)',
+          borderRadius: 'var(--fem-radius-xl)',
           padding: '28px 32px',
           width: 420,
           maxWidth: '92vw',
           maxHeight: '90vh',
           overflowY: 'auto',
-          boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+          boxShadow: '0 8px 32px var(--fem-shadow-md)',
         }}
       >
-        <div style={{ fontSize: 17, fontWeight: 700, color: '#1b2540', marginBottom: 18 }}>
+        <div style={{ fontSize: 17, fontWeight: 700, color: 'var(--fem-text-1)', marginBottom: 18 }}>
           🆔 新建 SOUL ID
         </div>
 
         {/* soul_id */}
         <div style={{ marginBottom: 13 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: '#3d5cf5', marginBottom: 4 }}>
-            Soul ID <span style={{ color: '#ef4444' }}>*</span>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--fem-primary)', marginBottom: 4 }}>
+            Soul ID <span style={{ color: 'var(--fem-danger)' }}>*</span>
           </div>
           <input
             value={soulForm.soul_id}
@@ -88,7 +88,7 @@ function SoulModal({ open, onClose, onCreated, createUrl = '/api/souls/create' }
 
         {/* soul_name */}
         <div style={{ marginBottom: 13 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: '#3d5cf5', marginBottom: 4 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--fem-primary)', marginBottom: 4 }}>
             Soul Name
           </div>
           <input
@@ -101,7 +101,7 @@ function SoulModal({ open, onClose, onCreated, createUrl = '/api/souls/create' }
 
         {/* description */}
         <div style={{ marginBottom: 13 }}>
-          <div style={{ fontSize: 12, fontWeight: 600, color: '#3d5cf5', marginBottom: 4 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--fem-primary)', marginBottom: 4 }}>
             Description
           </div>
           <textarea
@@ -117,13 +117,13 @@ function SoulModal({ open, onClose, onCreated, createUrl = '/api/souls/create' }
         {soulFormError && (
           <div
             style={{
-              background: '#fef2f2',
-              color: '#991b1b',
+              background: 'var(--fem-danger-soft)',
+              color: 'var(--fem-danger-strong)',
               padding: '8px 12px',
-              borderRadius: 7,
+              borderRadius: 'var(--fem-radius-md)',
               fontSize: 12,
               marginBottom: 12,
-              border: '1px solid #fecaca',
+              border: 'var(--fem-border-w) solid var(--fem-danger-border)',
             }}
           >
             {soulFormError}
@@ -146,7 +146,7 @@ function SoulModal({ open, onClose, onCreated, createUrl = '/api/souls/create' }
             disabled={soulFormSubmitting}
             style={{
               ...btnP,
-              background: '#3d5cf5',
+              background: 'var(--fem-primary)',
               opacity: soulFormSubmitting ? 0.6 : 1,
               cursor: soulFormSubmitting ? 'not-allowed' : 'pointer',
             }}

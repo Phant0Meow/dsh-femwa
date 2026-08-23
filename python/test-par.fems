@@ -7,9 +7,9 @@ vars:
   count = 0
 
 actors:
-  ai @w1 = soul:3
-  ai @w2 = soul:4
-  ai @w3 = soul:5
+  ai @w1 = soul:AI助手
+  ai @w2 = soul:Portia
+  ai @w3 = soul:debugmanager
 
 action work @assign:
   out:

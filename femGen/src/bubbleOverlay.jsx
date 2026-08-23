@@ -14,7 +14,7 @@ function BubbleSection({ title, content, streaming }) {
           style={{
             fontSize: 11,
             fontWeight: 700,
-            color: '#7a8aaa',
+            color: 'var(--fem-text-3)',
             marginBottom: 4,
           }}
         >
@@ -24,7 +24,7 @@ function BubbleSection({ title, content, streaming }) {
       <div
         style={{
           fontSize: 12.5,
-          color: '#1b2540',
+          color: 'var(--fem-text-1)',
           whiteSpace: 'pre-wrap',
           lineHeight: 1.6,
           maxHeight: streaming ? 'none' : 'auto',
@@ -100,7 +100,7 @@ function HumanInputSection({ nodeId, onSubmit, outVars, inputError }) {
         style={{
           fontSize: 11,
           fontWeight: 700,
-          color: '#f59e0b',
+          color: 'var(--fem-warning)',
           marginBottom: 4,
         }}
       >
@@ -110,10 +110,10 @@ function HumanInputSection({ nodeId, onSubmit, outVars, inputError }) {
         <div
           style={{
             fontSize: 11,
-            color: '#dc2626',
-            background: '#fef2f2',
-            border: '1px solid #fecaca',
-            borderRadius: 6,
+            color: 'var(--fem-danger-strong)',
+            background: 'var(--fem-danger-soft)',
+            border: 'var(--fem-border-w) solid var(--fem-danger-border)',
+            borderRadius: 'var(--fem-radius-sm)',
             padding: '6px 8px',
             marginBottom: 6,
             whiteSpace: 'pre-wrap',
@@ -127,8 +127,8 @@ function HumanInputSection({ nodeId, onSubmit, outVars, inputError }) {
         onDragLeave={() => setDragOver(false)}
         onDrop={handleDrop}
         style={{
-          border: dragOver ? '2px dashed #f59e0b' : '2px solid transparent',
-          borderRadius: 8,
+          border: dragOver ? 'var(--fem-border-w-selected) dashed var(--fem-warning)' : 'var(--fem-border-w-selected) solid transparent',
+          borderRadius: 'var(--fem-radius-md)',
           transition: 'border 0.15s',
         }}
       >
@@ -177,8 +177,8 @@ function HumanInputSection({ nodeId, onSubmit, outVars, inputError }) {
               style={{
                 fontSize: 11,
                 fontWeight: 700,
-                color: '#7a8aaa',
-                fontFamily: 'JetBrains Mono, monospace',
+                color: 'var(--fem-text-3)',
+                fontFamily: 'var(--fem-font-mono)',
                 whiteSpace: 'nowrap',
               }}
             >
@@ -223,7 +223,7 @@ function BubbleOverlay({ bubbleOverlay, nodes, nodeStates, actionStore, onClose,
   const isAI = runType === 'ai';
   const isHuman = runType === 'human';
   const isStreaming = ns.status === 'ai_streaming';
-  const c = ti(action?.executorType)?.c || '#94a3b8';
+  const c = ti(action?.executorType)?.c || 'var(--fem-neutral)';
   const scrollRef = useRef(null);
   const userScrolledUpRef = useRef(false);
 
@@ -256,7 +256,7 @@ function BubbleOverlay({ bubbleOverlay, nodes, nodeStates, actionStore, onClose,
         style={{
           position: 'fixed',
           inset: 0,
-          background: 'rgba(0,0,0,0.3)',
+          background: 'var(--fem-mask-soft)',
           zIndex: 2999,
         }}
       />
@@ -268,11 +268,11 @@ function BubbleOverlay({ bubbleOverlay, nodes, nodeStates, actionStore, onClose,
           transform: 'translate(-50%, -50%)',
           width: Math.min(window.innerWidth * 0.6, 640),
           maxHeight: '80vh',
-          background: 'white',
-          borderRadius: 16,
-          boxShadow: '0 24px 64px rgba(0,0,0,0.25)',
-          border: `2px solid ${c}`,
-          fontFamily: 'DM Sans, sans-serif',
+          background: 'var(--fem-surface)',
+          borderRadius: 'var(--fem-radius-xl)',
+          boxShadow: '0 24px 64px var(--fem-shadow-lg)',
+          border: `var(--fem-border-w-selected) solid ${c}`,
+          fontFamily: 'var(--fem-font-sans)',
           zIndex: 3000,
           display: 'flex',
           flexDirection: 'column',
@@ -286,7 +286,7 @@ function BubbleOverlay({ bubbleOverlay, nodes, nodeStates, actionStore, onClose,
             justifyContent: 'space-between',
             alignItems: 'center',
             padding: '16px 20px',
-            borderBottom: '1px solid #edf0f8',
+            borderBottom: 'var(--fem-border-w) solid var(--fem-border)',
             flexShrink: 0,
           }}
         >
@@ -295,16 +295,16 @@ function BubbleOverlay({ bubbleOverlay, nodes, nodeStates, actionStore, onClose,
               style={{
                 background: c + '18',
                 color: c,
-                borderRadius: 6,
+                borderRadius: 'var(--fem-radius-sm)',
                 padding: '2px 8px',
                 fontSize: 11,
                 fontWeight: 700,
-                fontFamily: 'JetBrains Mono, monospace',
+                fontFamily: 'var(--fem-font-mono)',
               }}
             >
               @{action?.executorType || '?'}
             </span>
-            <span style={{ fontWeight: 800, color: '#1b2540', fontSize: 16 }}>
+            <span style={{ fontWeight: 800, color: 'var(--fem-text-1)', fontSize: 16 }}>
               {action?.name || 'Node'}
             </span>
           </div>
@@ -314,12 +314,12 @@ function BubbleOverlay({ bubbleOverlay, nodes, nodeStates, actionStore, onClose,
               onClose();
             }}
             style={{
-              background: '#f1f5f9',
+              background: 'var(--fem-bg-2)',
               border: 'none',
               fontSize: 16,
               cursor: 'pointer',
-              color: '#64748b',
-              borderRadius: 8,
+              color: 'var(--fem-text-2-alt)',
+              borderRadius: 'var(--fem-radius-md)',
               width: 32,
               height: 32,
               display: 'flex',
@@ -327,8 +327,8 @@ function BubbleOverlay({ bubbleOverlay, nodes, nodeStates, actionStore, onClose,
               justifyContent: 'center',
               transition: 'background 0.15s',
             }}
-            onMouseEnter={(e) => (e.target.style.background = '#e2e8f0')}
-            onMouseLeave={(e) => (e.target.style.background = '#f1f5f9')}
+            onMouseEnter={(e) => (e.target.style.background = 'var(--fem-bg-hover)')}
+            onMouseLeave={(e) => (e.target.style.background = 'var(--fem-bg-2)')}
           >
             ✕
           </button>
@@ -344,7 +344,7 @@ function BubbleOverlay({ bubbleOverlay, nodes, nodeStates, actionStore, onClose,
             padding: '16px 20px',
             lineHeight: 1.6,
             fontSize: 13,
-            color: '#1b2540',
+            color: 'var(--fem-text-1)',
           }}
         >
           {/* 上下文 */}
@@ -356,22 +356,22 @@ function BubbleOverlay({ bubbleOverlay, nodes, nodeStates, actionStore, onClose,
 
           {/* 节点提示（showprompt）—— 仅当存在时显示 */}
           {ns.showprompt && (
-            <div style={{ marginBottom: 12, background: '#f8fafc', padding: '8px 12px', borderRadius: 8 }}>
-              <div style={{ fontWeight: 700, color: '#7a8aaa', marginBottom: 4 }}>[节点提示]</div>
+            <div style={{ marginBottom: 12, background: 'var(--fem-bg)', padding: '8px 12px', borderRadius: 'var(--fem-radius-md)' }}>
+              <div style={{ fontWeight: 700, color: 'var(--fem-text-3)', marginBottom: 4 }}>[节点提示]</div>
               <div style={{ whiteSpace: 'pre-wrap' }}>{ns.showprompt}</div>
             </div>
           )}
 
           {/* 人类 prompt（独立显示，与 showprompt 分开） */}
           {isHuman && ns.prompt && !ns.showprompt && (
-            <div style={{ marginBottom: 12, background: '#f8fafc', padding: '8px 12px', borderRadius: 8 }}>
-              <div style={{ fontWeight: 700, color: '#7a8aaa', marginBottom: 4 }}>[提示]</div>
+            <div style={{ marginBottom: 12, background: 'var(--fem-bg)', padding: '8px 12px', borderRadius: 'var(--fem-radius-md)' }}>
+              <div style={{ fontWeight: 700, color: 'var(--fem-text-3)', marginBottom: 4 }}>[提示]</div>
               <div style={{ whiteSpace: 'pre-wrap' }}>{ns.prompt}</div>
             </div>
           )}
           {isHuman && ns.prompt && ns.showprompt && (
-            <div style={{ marginBottom: 12, background: '#f8fafc', padding: '8px 12px', borderRadius: 8 }}>
-              <div style={{ fontWeight: 700, color: '#7a8aaa', marginBottom: 4 }}>[补充说明]</div>
+            <div style={{ marginBottom: 12, background: 'var(--fem-bg)', padding: '8px 12px', borderRadius: 'var(--fem-radius-md)' }}>
+              <div style={{ fontWeight: 700, color: 'var(--fem-text-3)', marginBottom: 4 }}>[补充说明]</div>
               <div style={{ whiteSpace: 'pre-wrap' }}>{ns.prompt}</div>
             </div>
           )}
@@ -402,7 +402,7 @@ function BubbleOverlay({ bubbleOverlay, nodes, nodeStates, actionStore, onClose,
             style={{
               flexShrink: 0,
               padding: '12px 20px 20px',
-              borderTop: '1px solid #edf0f8',
+              borderTop: 'var(--fem-border-w) solid var(--fem-border)',
             }}
           >
             <HumanInputSection

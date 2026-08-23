@@ -20,10 +20,25 @@ function LibPanel({
   onDragStart,
   onSelectLib,
   onNewModule,
-  onLibTouchStart = null,
-  onLibTouchMove = null,
-  onLibTouchEnd = null,
+  // round49：手机端触摸改为面板级统一监听（mobileView.jsx），卡片只挂 data-fem-lib-drag 标记
+  // 供面板 touchstart 用 closest() 找"拖哪个"——落点不再参与手势裁决，卡片自身零触摸监听。
+  armedKey = null, // round27：手机端长按激活抓起态（"type:id"）；桌面端不传=null 永不命中
+  htmlDraggable = true, // round45：手机端传 false——draggable 卡片在触摸设备上会阻止原生滚动
 }) {
+  // round27：长按激活抓起态——被抓住的卡片亮主色边框+混底+微放大+光晕，平滑亮起/回落
+  const grabTransition =
+    'transform 0.15s cubic-bezier(0.34,1.56,0.64,1), border-color 0.15s, background-color 0.15s, box-shadow 0.15s';
+  const isGrabbed = (type, item) =>
+    armedKey === `${type}:${typeof item === 'string' ? item : item?.id}`;
+  const grabStyle = (grabbed) =>
+    grabbed
+      ? {
+          border: 'var(--fem-node-border-w) solid var(--fem-primary)',
+          background: 'var(--fem-primary-soft-faint)',
+          transform: 'scale(1.04)',
+          boxShadow: '0 6px 18px var(--fem-primary-glow-strong)',
+        }
+      : {};
   const displayActions = (lib.actions || []).filter((a) => {
     if (!a.path) return false;
     if (a.path.length === 1 && a.path[0] === 'mainflow') return true;
@@ -38,15 +53,15 @@ function LibPanel({
   const specialNodes =
     mode === 'mainflow'
       ? [
-          { t: 'FOR', lbl: 'FOR', c: '#4f6ef7', bg: '#eef1ff' },
-          { t: 'PAR', lbl: 'PAR', c: '#7e22ce', bg: '#f3e8ff' },
-          { t: 'END', lbl: 'END', c: '#ef4444', bg: '#fef2f2' },
+          { t: 'FOR', lbl: 'FOR', c: 'var(--fem-primary-strong)', bg: 'var(--fem-primary-soft)' },
+          { t: 'PAR', lbl: 'PAR', c: 'var(--fem-special-par)', bg: 'var(--fem-special-par-bg)' },
+          { t: 'END', lbl: 'END', c: 'var(--fem-danger)', bg: 'var(--fem-danger-soft)' },
         ]
       : [
-          { t: 'FOR', lbl: 'FOR', c: '#4f6ef7', bg: '#eef1ff' },
-          { t: 'PAR', lbl: 'PAR', c: '#7e22ce', bg: '#f3e8ff' },
-          { t: 'BREAK', lbl: 'BREAK', c: '#f59e0b', bg: '#fffbeb' },
-          { t: 'OUT', lbl: 'OUT', c: '#ef4444', bg: '#fef2f2' },
+          { t: 'FOR', lbl: 'FOR', c: 'var(--fem-primary-strong)', bg: 'var(--fem-primary-soft)' },
+          { t: 'PAR', lbl: 'PAR', c: 'var(--fem-special-par)', bg: 'var(--fem-special-par-bg)' },
+          { t: 'BREAK', lbl: 'BREAK', c: 'var(--fem-warning)', bg: 'var(--fem-warning-soft)' },
+          { t: 'OUT', lbl: 'OUT', c: 'var(--fem-danger)', bg: 'var(--fem-danger-soft)' },
         ];
 
   return (
@@ -64,7 +79,7 @@ function LibPanel({
           style={{
             fontSize: 10,
             fontWeight: 800,
-            color: '#9aaccb',
+            color: 'var(--fem-neutral)',
             textTransform: 'uppercase',
             letterSpacing: '0.09em',
           }}
@@ -76,10 +91,10 @@ function LibPanel({
           style={{
             padding: '4px 11px',
             fontSize: 11,
-            background: '#3d5cf5',
-            color: 'white',
+            background: 'var(--fem-btn-primary)',
+            color: 'var(--fem-on-accent)',
             border: 'none',
-            borderRadius: 7,
+            borderRadius: 'var(--fem-radius-md)',
             cursor: 'pointer',
             fontWeight: 700,
           }}
@@ -89,7 +104,7 @@ function LibPanel({
       </div>
       {displayActions.length === 0 ? (
         <div
-          style={{ textAlign: 'center', padding: '18px 0', color: '#c4d0e0' }}
+          style={{ textAlign: 'center', padding: '18px 0', color: 'var(--fem-text-4-weak)' }}
         >
           <div style={{ fontSize: 22, marginBottom: 6, opacity: 0.5 }}>*</div>
           <div style={{ fontSize: 11.5 }}>
@@ -98,107 +113,121 @@ function LibPanel({
         </div>
       ) : (
         displayActions.map((a) => {
-          const { c, bg } = ti(a.executorType);
+          const { c } = ti(a.executorType);
+          const bk = ['ai', 'human', 'mind', 'func', 'assign'].includes(a.executorType) ? a.executorType : 'ai';
           return (
             <div
               key={a.id}
-              draggable
+              draggable={htmlDraggable}
               onDragStart={(e) => onDragStart(e, 'action', a.id)}
               onClick={() => onSelectLib && onSelectLib('action', a.id)}
               onDoubleClick={() => onEdit && onEdit(a)}
-              onTouchStart={onLibTouchStart ? (e) => onLibTouchStart(e, 'action', a) : undefined}
-              onTouchMove={onLibTouchMove || undefined}
-              onTouchEnd={onLibTouchEnd || undefined}
+              data-fem-lib-drag={`action:${a.id}`}
               style={{
-                background: bg,
-                borderRadius: 8,
-                border: `1.5px solid ${c}18`,
-                borderLeft: `3px solid ${c}`,
-                padding: '9px 11px',
+                background: 'var(--fem-node-bg)',
+                borderRadius: 'var(--fem-radius-md)',
+                border: `var(--fem-node-border-w) solid var(--fem-node-border)`,
+                padding: '8px 10px',
                 marginBottom: 7,
                 cursor: 'grab',
+                ...grabStyle(isGrabbed('action', a)),
+                transition: grabTransition,
               }}
             >
+              {/* 行1：类型芯片 + 名称 + 编辑（与画布节点行1同构） */}
               <div
                 style={{
                   display: 'flex',
-                  justifyContent: 'space-between',
                   alignItems: 'center',
+                  gap: 6,
                   marginBottom: 4,
+                  minWidth: 0,
                 }}
               >
+                <span
+                  style={{
+                    background: `var(--fem-badge-bg-${bk})`,
+                    color: `var(--fem-badge-fg-${bk})`,
+                    borderRadius: 'var(--fem-radius-xs)',
+                    padding: '1px 5px',
+                    fontSize: 8.5,
+                    fontWeight: 800,
+                    letterSpacing: '0.04em',
+                    fontFamily: 'var(--fem-font-mono)',
+                    lineHeight: 1.4,
+                    flexShrink: 0,
+                  }}
+                >
+                  {a.executorType || 'ai'}
+                </span>
                 <span
                   style={{
                     fontSize: 12.5,
                     fontWeight: 700,
-                    color: '#1b2540',
+                    color: 'var(--fem-text-1)',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
                     whiteSpace: 'nowrap',
-                    maxWidth: 110,
+                    flex: 1,
+                    minWidth: 0,
                   }}
                 >
                   {a.name}
                 </span>
-                <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onEdit(a);
-                    }}
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      cursor: 'pointer',
-                      fontSize: 13,
-                      color: '#9aaccb',
-                      padding: '1px 3px',
-                    }}
-                  >
-                    E
-                  </button>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onAdd(a);
-                    }}
-                    style={{
-                      padding: '2px 9px',
-                      fontSize: 10,
-                      background: c,
-                      color: 'white',
-                      border: 'none',
-                      borderRadius: 7,
-                      cursor: 'pointer',
-                      fontWeight: 700,
-                    }}
-                  >
-                    + 画布
-                  </button>
-                </div>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onEdit(a);
+                  }}
+                  style={{
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                    fontSize: 13,
+                    color: 'var(--fem-neutral)',
+                    padding: '1px 3px',
+                    flexShrink: 0,
+                  }}
+                >
+                  E
+                </button>
               </div>
-              <span
-                style={{
-                  fontSize: 10.5,
-                  fontFamily: 'JetBrains Mono, monospace',
-                  fontWeight: 700,
-                  color: c,
-                }}
-              >
-                @{a.executorType}
-              </span>
-              {a.executorActor && (
+              {/* 行2：执行者 + 添加按钮 */}
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
                 <span
                   style={{
                     fontSize: 10,
-                    color: '#94a3b8',
-                    marginLeft: 5,
-                    fontFamily: 'JetBrains Mono, monospace',
+                    color: 'var(--fem-neutral)',
+                    fontFamily: 'var(--fem-font-mono)',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                    minWidth: 0,
                   }}
                 >
-                  {a.executorActor}
+                  {a.executorActor || ''}
                 </span>
-              )}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onAdd(a);
+                  }}
+                  style={{
+                    padding: '2px 9px',
+                    fontSize: 10,
+                    background: 'var(--fem-btn-primary)',
+                    color: 'var(--fem-on-accent)',
+                    border: 'none',
+                    borderRadius: 'var(--fem-radius-md)',
+                    cursor: 'pointer',
+                    fontWeight: 700,
+                    flexShrink: 0,
+                    fontFamily: 'var(--fem-font-sans)',
+                  }}
+                >
+                  + 画布
+                </button>
+              </div>
             </div>
           );
         })
@@ -209,7 +238,7 @@ function LibPanel({
           style={{
             fontSize: 10,
             fontWeight: 800,
-            color: '#9aaccb',
+            color: 'var(--fem-neutral)',
             textTransform: 'uppercase',
             letterSpacing: '0.09em',
             marginBottom: 6,
@@ -223,13 +252,13 @@ function LibPanel({
             style={{
               width: '100%',
               padding: '5px 8px',
-              borderRadius: 7,
-              border: '1.5px solid #dde4ef',
+              borderRadius: 'var(--fem-radius-md)',
+              border: 'var(--fem-border-w-strong) solid var(--fem-border-strong)',
               fontSize: 11.5,
-              color: '#1b2540',
-              background: '#f8fafc',
+              color: 'var(--fem-text-1)',
+              background: 'var(--fem-bg)',
               outline: 'none',
-              fontFamily: 'DM Sans, sans-serif',
+              fontFamily: 'var(--fem-font-sans)',
               transition: 'border-color 0.15s, box-shadow 0.15s',
               flex: 1,
             }}
@@ -246,10 +275,10 @@ if (name && (!allNames || !allNames.has || !allNames.has(name))) {
             style={{
               padding: '4px 10px',
               fontSize: 11,
-              background: '#475569',
-              color: 'white',
+              background: 'var(--fem-btn-primary)',
+              color: 'var(--fem-on-accent)',
               border: 'none',
-              borderRadius: 7,
+              borderRadius: 'var(--fem-radius-md)',
               cursor: 'pointer',
               fontWeight: 700,
             }}
@@ -267,7 +296,7 @@ if (name && (!allNames || !allNames.has || !allNames.has(name))) {
               marginBottom: 11,
               fontSize: 10,
               fontWeight: 800,
-              color: '#9aaccb',
+              color: 'var(--fem-neutral)',
               textTransform: 'uppercase',
               letterSpacing: '0.09em',
             }}
@@ -277,21 +306,20 @@ if (name && (!allNames || !allNames.has || !allNames.has(name))) {
           {displayModules.map((m) => (
             <div
               key={m.id}
-              draggable
+              draggable={htmlDraggable}
               onDragStart={(e) => onDragStart(e, 'module', m.id)}
               onClick={() => onSelectLib && onSelectLib('module', m.id)}
               onDoubleClick={() => onEditModule && onEditModule(m)}
-              onTouchStart={onLibTouchStart ? (e) => onLibTouchStart(e, 'module', m) : undefined}
-              onTouchMove={onLibTouchMove || undefined}
-              onTouchEnd={onLibTouchEnd || undefined}
+              data-fem-lib-drag={`module:${m.id}`}
               style={{
-                background: '#f1f5f9',
-                borderRadius: 8,
-                border: '1.5px solid #47556918',
-                borderLeft: '3px solid #475569',
+                background: 'var(--fem-node-bg)',
+                borderRadius: 'var(--fem-radius-md)',
+                border: `var(--fem-node-border-w) solid var(--fem-node-border)`,
                 padding: '9px 11px',
                 marginBottom: 7,
                 cursor: 'grab',
+                ...grabStyle(isGrabbed('module', m)),
+                transition: grabTransition,
               }}
             >
               <div
@@ -302,7 +330,7 @@ if (name && (!allNames || !allNames.has || !allNames.has(name))) {
                 }}
               >
                 <span
-                  style={{ fontSize: 12.5, fontWeight: 700, color: '#1b2540' }}
+                  style={{ fontSize: 12.5, fontWeight: 700, color: 'var(--fem-text-1)' }}
                 >
                   &{m.name}
                 </span>
@@ -318,7 +346,7 @@ if (name && (!allNames || !allNames.has || !allNames.has(name))) {
                       cursor: 'pointer',
                       fontSize: 12,
                       fontWeight: 600,
-                      color: '#475569',
+                      color: 'var(--fem-neutral)',
                       padding: '2px 6px',
                     }}
                   >
@@ -332,10 +360,10 @@ if (name && (!allNames || !allNames.has || !allNames.has(name))) {
                     style={{
                       padding: '2px 9px',
                       fontSize: 10,
-                      background: '#475569',
-                      color: 'white',
+                      background: 'var(--fem-btn-primary)',
+                      color: 'var(--fem-on-accent)',
                       border: 'none',
-                      borderRadius: 7,
+                      borderRadius: 'var(--fem-radius-md)',
                       cursor: 'pointer',
                       fontWeight: 700,
                     }}
@@ -355,7 +383,7 @@ if (name && (!allNames || !allNames.has || !allNames.has(name))) {
           marginBottom: 11,
           fontSize: 10,
           fontWeight: 800,
-          color: '#9aaccb',
+          color: 'var(--fem-neutral)',
           textTransform: 'uppercase',
           letterSpacing: '0.09em',
         }}
@@ -365,19 +393,18 @@ if (name && (!allNames || !allNames.has || !allNames.has(name))) {
 {specialNodes.map((s) => (
           <div
             key={s.t}
-            draggable
+            draggable={htmlDraggable}
             onDragStart={(e) => onDragStart(e, 'special', s.t)}
-onTouchStart={onLibTouchStart ? (e) => onLibTouchStart(e, 'special', s.t) : undefined}
-            onTouchMove={onLibTouchMove || undefined}
-            onTouchEnd={onLibTouchEnd || undefined}
+            data-fem-lib-drag={`special:${s.t}`}
             style={{
-            background: s.bg,
-            borderRadius: 8,
-            border: `1.5px solid ${s.c}28`,
-            borderLeft: `3px solid ${s.c}`,
+            background: 'var(--fem-node-bg)',
+            borderRadius: 'var(--fem-radius-md)',
+            border: `var(--fem-node-border-w) solid color-mix(in srgb, ${s.c} 50%, var(--fem-node-bg))`,
             padding: '9px 11px',
             marginBottom: 7,
             cursor: 'grab',
+            ...grabStyle(isGrabbed('special', s.t)),
+            transition: grabTransition,
           }}
         >
           <div
@@ -391,8 +418,8 @@ onTouchStart={onLibTouchStart ? (e) => onLibTouchStart(e, 'special', s.t) : unde
               style={{
                 fontSize: 12.5,
                 fontWeight: 700,
-                color: '#1b2540',
-                fontFamily: 'JetBrains Mono, monospace',
+                color: 'var(--fem-text-1)',
+                fontFamily: 'var(--fem-font-mono)',
               }}
             >
               [{s.lbl}]
@@ -402,10 +429,10 @@ onTouchStart={onLibTouchStart ? (e) => onLibTouchStart(e, 'special', s.t) : unde
               style={{
                 padding: '2px 9px',
                 fontSize: 10,
-                background: s.c,
-                color: 'white',
+                background: 'var(--fem-btn-primary)',
+                color: 'var(--fem-on-accent)',
                 border: 'none',
-                borderRadius: 7,
+                borderRadius: 'var(--fem-radius-md)',
                 cursor: 'pointer',
                 fontWeight: 700,
               }}
@@ -417,19 +444,18 @@ onTouchStart={onLibTouchStart ? (e) => onLibTouchStart(e, 'special', s.t) : unde
       ))}
       {/* POSITION node */}
       <div
-        draggable
+        draggable={htmlDraggable}
         onDragStart={(e) => onDragStart(e, 'position', 'POSITION')}
-        onTouchStart={onLibTouchStart ? (e) => onLibTouchStart(e, 'position', 'POSITION') : undefined}
-        onTouchMove={onLibTouchMove || undefined}
-        onTouchEnd={onLibTouchEnd || undefined}
+        data-fem-lib-drag="position:POSITION"
         style={{
-          background: '#f8fafc',
-          borderRadius: 8,
-          border: '1.5px solid #94a3b828',
-          borderLeft: '3px solid #94a3b8',
+          background: 'var(--fem-bg)',
+          borderRadius: 'var(--fem-radius-md)',
+          border: 'var(--fem-node-border-w) solid var(--fem-border)',
           padding: '9px 11px',
           marginBottom: 7,
           cursor: 'grab',
+          ...grabStyle(isGrabbed('position', 'POSITION')),
+          transition: grabTransition,
         }}
       >
         <div
@@ -443,8 +469,8 @@ onTouchStart={onLibTouchStart ? (e) => onLibTouchStart(e, 'special', s.t) : unde
             style={{
               fontSize: 12.5,
               fontWeight: 700,
-              color: '#1b2540',
-              fontFamily: 'JetBrains Mono, monospace',
+              color: 'var(--fem-text-1)',
+              fontFamily: 'var(--fem-font-mono)',
             }}
           >
             POSITION
@@ -454,10 +480,10 @@ onTouchStart={onLibTouchStart ? (e) => onLibTouchStart(e, 'special', s.t) : unde
             style={{
               padding: '2px 9px',
               fontSize: 10,
-              background: '#94a3b8',
-              color: 'white',
+              background: 'var(--fem-btn-primary)',
+              color: 'var(--fem-on-accent)',
               border: 'none',
-              borderRadius: 7,
+              borderRadius: 'var(--fem-radius-md)',
               cursor: 'pointer',
               fontWeight: 700,
             }}
@@ -465,7 +491,7 @@ onTouchStart={onLibTouchStart ? (e) => onLibTouchStart(e, 'special', s.t) : unde
             + 画布
           </button>
         </div>
-        <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 3 }}>
+        <div style={{ fontSize: 10, color: 'var(--fem-neutral)', marginTop: 3 }}>
           空节点，仅占位
         </div>
       </div>

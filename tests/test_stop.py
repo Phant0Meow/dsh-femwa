@@ -19,7 +19,7 @@ STOP_FEMS = """meta:
   name = stop-probe
   session = new
 actors:
-  human @p = soul:9, source:0
+  human @p = soul:human, source:0
 action ask @human(@p):
   prompt: 请说话
 mainflow:

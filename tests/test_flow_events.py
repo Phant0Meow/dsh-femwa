@@ -191,7 +191,7 @@ action accept @human(@player):
 action after @assign:
   out: count += 1
 actors:
-  human @player = soul:9, source:0
+  human @player = soul:human, source:0
 mainflow:
   [START] -> [ASK] -> [AFTER] -> [END]
   [ASK]: accept

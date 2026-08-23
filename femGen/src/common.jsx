@@ -3,6 +3,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 import React from 'react';
+import { THEME_CSS } from './themes';
 
 class ErrorBoundary extends React.Component {
   constructor(props) {
@@ -22,9 +23,9 @@ class ErrorBoundary extends React.Component {
         <div
           style={{
             padding: 30,
-            fontFamily: 'DM Sans, sans-serif',
-            color: '#ef4444',
-            background: '#fff5f5',
+            fontFamily: 'var(--fem-font-sans)',
+            color: 'var(--fem-danger)',
+            background: 'var(--fem-danger-soft)',
             minHeight: '100vh',
           }}
         >
@@ -57,54 +58,68 @@ class ErrorBoundary extends React.Component {
 const FontStyle = ({ scoped = false }) => (
   <style>{`
     @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+    /* MiSans（小米，免费商用）：中文主字体，unicode-range 子集按需加载；字重为官方新刻度 330-700。
+       round12：去掉 Heavy——用户反馈加粗中文太粗，800/900 就近落到 Bold(630)。 */
+    @import url('https://cdn.jsdelivr.net/npm/misans@4.1.0/lib/Normal/MiSans-Regular.min.css');
+    @import url('https://cdn.jsdelivr.net/npm/misans@4.1.0/lib/Normal/MiSans-Medium.min.css');
+    @import url('https://cdn.jsdelivr.net/npm/misans@4.1.0/lib/Normal/MiSans-Demibold.min.css');
+    @import url('https://cdn.jsdelivr.net/npm/misans@4.1.0/lib/Normal/MiSans-Semibold.min.css');
+    @import url('https://cdn.jsdelivr.net/npm/misans@4.1.0/lib/Normal/MiSans-Bold.min.css');
+    ${THEME_CSS}
     ${scoped ? '' : '* { box-sizing: border-box; }\n    body { margin: 0; }'}
-    ::-webkit-scrollbar { width: 5px; height: 5px; }
+    ::-webkit-scrollbar { width: var(--fem-scrollbar-w); height: var(--fem-scrollbar-w); }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: #d1d9e6; border-radius: 3px; }
-    input:focus, textarea:focus, select:focus { border-color: #3d5cf5 !important; box-shadow: 0 0 0 3px rgba(61,92,245,0.12) !important; }
+    ::-webkit-scrollbar-thumb { background: var(--fem-scrollbar); border-radius: 3px; }
+    input:focus, textarea:focus, select:focus { border-color: var(--fem-primary) !important; box-shadow: 0 0 0 3px var(--fem-primary-glow-weak) !important; }
+    /* 窄视口（手机）：iOS Safari 对 <16px 输入控件聚焦会整页自动放大；
+       聚焦时临时提到 16px 抑制缩放（meta user-scalable 自 iOS 10 起被忽略，
+       这是唯一可靠路径），失焦自动恢复。仅限 femGen 容器（data-fem-theme）。 */
+    @media (max-width: 767px) {
+      [data-fem-theme] input:focus, [data-fem-theme] textarea:focus, [data-fem-theme] select:focus { font-size: 16px !important; }
+    }
     .node-drag { cursor: grabbing !important; }
     @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0; } }
     @keyframes nodeGlow {
-      0%, 100% { box-shadow: 0 0 8px 2px rgba(61,92,245,0.3), 0 0 16px 4px rgba(61,92,245,0.15); }
-      50% { box-shadow: 0 0 16px 6px rgba(61,92,245,0.5), 0 0 32px 10px rgba(61,92,245,0.25); }
+      0%, 100% { box-shadow: 0 0 8px 2px var(--fem-primary-glow), 0 0 16px 4px var(--fem-primary-glow-weak); }
+      50% { box-shadow: 0 0 16px 6px var(--fem-primary-glow-strong), 0 0 32px 10px var(--fem-primary-glow); }
     }
     @keyframes nodeGlowError {
-      0%, 100% { box-shadow: 0 0 8px 2px rgba(239,68,68,0.5), 0 0 16px 4px rgba(239,68,68,0.25); }
-      50% { box-shadow: 0 0 16px 6px rgba(239,68,68,0.7), 0 0 32px 10px rgba(239,68,68,0.35); }
+      0%, 100% { box-shadow: 0 0 8px 2px var(--fem-danger-glow), 0 0 16px 4px var(--fem-danger-glow-weak); }
+      50% { box-shadow: 0 0 16px 6px var(--fem-danger-glow-strong), 0 0 32px 10px var(--fem-danger-glow); }
     }
-    .streaming-cursor { animation: blink 0.8s infinite; font-weight: bold; color: #4f6ef7; }
+    .streaming-cursor { animation: blink 0.8s infinite; font-weight: bold; color: var(--fem-primary-strong); }
   `}</style>
 );
 
 // ═══ CONSTANTS ═══
 const NW = 100,
-  NH = 64; // Action node size (w 50%, h 80%)
+  NH = 56; // Action node size（round10：两行文字 64→56，更扁更精致）
 const MW = 110,
-  MH = 74; // Module node size on canvas (w 50%, h 80%)
+  MH = 66; // Module node size on canvas（同步 -8）
 const SPW = 90,
   SPH = 36; // Special node size
 const PSW = 90,
   PSH = 36; // Position node size
 
 const TYPES = [
-  { t: 'ai', lbl: '@ai', c: '#4f6ef7', bg: '#eef1ff' },
-  { t: 'human', lbl: '@human', c: '#0ea577', bg: '#edfaf4' },
-  { t: 'mind', lbl: '@mind', c: '#e11d48', bg: '#fff1f2' },
-  { t: 'func', lbl: '@func', c: '#d97706', bg: '#fffbeb' },
-  { t: 'assign', lbl: '@assign', c: '#8b5cf6', bg: '#f5f3ff' },
+  { t: 'ai', lbl: '@ai', c: 'var(--fem-primary-strong)', bg: 'var(--fem-type-ai-bg)' },
+  { t: 'human', lbl: '@human', c: 'var(--fem-type-human)', bg: 'var(--fem-success-soft)' },
+  { t: 'mind', lbl: '@mind', c: 'var(--fem-type-mind)', bg: 'var(--fem-type-mind-bg)' },
+  { t: 'func', lbl: '@func', c: 'var(--fem-type-func)', bg: 'var(--fem-warning-soft)' },
+  { t: 'assign', lbl: '@assign', c: 'var(--fem-type-assign)', bg: 'var(--fem-type-assign-bg)' },
 ];
 
 const ti = (t) => TYPES.find((x) => x.t === t) || TYPES[0];
 
 
 const SPECIAL_COLORS = {
-  START: { c: '#10b981', bg: '#ecfdf5' },
-  END: { c: '#ef4444', bg: '#fef2f2' },
-  IN: { c: '#10b981', bg: '#ecfdf5' },
-  OUT: { c: '#ef4444', bg: '#fef2f2' },
-  BREAK: { c: '#f59e0b', bg: '#fffbeb' },
-  FOR: { c: '#4f6ef7', bg: '#eef1ff' },
-  PAR: { c: '#7e22ce', bg: '#f3e8ff' },
+  START: { c: 'var(--fem-success-strong)', bg: 'var(--fem-sp-start-bg)' },
+  END: { c: 'var(--fem-danger)', bg: 'var(--fem-sp-end-bg)' },
+  IN: { c: 'var(--fem-success-strong)', bg: 'var(--fem-sp-start-bg)' },
+  OUT: { c: 'var(--fem-danger)', bg: 'var(--fem-sp-end-bg)' },
+  BREAK: { c: 'var(--fem-warning)', bg: 'var(--fem-sp-break-bg)' },
+  FOR: { c: 'var(--fem-primary-strong)', bg: 'var(--fem-sp-for-bg)' },
+  PAR: { c: 'var(--fem-special-par)', bg: 'var(--fem-sp-par-bg)' },
 };
 
 // Nodes that can only receive connections, not send
@@ -465,38 +480,39 @@ function findAllCycleEdges(nodes, edges) {
 // ═══ SHARED STYLES ═══
 const inp = {
   width: '100%',
+  boxSizing: 'border-box',
   padding: '7px 10px',
-  borderRadius: 7,
-  border: '1.5px solid #dde4ef',
+  borderRadius: 'var(--fem-radius-md)',
+  border: 'var(--fem-border-w-strong) solid var(--fem-border-strong)',
   fontSize: 12.5,
-  color: '#1b2540',
-  background: '#f8fafc',
+  color: 'var(--fem-text-1)',
+  background: 'var(--fem-bg)',
   outline: 'none',
-  fontFamily: 'DM Sans, sans-serif',
+  fontFamily: 'var(--fem-font-sans)',
   transition: 'border-color 0.15s, box-shadow 0.15s',
 };
 const btnP = {
   padding: '8px 16px',
-  borderRadius: 7,
-  background: '#3d5cf5',
-  color: 'white',
+  borderRadius: 'var(--fem-radius-md)',
+  background: 'var(--fem-btn-primary)',
+  color: 'var(--fem-on-accent)',
   border: 'none',
   cursor: 'pointer',
   fontSize: 12.5,
   fontWeight: 700,
-  fontFamily: 'DM Sans, sans-serif',
+  fontFamily: 'var(--fem-font-sans)',
   transition: 'opacity 0.12s',
 };
 const btnS = {
   padding: '8px 16px',
-  borderRadius: 7,
-  background: 'white',
-  color: '#5a6a8a',
-  border: '1.5px solid #dde4ef',
+  borderRadius: 'var(--fem-radius-md)',
+  background: 'var(--fem-surface)',
+  color: 'var(--fem-text-2)',
+  border: 'var(--fem-border-w-strong) solid var(--fem-border-strong)',
   cursor: 'pointer',
   fontSize: 12.5,
   fontWeight: 600,
-  fontFamily: 'DM Sans, sans-serif',
+  fontFamily: 'var(--fem-font-sans)',
 };
 
 
@@ -510,7 +526,7 @@ function F({ label, hint, children }) {
         style={{
           fontSize: 11,
           fontWeight: 700,
-          color: '#7a8aaa',
+          color: 'var(--fem-text-3)',
           marginBottom: 5,
           display: 'flex',
           alignItems: 'center',
@@ -519,7 +535,7 @@ function F({ label, hint, children }) {
       >
         {label}
         {hint && (
-          <span style={{ fontWeight: 400, color: '#b0bad0', fontSize: 10.5 }}>
+          <span style={{ fontWeight: 400, color: 'var(--fem-text-4)', fontSize: 10.5 }}>
             {hint}
           </span>
         )}
@@ -559,7 +575,7 @@ function PortCircle({ x, y, color, onMouseDown, onMouseUp, nodeId, portDir, port
         top: y - 12,
         width: 24,
         height: 24,
-        borderRadius: '50%',
+        borderRadius: 'var(--fem-radius-pill)',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
@@ -570,9 +586,9 @@ function PortCircle({ x, y, color, onMouseDown, onMouseUp, nodeId, portDir, port
       <div style={{
         width: 14,
         height: 14,
-        borderRadius: '50%',
-        background: 'white',
-        border: `2.5px solid ${color}`,
+        borderRadius: 'var(--fem-radius-pill)',
+        background: 'var(--fem-surface)',
+        border: `var(--fem-border-w-selected) solid ${color}`,
         pointerEvents: 'none',
       }} />
     </div>
@@ -584,11 +600,11 @@ function PortCircle({ x, y, color, onMouseDown, onMouseUp, nodeId, portDir, port
 function PR({ k, v }) {
   return (
     <div style={{ display: 'flex', gap: 8, fontSize: 11.5, marginBottom: 5 }}>
-      <span style={{ color: '#9aaccb', minWidth: 48, flexShrink: 0 }}>{k}</span>
+      <span style={{ color: 'var(--fem-neutral)', minWidth: 48, flexShrink: 0 }}>{k}</span>
       <span
         style={{
-          color: '#1b2540',
-          fontFamily: 'JetBrains Mono, monospace',
+          color: 'var(--fem-text-1)',
+          fontFamily: 'var(--fem-font-mono)',
           fontWeight: 600,
           overflow: 'hidden',
           textOverflow: 'ellipsis',

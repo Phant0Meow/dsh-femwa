@@ -68,7 +68,7 @@ function FemPreview({ value, onChange, error, dirty, onApply, onRestore, onGraph
           style={{
             fontSize: 9.5,
             fontWeight: 800,
-            color: '#9aaccb',
+            color: 'var(--fem-neutral)',
             textTransform: 'uppercase',
             letterSpacing: '0.1em',
           }}
@@ -83,8 +83,8 @@ function FemPreview({ value, onChange, error, dirty, onApply, onRestore, onGraph
                 ...btnS,
                 padding: '3px 10px',
                 fontSize: 10,
-                color: '#f59e0b',
-                borderColor: '#f59e0b',
+                color: 'var(--fem-warning)',
+                borderColor: 'var(--fem-warning)',
               }}
             >
               恢复
@@ -106,7 +106,7 @@ function FemPreview({ value, onChange, error, dirty, onApply, onRestore, onGraph
               ...btnP,
               padding: '3px 10px',
               fontSize: 10,
-              background: dirty ? '#3d5cf5' : '#94a3b8',
+              background: dirty ? 'var(--fem-primary)' : 'var(--fem-neutral)',
             }}
           >
             文本到图
@@ -119,11 +119,11 @@ function FemPreview({ value, onChange, error, dirty, onApply, onRestore, onGraph
           style={{
             marginBottom: 8,
             padding: '6px 9px',
-            background: '#fef2f2',
-            border: '1px solid #fecaca',
-            borderRadius: 6,
+            background: 'var(--fem-danger-soft)',
+            border: 'var(--fem-border-w) solid var(--fem-danger-border)',
+            borderRadius: 'var(--fem-radius-sm)',
             fontSize: 10,
-            color: '#ef4444',
+            color: 'var(--fem-danger)',
             lineHeight: 1.5,
             maxHeight: 60,
             overflow: 'auto',
@@ -133,15 +133,15 @@ function FemPreview({ value, onChange, error, dirty, onApply, onRestore, onGraph
         </div>
       )}
 
-      <div style={{ display: 'flex', flex: 1, minHeight: 0, borderRadius: 10, overflow: 'hidden' }}>
+      <div style={{ display: 'flex', flex: 1, minHeight: 0, borderRadius: 'var(--fem-radius-lg)', overflow: 'hidden' }}>
         <div
           ref={lineNumbersRef}
           style={{
             // 行号区整体缩为原 75%（30 → 22.5），左侧空间同步收紧
             width: 22.5,
-            background: '#0a0f1e',
-            color: '#4a5568',
-            fontFamily: 'JetBrains Mono, monospace',
+            background: 'var(--fem-preview-bg-2)',
+            color: 'var(--fem-mobile-text-3)',
+            fontFamily: 'var(--fem-font-mono)',
             fontSize: 10.5,
             lineHeight: 1.8,
             padding: '11px 3px 11px 6px',
@@ -149,7 +149,7 @@ function FemPreview({ value, onChange, error, dirty, onApply, onRestore, onGraph
             userSelect: 'none',
             overflow: 'hidden',
             whiteSpace: 'pre',
-            borderRight: '1px solid #2d3748',
+            borderRight: 'var(--fem-border-w) solid var(--fem-preview-border)',
           }}
         >
           {Array.from({ length: lineCount }, (_, i) => (
@@ -170,15 +170,15 @@ function FemPreview({ value, onChange, error, dirty, onApply, onRestore, onGraph
             style={{
               width: '100%',
               height: '100%',
-              background: '#0c1428',
+              background: 'var(--fem-mobile-bg-2)',
               // 左 padding 归零：顶格代码紧贴行号区边缘
               padding: '11px 0',
               overflow: 'auto',
               resize: 'none',
-              fontFamily: 'JetBrains Mono, monospace',
+              fontFamily: 'var(--fem-font-mono)',
               fontSize: 10.5,
               lineHeight: 1.8,
-              color: '#8fa8c8',
+              color: 'var(--fem-mobile-text-2-alt)',
               border: 'none',
               outline: 'none',
               whiteSpace: 'pre',
@@ -194,8 +194,8 @@ function FemPreview({ value, onChange, error, dirty, onApply, onRestore, onGraph
                 right: 0,
                 top: 0,
                 height: 18.9,
-                background: 'rgba(239, 68, 68, 0.18)',
-                borderLeft: '3px solid #ef4444',
+                background: 'var(--fem-danger-soft-2)',
+                borderLeft: 'var(--fem-border-w-accent) solid var(--fem-danger)',
                 pointerEvents: 'none',
                 zIndex: 1,
               }}

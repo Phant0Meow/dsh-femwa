@@ -224,3 +224,64 @@ class TestSyntaxScripts:
         assert len(par_forks) == 1
         assert par_forks[0].meta["par_var"] == "@w"
         assert par_forks[0].meta["par_iterable"] == "workers"
+
+
+# ── meta.owner 默认值（dsh 插件唯一用户 u001）──────────────────
+
+class TestOwnerDefault:
+    SCRIPT = """\
+meta:
+  name = owner 测试
+
+actors:
+  ai @host = soul:1
+
+mainflow:
+  [START] -> [END]
+"""
+
+    def test_owner_missing_defaults_u001(self):
+        s = parse_script(self.SCRIPT)
+        assert s.meta.get('owner') == ['u001']
+
+    def test_owner_empty_list_defaults_u001(self):
+        s = parse_script("""\
+meta:
+  name = t
+  owner = []
+
+actors:
+  ai @host = soul:1
+
+mainflow:
+  [START] -> [END]
+""")
+        assert s.meta.get('owner') == ['u001']
+
+    def test_owner_explicit_kept(self):
+        s = parse_script("""\
+meta:
+  name = t
+  owner = [1]
+
+actors:
+  ai @host = soul:1
+
+mainflow:
+  [START] -> [END]
+""")
+        assert s.meta.get('owner') == ['1']
+
+    def test_owner_scalar_string_kept(self):
+        s = parse_script("""\
+meta:
+  name = t
+  owner = abc
+
+actors:
+  ai @host = soul:1
+
+mainflow:
+  [START] -> [END]
+""")
+        assert s.meta.get('owner') == ['abc']

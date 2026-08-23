@@ -11,7 +11,7 @@ import re
 import ast
 import os
 from dataclasses import dataclass, field
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Callable
 from enum import Enum
 from femCompiler.FEM_config import get_db_path
 from femBridges.getDir.get_dir import get_user_dir
@@ -781,6 +781,15 @@ def eval_actors(block: Block) -> Dict[str, ActorDef]:
                 actors[nm] = ActorDef(type=at, ref=nm, name=nm, soul=soul, source=source,
                                       tools=tools, tools_enabled=tools_enabled)
                 #print(f"[DEBUG eval_actors] 创建 human actor: {nm}, soul={soul!r}, source={source!r}")
+        else:
+            # 裸 actor：`ai @名`（无 `=`、无属性）→ soul/source 缺省（soul 非必须；
+            # 无 soul 角色 = 无角色设定的裸执行者，上下文见 ContextExample 全可见语义）。
+            left_parts = line.strip().split()
+            if len(left_parts) >= 2 and left_parts[0] in ('ai', 'human'):
+                ats, nm = left_parts[0], left_parts[1]
+                at = ActorType.AI if ats == 'ai' else ActorType.HUMAN
+                actors[nm] = ActorDef(type=at, ref=nm, name=nm, soul=None, source=None,
+                                      tools=[], tools_enabled=None)
         i += 1
     return actors
 
@@ -960,6 +969,47 @@ def chain_tokens(g: FlowGraph, tokens: List[dict], entry: str, reg_node_fn, reg_
                 raise SyntaxError(f"未声明的动作或模块 '{name}'，请在 flow 前用 [节点]: 语法定义。")
 
     return current
+
+def validate_flow_refs(
+    flow: FlowGraph,
+    known_actions: Dict[str, Any],
+    known_modules: Dict[str, Any],
+    where: str,
+) -> None:
+    """校验 flow 中节点绑定的 action/module 均已声明。
+
+    背景（2026-08-18）：标准化器（FEM_normalizer._replace_bare_in_fragment）把
+    任意裸 token 无条件替换成 [节点] 绑定，不校验是否已声明——裸名引用未声明的
+    action 因此能混过编译，运行时才炸。解析器必须兜底：裸名引用必须是已声明的
+    action/module；空节点（[名字] 无绑定）合法。"""
+    if flow is None:
+        return
+    for node in flow.nodes.values():
+        if node.action_name and node.action_name not in known_actions:
+            raise SyntaxError(
+                f"{where} 中引用了未声明的动作 '{node.action_name}'（节点 {node.id}）。"
+                f"裸名引用必须是已声明的 action；空节点请写 [名字]（不绑定动作）。"
+            )
+        if node.module_ref and node.module_ref not in known_modules:
+            raise SyntaxError(
+                f"{where} 中引用了未声明的模块 '{node.module_ref}'（节点 {node.id}）。"
+            )
+
+
+def validate_module_flows(mod: ModuleDef, script: 'Script') -> None:
+    """递归校验模块 flow 的引用（模块内 action + 全局 module + 嵌套 module）。"""
+    if mod.flow is not None:
+        known_modules = dict(script.modules)
+        known_modules.update(mod.modules)
+        validate_flow_refs(
+            mod.flow,
+            mod.actions,
+            known_modules,
+            f"module {mod.name}",
+        )
+    for sub in mod.modules.values():
+        validate_module_flows(sub, script)
+
 
 # ---- 安全条件求值 ----
 def eval_condition(expr: str, context: dict) -> bool:
@@ -1420,7 +1470,7 @@ class FlowBuilder:
 # 5. 顶层解析入口
 # ============================================================
 
-def eval_flow(block: Block) -> FlowGraph:
+def eval_flow(block: Block, known_actions: Dict[str, Any] = None, known_modules: Dict[str, Any] = None) -> FlowGraph:
     # 标准化器已经把声明区提取到 mainflow 之前，此处 flow 文本只包含流程描述。
     flow_lines = block.content_lines
     flow_text = '\n'.join(flow_lines)
@@ -1436,7 +1486,11 @@ def eval_flow(block: Block) -> FlowGraph:
     # 所以此时无需绑定表，流程图中的节点引用会自动通过 reg_node 注册。
     builder = FlowBuilder()
     # 忽略旧绑定表传递
-    return builder.build_flow(flow_text)
+    g = builder.build_flow(flow_text)
+    # mainflow 引用校验（module flow 由 validate_module_flows 在 parse_script 尾部统一校验）
+    if known_actions is not None:
+        validate_flow_refs(g, known_actions, known_modules or {}, 'mainflow')
+    return g
 
 def eval_module(block: Block) -> ModuleDef:
     header = normalize_symbols(block.header)
@@ -1538,8 +1592,143 @@ def inject_delay_nodes(flow: FlowGraph, actions: Dict[str, ActionDef], delay_sec
     print(f"[parser] ⏱️ inject_delay_nodes: 完成, 注入 {delay_counter} 个 delay 节点, 新边数={len(flow.edges)}")
 
 
-def parse_script(text: str, base_dir: str = ".") -> Script:
-    """主解析入口：文本 → Script 对象"""
+def validate_actor_souls(text: str, soul_exists: Optional[Callable[[str], bool]] = None) -> None:
+    """编译期校验 actors 区块的 soul 是否存在（normalize 前扫原始文本，行号对应用户所见）。
+
+    报错 = 全部错误一次列出：每条含行号 + 该行原文 + soul id；末尾附可用列表
+    （soul_exists 携带 _soul_ids 属性时）。soul_exists 为 None 时跳过（保持纯解析可测）。
+    裸 actor（无 soul 字段）合法——soul 非必须（用户决策：无角色设定的简单剧本可不写）。
+    """
+    if soul_exists is None:
+        return
+    lines = text.split('\n')
+    in_actors = False
+    errors = []
+    for idx, raw in enumerate(lines):
+        s = raw.strip()
+        if not s or s.startswith('#') or s.startswith('//'):
+            continue
+        if not in_actors:
+            if s.startswith('actors:') or s.startswith('actors：'):
+                in_actors = True
+            continue
+        # actors 区块结束：回到顶层区块（无缩进非空行）
+        if raw[0] != ' ' and raw[0] != '\t':
+            break
+        m = re.match(r'^(ai|human)\s+(@?[\w\u4e00-\u9fff]+)', s)
+        if not m:
+            continue
+        sm = re.search(r'soul\s*[：:]\s*([^\s,，]+)', s)
+        if not sm:
+            continue  # 无 soul = 合法
+        sid = sm.group(1).strip('"').strip("'")
+        if sid and not soul_exists(sid):
+            errors.append((idx + 1, s, sid))
+    if errors:
+        detail = '\n'.join(
+            f"actors 第 {ln} 行: {line} → soul \"{sid}\" 不存在"
+            for ln, line, sid in errors
+        )
+        avail = getattr(soul_exists, '_soul_ids', None)
+        msg = f"编译错误：soul id 不存在。\n{detail}"
+        if avail:
+            msg += f"\n可用列表：{' / '.join(sorted(avail))}"
+        raise ValueError(msg)
+
+
+def validate_actor_sources(script, models: Optional[Dict[str, Any]] = None) -> None:
+    """编译期校验 AI actor 的 source 字段是否为 dsh 可用模型（models 缺省/为空不校验）。
+
+    source 语法（与宿主约定，见语法文档）：
+    - 裸 id（不含 '/'）→ 必须在 models['defaultProvider'] 的模型列表中；
+    - 'provider/model' → 在全部 provider 的模型列表中查。
+    human（source 为数字 user 身份）与 blueprint 跳过。
+    校验失败 raise ValueError（编译错误，信息含可用模型列表）。
+    """
+    if not models:
+        return
+    default_provider = models.get('defaultProvider')
+    provider_index = {}
+    for p in models.get('providers', []):
+        pid = p.get('id')
+        if pid:
+            provider_index[pid] = set(p.get('models') or [])
+    if not provider_index:
+        return
+    for name, adef in (script.actors or {}).items():
+        if adef.type != ActorType.AI:
+            continue
+        s = str(getattr(adef, 'source', None) or '').strip()
+        if not s:
+            continue
+        if '/' in s:
+            pid, mid = s.split('/', 1)
+            ok = mid in provider_index.get(pid, set())
+        else:
+            ok = default_provider is not None and s in provider_index.get(default_provider, set())
+        if not ok:
+            available = ', '.join(
+                f"{pid}/{mid}"
+                for pid, mset in provider_index.items()
+                for mid in sorted(mset)
+            ) or '(无可用模型)'
+            raise ValueError(
+                f"actors: ai @{str(name).lstrip('@')}: source \"{s}\" 不是可用模型。"
+                f"可用列表：{available}（或省略 source 跟随主模型）"
+            )
+
+
+def validate_flow_reentry(script) -> None:
+    """编译期检测：回到「多条无条件出边」的节点会导致分支数爆炸。
+
+    原因：每次回到该节点往下运行都会从一变成多分支（普通节点多出边 =
+    自动 fork），分支数指数增长。条件出边（if 分流）回流是安全的
+    （只走评估为真的分支），不检测。排除项：for/par/fork/join 网关
+    （多出边是迭代/并发语义，非爆炸模式）；重复边去重（par 出口链可能
+    重复生成同一条边）。用户拍板文案。
+    """
+    def check(flow: Optional[FlowGraph], where: str) -> None:
+        if not flow:
+            return
+        # 去重（par 出口链可能重复生成相同边）
+        seen = set()
+        uniq_edges = []
+        for e in flow.edges:
+            key = (e.source, e.target, e.condition)
+            if key not in seen:
+                seen.add(key)
+                uniq_edges.append(e)
+        for nid, node in flow.nodes.items():
+            # 网关节点跳过（for/par/fork/join 的迭代/并发语义）
+            if node.type == 'gateway' or (node.meta or {}).get('gw_kind') in ('for', 'par', 'fork', 'join'):
+                continue
+            unconditional_outs = [
+                e for e in uniq_edges if e.source == nid and not e.condition
+            ]
+            # 「回到」= 入边来自流程内部；入口启动边（[START]/[IN] 出发）不算
+            has_in = any(
+                e.target == nid and e.source not in ('[START]', '[IN]')
+                for e in uniq_edges
+            )
+            if len(unconditional_outs) >= 2 and has_in:
+                raise ValueError(
+                    f"{where}: 节点 [{nid}] 有多个出边，不能回到这种节点。"
+                    "原因是，每次回到这里往下运行都会从一变成多分支，分支数会爆炸。"
+                    "建议在本节点之后的分支中加空节点，让他们回到空节点。"
+                )
+
+    check(script.flow, "mainflow")
+    for mname, mod in (script.modules or {}).items():
+        check(mod.flow, f"module {mname}")
+
+
+def parse_script(text: str, base_dir: str = ".", models: Optional[Dict[str, Any]] = None,
+                 soul_checker: Optional[Callable[[str], bool]] = None) -> Script:
+    """主解析入口：文本 → Script 对象；models 非空时编译期校验 AI actor 的 source；
+    soul_checker 非空时编译期校验 actors 的 soul 存在性（normalize 前执行，行号对应用户原文）。"""
+
+    # 编译期 soul 校验：normalize 前扫原始文本（行号对应用户所见）
+    validate_actor_souls(text, soul_checker)
 
     # ── 前置标准化：消除语法糖、续行、裸动作等 ──
     from femCompiler.FEM_normalizer import FEMNormalizer
@@ -1576,19 +1765,31 @@ def parse_script(text: str, base_dir: str = ".") -> Script:
             ctx = eval_method(block)
             script.contexts[ctx.name] = ctx
         elif t == 'flow':
-            script.flow = eval_flow(block)
+            script.flow = eval_flow(block, script.actions, script.modules)
+
+    # 模块 flow 引用校验（模块内 action/嵌套 module/全局 module）
+    for mod in script.modules.values():
+        validate_module_flows(mod, script)
 
     # 注：meta.database 解析块已移除——set_db_path 无调用点，该机制从未生效；
     # 运行时数据库路径统一由 FEM_config.get_db_path() 解析
     # （get_user_dir()/user_data/memory/Chronica.wor）。
 
     owner_val = script.meta.get('owner')
-    if owner_val is not None:
-        if isinstance(owner_val, (int, float)):
-            script.meta['owner'] = [str(owner_val)]
-        elif isinstance(owner_val, str):
-            script.meta['owner'] = [owner_val]
-        elif isinstance(owner_val, list):
-            script.meta['owner'] = [str(x) for x in owner_val]
+    if not owner_val:
+        # dsh 插件：唯一用户 u001——owner 留空（缺失/空列表）默认归属 u001
+        script.meta['owner'] = ['u001']
+    elif isinstance(owner_val, (int, float)):
+        script.meta['owner'] = [str(owner_val)]
+    elif isinstance(owner_val, str):
+        script.meta['owner'] = [owner_val]
+    elif isinstance(owner_val, list):
+        script.meta['owner'] = [str(x) for x in owner_val]
+
+    # 编译期校验 AI actor 的 source（dsh 模型白名单；models=None 跳过）
+    validate_actor_sources(script, models)
+
+    # 编译期检测：回到「多条无条件出边」的节点（分支数爆炸模式）
+    validate_flow_reentry(script)
 
     return script

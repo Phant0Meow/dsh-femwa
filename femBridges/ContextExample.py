@@ -49,12 +49,16 @@ def _get_records_visible_to(
     for row in cursor:
         user_scope = parse_scope_field(row["user_scope"] or "[]")
         soul_scope = parse_scope_field(row["soul_scope"] or "[]")
+        # 无 user 无 soul（裸 actor）：不过滤——本 session 全部记录可见
+        # （无角色设定 = 无隔离；有 user/soul 时行为不变）。
+        no_filter = not user_ids and not soul_ids
         match_user = user_ids and ids_match_scope(user_scope, user_ids)
         match_soul = soul_ids and ids_match_scope(soul_scope, soul_ids)
         print(f"[ctx-dbg] dialog turn={row['turn_id']} src={row['source']} "
               f"u_scope={user_scope} s_scope={soul_scope} "
-              f"ask_u={user_ids} ask_s={soul_ids} match_user={match_user} match_soul={match_soul}")
-        if match_user or match_soul:
+              f"ask_u={user_ids} ask_s={soul_ids} no_filter={no_filter} "
+              f"match_user={match_user} match_soul={match_soul}")
+        if no_filter or match_user or match_soul:
             results.append(dict(row))
 
     if include_ai:
@@ -72,12 +76,14 @@ def _get_records_visible_to(
         for row in cursor2:
             user_scope = parse_scope_field(row["user_scope"] or "[]")
             soul_scope = parse_scope_field(row["soul_scope"] or "[]")
+            no_filter = not user_ids and not soul_ids
             match_user = user_ids and ids_match_scope(user_scope, user_ids)
             match_soul = soul_ids and ids_match_scope(soul_scope, soul_ids)
             print(f"[ctx-dbg] react turn={row['turn_id']} src={row['source']} "
                   f"u_scope={user_scope} s_scope={soul_scope} "
-                  f"ask_u={user_ids} ask_s={soul_ids} match_user={match_user} match_soul={match_soul}")
-            if match_user or match_soul:
+                  f"ask_u={user_ids} ask_s={soul_ids} no_filter={no_filter} "
+                  f"match_user={match_user} match_soul={match_soul}")
+            if no_filter or match_user or match_soul:
                 results.append(dict(row))
 
     conn.close()

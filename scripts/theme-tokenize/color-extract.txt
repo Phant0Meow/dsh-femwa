@@ -1,0 +1,288 @@
+﻿actionModal.jsx:53: background: 'rgba(8,16,40,0.5)',
+actionModal.jsx:68: boxShadow: '0 32px 80px rgba(0,0,0,0.25)',
+actionModal.jsx:75: borderBottom: '1px solid #edf0f8',
+actionModal.jsx:86: <div style={{ fontWeight: 800, fontSize: 15.5, color: '#1b2540' }}>
+actionModal.jsx:89: <div style={{ fontSize: 10.5, color: '#a0aec0', marginTop: 1 }}>
+actionModal.jsx:99: color: '#b0bad0',
+actionModal.jsx:113: style={{ ...inp, borderColor: nameErr ? '#ef4444' : undefined }}
+actionModal.jsx:117: <div style={{ fontSize: 10.5, color: '#ef4444', marginTop: 4 }}>
+actionModal.jsx:140: color: f.executorType === tp.t ? tp.c : '#b0bad0',
+actionModal.jsx:314: borderTop: '1px solid #edf0f8',
+bubbleOverlay.jsx:14: color: '#7a8aaa',
+bubbleOverlay.jsx:24: color: '#1b2540',
+bubbleOverlay.jsx:100: color: '#f59e0b',
+bubbleOverlay.jsx:110: color: '#dc2626',
+bubbleOverlay.jsx:111: background: '#fef2f2',
+bubbleOverlay.jsx:112: border: '1px solid #fecaca',
+bubbleOverlay.jsx:127: border: dragOver ? '2px dashed #f59e0b' : '2px solid transparent',
+bubbleOverlay.jsx:176: color: '#7a8aaa',
+bubbleOverlay.jsx:252: background: 'rgba(0,0,0,0.3)',
+bubbleOverlay.jsx:266: boxShadow: '0 24px 64px rgba(0,0,0,0.25)',
+bubbleOverlay.jsx:282: borderBottom: '1px solid #edf0f8',
+bubbleOverlay.jsx:300: <span style={{ fontWeight: 800, color: '#1b2540', fontSize: 16 }}>
+bubbleOverlay.jsx:310: background: '#f1f5f9',
+bubbleOverlay.jsx:314: color: '#64748b',
+bubbleOverlay.jsx:323: onMouseEnter={(e) => (e.target.style.background = '#e2e8f0')}
+bubbleOverlay.jsx:324: onMouseLeave={(e) => (e.target.style.background = '#f1f5f9')}
+bubbleOverlay.jsx:339: color: '#1b2540',
+bubbleOverlay.jsx:351: <div style={{ marginBottom: 12, background: '#f8fafc', padding: '8px 12px', borderRadius: 8 }}>
+bubbleOverlay.jsx:352: <div style={{ fontWeight: 700, color: '#7a8aaa', marginBottom: 4 }}>[鑺傜偣鎻愮ず]</div>
+bubbleOverlay.jsx:359: <div style={{ marginBottom: 12, background: '#f8fafc', padding: '8px 12px', borderRadius: 8 }}>
+bubbleOverlay.jsx:360: <div style={{ fontWeight: 700, color: '#7a8aaa', marginBottom: 4 }}>[鎻愮ず]</div>
+bubbleOverlay.jsx:365: <div style={{ marginBottom: 12, background: '#f8fafc', padding: '8px 12px', borderRadius: 8 }}>
+bubbleOverlay.jsx:366: <div style={{ fontWeight: 700, color: '#7a8aaa', marginBottom: 4 }}>[琛ュ厖璇存槑]</div>
+bubbleOverlay.jsx:397: borderTop: '1px solid #edf0f8',
+canvasNodes.jsx:25: const border = sel ? c : '#e4ecf7';
+canvasNodes.jsx:107: color: '#1b2540',
+canvasNodes.jsx:141: color: '#94a3b8',
+canvasNodes.jsx:173: background: isStreaming ? '#f0f4ff' : isHumanWait ? '#fffbeb' : '#f0fdf4',
+canvasNodes.jsx:175: border: `1.5px solid ${isStreaming ? c : isHumanWait ? '#f59e0b' : '#22c55e'}`,
+canvasNodes.jsx:180: boxShadow: '0 2px 8px rgba(0,0,0,0.1)',
+canvasNodes.jsx:190: color: '#1b2540',
+canvasNodes.jsx:202: <span style={{ fontSize: 10, color: '#f59e0b', fontWeight: 600, whiteSpace: 'nowrap' }}>
+canvasNodes.jsx:209: color: '#16a34a',
+canvasNodes.jsx:291: const border = sel ? c : '#e4ecf7';
+canvasNodes.jsx:387: const border = sel ? sc.c : '#e4ecf7';
+canvasNodes.jsx:539: const border = sel ? sc.c : '#e4ecf7';
+common.jsx:23: color: '#ef4444',
+common.jsx:24: background: '#fff5f5',
+common.jsx:58: ::-webkit-scrollbar-thumb { background: #d1d9e6; border-radius: 3px; }
+common.jsx:59: input:focus, textarea:focus, select:focus { border-color: #3d5cf5 !important; box-shadow: 0 0 0 3px rgba(61,92,245,0.12) !important; }
+common.jsx:63: 0%, 100% { box-shadow: 0 0 8px 2px rgba(61,92,245,0.3), 0 0 16px 4px rgba(61,92,245,0.15); }
+common.jsx:64: 50% { box-shadow: 0 0 16px 6px rgba(61,92,245,0.5), 0 0 32px 10px rgba(61,92,245,0.25); }
+common.jsx:67: 0%, 100% { box-shadow: 0 0 8px 2px rgba(239,68,68,0.5), 0 0 16px 4px rgba(239,68,68,0.25); }
+common.jsx:68: 50% { box-shadow: 0 0 16px 6px rgba(239,68,68,0.7), 0 0 32px 10px rgba(239,68,68,0.35); }
+common.jsx:70: .streaming-cursor { animation: blink 0.8s infinite; font-weight: bold; color: #4f6ef7; }
+common.jsx:450: border: '1.5px solid #dde4ef',
+common.jsx:452: color: '#1b2540',
+common.jsx:453: background: '#f8fafc',
+common.jsx:461: background: '#3d5cf5',
+common.jsx:474: color: '#5a6a8a',
+common.jsx:475: border: '1.5px solid #dde4ef',
+common.jsx:491: color: '#7a8aaa',
+common.jsx:500: <span style={{ fontWeight: 400, color: '#b0bad0', fontSize: 10.5 }}>
+common.jsx:563: <span style={{ color: '#9aaccb', minWidth: 48, flexShrink: 0 }}>{k}</span>
+common.jsx:566: color: '#1b2540',
+femPreview.jsx:68: color: '#9aaccb',
+femPreview.jsx:83: color: '#f59e0b',
+femPreview.jsx:84: borderColor: '#f59e0b',
+femPreview.jsx:106: background: dirty ? '#3d5cf5' : '#94a3b8',
+femPreview.jsx:119: background: '#fef2f2',
+femPreview.jsx:120: border: '1px solid #fecaca',
+femPreview.jsx:123: color: '#ef4444',
+femPreview.jsx:139: background: '#0a0f1e',
+femPreview.jsx:140: color: '#4a5568',
+femPreview.jsx:149: borderRight: '1px solid #2d3748',
+femPreview.jsx:170: background: '#0c1428',
+femPreview.jsx:178: color: '#8fa8c8',
+femPreview.jsx:193: background: 'rgba(239, 68, 68, 0.18)',
+femPreview.jsx:194: borderLeft: '3px solid #ef4444',
+FemWorAuto.jsx:2186: <path d={pathD} fill="none" stroke={isSel?'#3d5cf5':'#4f6ef7'} strokeWidth={isSel?2.5:1.5} strokeDasharray="5,3" markerEnd={`url(#${isSel?'as':'a_for'})`} style={{pointerEvents:'none'}} />
+FemWorAuto.jsx:2191: const stroke = isSel ? '#3d5cf5' : isParBroken || isForBroken ? '#ef4444' : isCycleEdge || isParCycle ? '#4f6ef7' : '#94a3b8';
+FemWorAuto.jsx:2211: {conn && (() => { const d = getTempConnLine(); return d ? <path d={d} fill="none" stroke="#3d5cf5" strokeWidth={2} strokeDasharray="6,3" style={{pointerEvents:'none'}} /> : null; })()}
+FemWorAuto.jsx:2335: background: '#edf1f8',
+FemWorAuto.jsx:2345: borderRight: '1px solid #e4ecf7',
+FemWorAuto.jsx:2355: borderBottom: '1px solid #e4ecf7',
+FemWorAuto.jsx:2362: color: '#1b2540',
+FemWorAuto.jsx:2366: <span style={{ color: '#3d5cf5' }}>FEM</span> WAutomata
+FemWorAuto.jsx:2371: color: '#9aaccb',
+FemWorAuto.jsx:2380: <div style={{ display: 'flex', borderBottom: '1px solid #e4ecf7' }}>
+FemWorAuto.jsx:2398: color: tab === k ? '#3d5cf5' : '#9aaccb',
+FemWorAuto.jsx:2467: if (!currentMod) return <div style={{ color: '#c4d0e0', fontSize: 12 }}>鏈壘鍒版ā鍧?/div>;
+FemWorAuto.jsx:2506: borderTop: '1px solid #e4ecf7',
+FemWorAuto.jsx:2520: border: '1px solid #dde4ef',
+FemWorAuto.jsx:2521: background: '#f8fafc',
+FemWorAuto.jsx:2522: color: '#5a6a8a',
+FemWorAuto.jsx:2545: borderBottom: '1px solid #e4ecf7',
+FemWorAuto.jsx:2553: <span style={{ fontSize: 11.5, color: '#7a8aaa', fontWeight: 600 }}>
+FemWorAuto.jsx:2579: background: mode === 'mainflow' ? '#eff2ff' : 'white',
+FemWorAuto.jsx:2580: color: mode === 'mainflow' ? '#3d5cf5' : '#7a8aaa',
+FemWorAuto.jsx:2589: style={{ color: '#b0bad0', fontSize: 12, fontWeight: 600 }}
+FemWorAuto.jsx:2607: border: `1.5px solid #dde4ef`,
+FemWorAuto.jsx:2609: color: '#7a8aaa',
+FemWorAuto.jsx:2627: background: '#dde4ef',
+FemWorAuto.jsx:2685: background: '#22c55e',
+FemWorAuto.jsx:2686: color: '#fff',
+FemWorAuto.jsx:2700: background: '#3d5cf5',
+FemWorAuto.jsx:2701: color: '#fff',
+FemWorAuto.jsx:2715: background: '#f59e0b',
+FemWorAuto.jsx:2716: color: '#fff',
+FemWorAuto.jsx:2854: stroke={isSel ? '#3d5cf5' : '#4f6ef7'}
+FemWorAuto.jsx:2953: fill="#3d5cf5"
+FemWorAuto.jsx:2970: stroke="#3d5cf5"
+FemWorAuto.jsx:3112: color: '#94a3b8',
+FemWorAuto.jsx:3118: style={{ fontSize: 11.5, color: '#c4d0e0', marginTop: 6 }}
+FemWorAuto.jsx:3134: borderLeft: '1px solid #e4ecf7',
+FemWorAuto.jsx:3157: borderBottom: '1px solid #e4ecf7',
+FemWorAuto.jsx:3165: color: '#9aaccb',
+FemWorAuto.jsx:3180: color: '#1b2540',
+FemWorAuto.jsx:3193: <span style={{ fontSize: 12.5, color: '#5a6a8a', fontWeight: 600 }}>
+FemWorAuto.jsx:3219: background: '#ecfdf5',
+FemWorAuto.jsx:3222: color: '#10b981',
+FemWorAuto.jsx:3233: background: '#fef2f2',
+FemWorAuto.jsx:3236: color: '#ef4444',
+FemWorAuto.jsx:3251: background: '#f8fafc',
+FemWorAuto.jsx:3254: color: '#94a3b8',
+FemWorAuto.jsx:3359: background: '#fff0f0',
+FemWorAuto.jsx:3362: color: '#ef4444',
+FemWorAuto.jsx:3379: background: '#fffbeb',
+FemWorAuto.jsx:3382: color: '#f59e0b',
+FemWorAuto.jsx:3416: color: '#ef4444',
+FemWorAuto.jsx:3417: borderColor: '#fecaca',
+FemWorAuto.jsx:3438: return <div style={{ color: '#c4d0e0' }}>鏈壘鍒伴」</div>;
+FemWorAuto.jsx:3446: color: '#1b2540',
+FemWorAuto.jsx:3478: style={{ color: '#c4d0e0', fontSize: 11.5, lineHeight: 1.7 }}
+FemWorAuto.jsx:3490: color: '#b45309',
+FemWorAuto.jsx:3491: background: '#fef3c7',
+FemWorAuto.jsx:3492: border: '1px solid #fde68a',
+libPanel.jsx:64: color: '#9aaccb',
+libPanel.jsx:76: background: '#3d5cf5',
+libPanel.jsx:89: style={{ textAlign: 'center', padding: '18px 0', color: '#c4d0e0' }}
+libPanel.jsx:131: color: '#1b2540',
+libPanel.jsx:151: color: '#9aaccb',
+libPanel.jsx:191: color: '#94a3b8',
+libPanel.jsx:209: color: '#9aaccb',
+libPanel.jsx:224: border: '1.5px solid #dde4ef',
+libPanel.jsx:226: color: '#1b2540',
+libPanel.jsx:227: background: '#f8fafc',
+libPanel.jsx:246: background: '#475569',
+libPanel.jsx:267: color: '#9aaccb',
+libPanel.jsx:285: background: '#f1f5f9',
+libPanel.jsx:287: border: '1.5px solid #47556918',
+libPanel.jsx:288: borderLeft: '3px solid #475569',
+libPanel.jsx:302: style={{ fontSize: 12.5, fontWeight: 700, color: '#1b2540' }}
+libPanel.jsx:318: color: '#475569',
+libPanel.jsx:332: background: '#475569',
+libPanel.jsx:355: color: '#9aaccb',
+libPanel.jsx:391: color: '#1b2540',
+libPanel.jsx:423: background: '#f8fafc',
+libPanel.jsx:425: border: '1.5px solid #94a3b828',
+libPanel.jsx:426: borderLeft: '3px solid #94a3b8',
+libPanel.jsx:443: color: '#1b2540',
+libPanel.jsx:454: background: '#94a3b8',
+libPanel.jsx:465: <div style={{ fontSize: 10, color: '#94a3b8', marginTop: 3 }}>
+mobileView.jsx:30: border: '#2a3347',
+mobileView.jsx:31: borderLight: '#3a4560',
+mobileView.jsx:346: background: 'rgba(0,0,0,0.55)',
+mobileView.jsx:366: boxShadow: '8px 0 32px rgba(0,0,0,0.4)',
+mobileView.jsx:443: background: 'rgba(0,0,0,0.45)',
+mobileView.jsx:456: background: '#0c1428',
+mobileView.jsx:462: boxShadow: '-8px 0 32px rgba(0,0,0,0.5)',
+mobileView.jsx:469: borderBottom: '1px solid #1e2d45',
+mobileView.jsx:476: <span style={{ fontSize: 10, fontWeight: 800, color: '#9aaccb', textTransform: 'uppercase', letterSpacing: '0.1em', fontFamily: 'JetBrains Mono, monospace' }}>
+mobileView.jsx:490: background: femDirty ? T.accent : '#475569',
+mobileView.jsx:497: background: '#1e2d45',
+mobileView.jsx:506: color: '#9aaccb',
+mobileView.jsx:516: <div style={{ margin: '8px 12px 0', padding: '6px 10px', background: '#300', border: '1px solid #622', borderRadius: 6, fontSize: 10, color: '#f87171', lineHeight: 1.5 }}>
+mobileView.jsx:536: color: '#8fa8c8',
+mobileView.jsx:744: color: '#1b2540',
+mobileView.jsx:849: background: '#1a2236',
+mobileView.jsx:887: background: '#1a2236',
+mobileView.jsx:889: border: '1.5px solid #475569',
+mobileView.jsx:890: borderLeft: '3px solid #475569',
+mobileView.jsx:901: style={{ background: '#475569', border: 'none', borderRadius: 4, color: 'white', fontSize: 9, fontWeight: 700, padding: '2px 6px', cursor: 'pointer', flex: 1 }}
+mobileView.jsx:907: style={{ background: '#3d5cf5', border: 'none', borderRadius: 4, color: 'white', fontSize: 9, fontWeight: 700, padding: '2px 6px', cursor: 'pointer', flex: 1 }}
+mobileView.jsx:966: background: '#94a3b818',
+mobileView.jsx:967: border: '1px solid #94a3b844',
+mobileView.jsx:972: color: '#94a3b8',
+mobileView.jsx:1039: <button onClick={() => u({ actors: proj.actors.filter((_, j) => j !== i) })} style={{ background: 'none', border: 'none', color: '#f87171', fontSize: 16, cursor: 'pointer', flexShrink: 0, padding: 2 }}>脳</button>
+mobileView.jsx:1053: <button onClick={() => u({ vars: proj.vars.filter((_, j) => j !== i) })} style={{ background: 'none', border: 'none', color: '#f87171', fontSize: 16, cursor: 'pointer', flexShrink: 0, padding: 2 }}>脳</button>
+mobileView.jsx:1100: {isBack && <div style={{ fontSize: 10, color: '#4f6ef7', fontWeight: 700, background: '#eef1ff22', borderRadius: 5, padding: '3px 7px', marginBottom: 6 }}>鍥炵幆妫€娴?/div>}
+mobileView.jsx:1176: style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 500, animation: 'fadeInOverlay 0.18s ease' }}
+mobileView.jsx:1188: boxShadow: '0 24px 64px rgba(0,0,0,0.35)',
+mobileView.jsx:1199: <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 16px', borderBottom: '1px solid #edf0f8', flexShrink: 0 }}>
+mobileView.jsx:1204: <span style={{ fontWeight: 800, color: '#1b2540', fontSize: 15 }}>{action?.name || 'Node'}</span>
+mobileView.jsx:1206: <button onClick={(e) => { e.stopPropagation(); onClose(); }} style={{ background: '#f1f5f9', border: 'none', fontSize: 15, cursor: 'pointer', color: '#64748b', borderRadius: 7, width: 30, height: 30, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>鉁?/button>
+mobileView.jsx:1210: <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', padding: '14px 16px', lineHeight: 1.65, fontSize: 13, color: '#1b2540', touchAction: 'auto', WebkitOverflowScrolling: 'touch' }}>
+mobileView.jsx:1213: <div style={{ marginBottom: 10, background: '#f8fafc', padding: '8px 10px', borderRadius: 7 }}>
+mobileView.jsx:1214: <div style={{ fontWeight: 700, color: '#7a8aaa', marginBottom: 3, fontSize: 10.5 }}>[鑺傜偣鎻愮ず]</div>
+mobileView.jsx:1219: <div style={{ marginBottom: 10, background: '#f8fafc', padding: '8px 10px', borderRadius: 7 }}>
+mobileView.jsx:1220: <div style={{ fontWeight: 700, color: '#7a8aaa', marginBottom: 3, fontSize: 10.5 }}>[鎻愮ず]</div>
+mobileView.jsx:1264: <div style={{ flexShrink: 0, padding: '10px 14px 16px', borderTop: '1px solid #edf0f8' }}>
+mobileView.jsx:1265: <div style={{ fontSize: 10, fontWeight: 700, color: '#f59e0b', marginBottom: 6 }}>鈴?绛夊緟浜虹被杈撳叆</div>
+mobileView.jsx:1286: <span style={{ fontSize: 10, fontWeight: 700, color: '#7a8aaa', fontFamily: 'JetBrains Mono, monospace' }}>{varName}:</span>
+mobileView.jsx:1699: backgroundImage: 'radial-gradient(circle, #2a3347 1px, transparent 1px)',
+mobileView.jsx:1754: <div style={{ fontSize: 13, color: '#3a4560', fontWeight: 600 }}>浠庝粨搴撴坊鍔?Action</div>
+mobileView.jsx:1755: <div style={{ fontSize: 11, color: '#2a3347', marginTop: 5 }}>闀挎寜鑺傜偣鎷栧姩 路 闀挎寜绔彛杩炵嚎 路 鍙屾寚缂╂斁</div>
+mobileView.jsx:1774: border: '2.5px solid rgba(61,92,245,0.7)',
+mobileView.jsx:1775: boxShadow: '0 0 12px 4px rgba(61,92,245,0.25)',
+mobileView.jsx:1789: background: 'rgba(13,17,23,0.8)',
+mobileView.jsx:1810: background: 'rgba(61,92,245,0.92)',
+mobileView.jsx:1819: boxShadow: '0 4px 16px rgba(61,92,245,0.4)',
+mobileView.jsx:1882: style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 300 }}
+mobileView.jsx:1887: background: '#0c1428',
+mobileView.jsx:1892: boxShadow: '-8px 0 32px rgba(0,0,0,0.5)',
+mobileView.jsx:1945: background: '#0d1117',
+projectPanel.jsx:100: color: '#9aaccb',
+projectPanel.jsx:143: background: '#f8fafc',
+projectPanel.jsx:144: border: `1px solid ${nameConflict ? '#ef4444' : '#e4ecf7'}`,
+projectPanel.jsx:186: borderColor: nameConflict ? '#ef4444' : undefined,
+projectPanel.jsx:197: color: '#f87171',
+projectPanel.jsx:207: style={{ fontSize: 10, color: '#ef4444', marginBottom: 4 }}
+projectPanel.jsx:232: color: '#7a8aaa',
+projectPanel.jsx:286: <span style={{ fontSize: 10, fontWeight: 800, color: '#9aaccb', textTransform: 'uppercase', letterSpacing: '0.09em' }}>
+projectPanel.jsx:320: style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#f87171', fontSize: 17, lineHeight: 1 }}
+projectPanel.jsx:341: color: '#9aaccb',
+projectPanel.jsx:393: color: '#f87171',
+soulModal.jsx:52: background: 'rgba(0,0,0,0.35)',
+soulModal.jsx:67: boxShadow: '0 8px 32px rgba(0,0,0,0.18)',
+soulModal.jsx:70: <div style={{ fontSize: 17, fontWeight: 700, color: '#1b2540', marginBottom: 18 }}>
+soulModal.jsx:76: <div style={{ fontSize: 12, fontWeight: 600, color: '#3d5cf5', marginBottom: 4 }}>
+soulModal.jsx:77: Soul ID <span style={{ color: '#ef4444' }}>*</span>
+soulModal.jsx:90: <div style={{ fontSize: 12, fontWeight: 600, color: '#3d5cf5', marginBottom: 4 }}>
+soulModal.jsx:103: <div style={{ fontSize: 12, fontWeight: 600, color: '#3d5cf5', marginBottom: 4 }}>
+soulModal.jsx:119: background: '#fef2f2',
+soulModal.jsx:120: color: '#991b1b',
+soulModal.jsx:125: border: '1px solid #fecaca',
+soulModal.jsx:148: background: '#3d5cf5',
+client.tsx:350: color: 'var(--dsw-text-tertiary, #999)',
+client.tsx:364: color: '#e5484d',
+client.tsx:378: color: 'var(--dsw-text-tertiary, #999)',
+client.tsx:393: borderLeft: '3px solid var(--dsw-accent, #4a9eff)',
+client.tsx:394: background: 'color-mix(in srgb, var(--dsw-accent, #4a9eff) 6%, transparent)',
+client.tsx:395: color: 'var(--dsw-text-secondary, #666)',
+client.tsx:411: background: 'color-mix(in srgb, var(--dsw-accent, #4a9eff) 12%, transparent)',
+client.tsx:412: border: '1px solid color-mix(in srgb, var(--dsw-accent, #4a9eff) 40%, transparent)',
+client.tsx:413: color: 'var(--dsw-text-primary, #222)',
+client.tsx:425: background: 'var(--dsw-surface-2, #f5f5f5)',
+client.tsx:426: color: 'var(--dsw-text-primary, #222)',
+client.tsx:515: background: 'var(--dsw-surface-1, #fff)',
+client.tsx:516: border: '1px solid var(--dsw-border, #ddd)',
+client.tsx:518: boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+client.tsx:526: <div style={{ fontWeight: 600, color: 'var(--dsw-text-primary, #222)' }}>杈撳叆 Fem 鍓ф湰</div>
+client.tsx:533: border: '1px solid var(--dsw-border, #ddd)',
+client.tsx:535: background: 'var(--dsw-surface-2, #f5f5f5)',
+client.tsx:536: color: 'var(--dsw-text-primary, #222)',
+client.tsx:548: border: '1px solid var(--dsw-border, #ddd)',
+client.tsx:550: background: 'var(--dsw-surface-2, #f5f5f5)',
+client.tsx:551: color: 'var(--dsw-text-primary, #222)',
+client.tsx:564: border: '1px solid var(--dsw-border, #ddd)',
+client.tsx:567: color: 'var(--dsw-text-secondary, #666)',
+client.tsx:582: background: 'var(--dsw-accent, #4a9eff)',
+client.tsx:583: color: '#fff',
+client.tsx:604: background: 'var(--dsw-surface-1, #fff)',
+client.tsx:605: border: '1px solid var(--dsw-border, #ddd)',
+client.tsx:607: boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+client.tsx:612: {scripts.length === 0 && <div style={{ padding: '6px 10px', color: 'var(--dsw-text-tertiary, #999)' }}>鏈壘鍒板墽鏈?/div>}
+client.tsx:613: {scripts.length > 0 && <div style={{ padding: '4px 10px', color: 'var(--dsw-text-tertiary, #999)', fontSize: '12px' }}>閫夋嫨鍓ф湰锛?/div>}
+client.tsx:628: color: 'var(--dsw-text-primary, #222)',
+client.tsx:651: color: 'var(--dsw-text-secondary, #666)',
+client.tsx:667: color: 'var(--dsw-text-secondary, #666)',
+client.tsx:694: color: 'var(--dsw-text-secondary, #888)',
+client.tsx:873: background: 'var(--dsw-surface-1, #fff)',
+client.tsx:874: border: '1px solid var(--dsw-border, #ddd)',
+client.tsx:876: boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+client.tsx:896: background: item.id === view || (item.id === 'offstage' && view === 'offstage') ? 'var(--dsw-accent, #4a9eff)' : 'transparent',
+client.tsx:897: color: item.id === view || (item.id === 'offstage' && view === 'offstage') ? '#fff' : 'var(--dsw-text-primary, #222)',
+client.tsx:922: border: '1px solid var(--dsw-border, #ddd)',
+client.tsx:925: color: view === 'god' ? 'var(--dsw-text-secondary, #666)' : 'var(--dsw-accent, #4a9eff)',
+client.tsx:1191: background: 'color-mix(in srgb, var(--dsw-surface-2, #f5f5f5) 92%, transparent)',
+client.tsx:1192: border: '1px solid var(--dsw-border, #e0e0e0)',
+client.tsx:1193: boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+client.tsx:1202: <span style={{ color: 'var(--dsw-text-secondary, #666)' }}>锛歿stream.text}</span>
+client.tsx:1203: <span style={{ color: 'var(--dsw-text-tertiary, #999)' }}>鈥?/span>
+client.tsx:1257: border: '1px solid var(--dsw-border, #ddd)',
+client.tsx:1259: background: 'var(--dsw-surface-2, #f5f5f5)',
+client.tsx:1260: color: 'var(--dsw-text-primary, #222)',
+client.tsx:1277: background: 'var(--dsw-accent, #4a9eff)',
+client.tsx:1278: color: '#fff',

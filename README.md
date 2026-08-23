@@ -6,15 +6,18 @@
 
 ## 它是什么
 
-Fem 会话 = **没有主模型的 dsh 会话**：
+Fem 会话 = **dsh 主模型会话 + 多智能体剧本引擎**：
 
-- 会话的 `agent/pre-step` 永远 reject → dsh 的主模型从不被调用
-- 每轮真正发给 LLM 的 system prompt 与上下文由 **FemWA 引擎**按角色组装（soul 卡片 + 记忆 + scope 视角隔离）
+- **主模型 = 导演**：可以正常聊天、写/改剧本（`femwa-mount` 挂载到会话）、运行剧本（`femwa-run`）；剧本运行时引擎拥有会话（pre-step 拦截主模型请求，运行中不插话），空闲时主模型照常可用
+- **上帝/角色视角 = 子代理投影窗**：每个角色一个投影窗（origin:subagent），角色发言投影进对应窗口；主会话表面只留戏外内容——主模型上下文天然干净
+- 每轮发给 LLM 的 system prompt 与上下文由 **FemWA 引擎**按角色组装（soul 卡片 + 记忆 + scope 视角隔离）
 - 聊天窗口是**舞台监视器**：角色发言渲染为彩色气泡、节点提示渲染为公告条、流程状态居中灰字
 - human 节点等待时你的回复会桥接进引擎；非等待时打字 = 硬停止
+- 主模型写剧本前，system prompt 会指路语法文档（`femwa:docs` section），先读文档再写，不凭印象猜语法
 - AI 节点可走 dsh 子 agent（工具调用 + 思考链），也可走引擎内置 LLM 桥
+- 节点执行者支持 `ai` / `human` / `@mind` 动态分发：同一节点按运行时执行者自动分流（AI 走 LLM 路径、人类等待输入），执行者由变量指向、运行中可切换
 
-剧本语言（.fems）：`meta / actors / code / vars / action / module / mainflow`，支持 scope 视角隔离、par 并行、fork/join 网关、断点续跑。
+剧本语言（.fems）：`meta / actors / code / vars / action / module / mainflow`，支持 scope 视角隔离、par 并行、fork/join 网关、断点续跑、`@mind` 运行时分发。AI 角色可用 `source` 指定模型（`source:模型id` 走默认 provider，或 `source:provider/模型id` 完全指定；省略跟随主模型），编译期校验，写错立即报错（详见语法文档）。
 
 ## 目录结构（自包含布局）
 
@@ -24,7 +27,7 @@ dsh-femwa/                  ← 整个文件夹就是插件
 ├── python/                 桥接器 femwa_bridge.py（stdio JSON-RPC）+ 测试剧本
 ├── femCompiler/            FemWA 引擎：parser / runtime / 并发 / SQLite 记忆
 ├── femBridges/             LLM 桥 + getDir（用户目录解析）
-├── func_code/              官方 @func 模块
+├── func_code/              官方 @func 示例模块（首启复制到 user_data/func_code，见「@func 约定」）
 ├── user_data/              ★ 运行时数据（自动创建：剧本/记忆库/checkpoint）
 ├── build.mjs / package.json / cordis.patch.yml
 ```
@@ -61,7 +64,7 @@ pip install requests          # Python 3 唯一必需依赖（引擎 LLM 调用�
 | `provider` / `model` / `apiUrl` | deepseek / deepseek-v4-flash / api.deepseek.com | 引擎 AI 节点的 LLM 路由（引擎内置桥） |
 | `apiKeyRef` | `DEEPSEEK_API_KEY` | dsh credentials 引用名 |
 | `dshAiBackend` | `true` | AI 节点走 dsh 子 agent（原生工具调用 + 思考链） |
-| `dshProvider` | `deepseek-official` | 子 agent 的 dsh LLM provider |
+| `dshProvider` | `deepseek-official` | 裸 id `source` 归属的 dsh LLM provider；空 source 跟随主模型（见语法文档） |
 | `defaultActorTools` | `true` | 角色未声明 `tools:` 时的工具开关；剧本里可逐角色 `tools: true/false` 或白名单 |
 
 ## dsh 版本要求
@@ -131,7 +134,20 @@ export const KNOWN_SESSION_EVENT_TYPES: ReadonlySet<string> = new Set([
 
 ## 剧本
 
-`.fems` 剧本放在 `user_data/projects/`（子目录或直接文件）。侧边栏 🎭 按钮新建 Fem 会话，会话顶部「Fem 剧本」面板选择/编辑/保存并运行；👁 视角切换（上帝/角色视角）。
+`.fems` 剧本放在 `user_data/projects/`（子目录或直接文件）。侧边栏 🎭 按钮新建 Fem 会话，会话顶部「Fem 剧本」面板选择/编辑/保存并运行；👁 视角切换（上帝/角色视角/🎬 戏外主模型）。
+
+### @func / `file:` 文件放置约定
+
+剧本 `code:` 区通过 `file:"xxx.py"` 引用 Python 模块，地址按以下规则解析：
+
+| 写法 | 解析 |
+|---|---|
+| 绝对路径，如 `file:"D:/a/b.py"` | 直接使用 |
+| 相对路径，如 `file:"utils/battle.py"` | 相对**剧本文件所在目录**解析（不是项目根、不是 CWD） |
+| 剧本未保存（纯文本运行）时用相对路径 | 报错：提示先「导出 .FEMS」保存剧本，或改用绝对路径 |
+| 文件不存在 | 报错 `Python Bridge: 文件不存在 <完整路径>`（不静默兜底） |
+
+`func_code/` 只是官方内置示例模块（首启时复制到 `user_data/func_code/`），**不再作为相对路径的回退查找位置**。自定义模块请放在剧本同目录（或子目录），与剧本一起移动。
 
 ## 开发与测试
 

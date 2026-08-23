@@ -34,6 +34,9 @@ from femCompiler.FEM_parser import (
     ExecutorType, OutType, ActorRef, DynamicActorRef, VarRef,
     ActorDef, OutDef, InMapping, MethodDef,
 )
+from femCompiler.FEM_errors import ErrorCategory, FEMConfigError, FEMTransientError, classify_error
+
+
 class FEMVariableError(Exception):
     """FEM 变量相关错误"""
     pass
@@ -1091,8 +1094,16 @@ class FEMRunner:
         current = start
         step = 0
 
-        # 如果入口节点就是 [START]，则跳过它，直接走第一条出边
+        # 入口 [START]：单边走第一条边；多出边 = 一次性 fork（与循环内
+        # 语义一致，不静默丢线——之前只走第一条边会悄悄吞掉其余分支）。
+        # fork 后主流程结束（_run_fork gather 等待所有分支完成；无限循环
+        # 分支由 engine 跟踪，shutdown 时取消）。
         if current == '[START]':
+            start_out = [e for e in flow.edges if e.source == current]
+            if len(start_out) > 1:
+                await self._run_fork(current, flow.nodes.get(current), flow,
+                                     extra_actions or {}, max_steps)
+                return None
             next_node = self._follow_next_edge(current, flow)
             if next_node:
                 current = next_node
@@ -1201,6 +1212,10 @@ class FEMRunner:
                 )
             prev_node = current
             current = next_node
+
+            # 协作式调度让出：assign 等快速节点不会自然挂起，不让出会
+            # 饿死并行的其他 fork 分支（多地点常驻并行线场景）。
+            await asyncio.sleep(0)
 
         # ... 循环结束
         if current is None and prev_node not in ('[END]', '[BREAK]', '[OUT]'):
@@ -1578,6 +1593,10 @@ class FEMRunner:
             await self._execute_node_content(node, flow, extra_actions, max_steps, node_id=current)
 
             current = self._follow_next_edge(current, flow)
+
+            # 协作式调度让出：分支（fork/par）内快速节点循环时让出事件循环，
+            # 避免独占并饿死其他并行分支（多地点常驻并行线场景）。
+            await asyncio.sleep(0)
 
 
     # ══════════════════════════════════════════════════
@@ -1977,8 +1996,14 @@ class FEMRunner:
         try:
             return eval(expr, {"__builtins__": builtins}, ns)
         except Exception as e:
-            print(f"[runtime] ⚠️ eval 表达式失败 '{expr}': {e}")
-            raise FEMVariableError(f"无法求值表达式: {expr}") from e
+            # Python eval 不认 @actor 等 FEM 语法（如内联列表字面量 [@a1, @a2]
+            # 中 @ 是装饰器符号 → SyntaxError）。回退到 FEM 表达式求值器
+            # （支持列表/字典字面量 + @ 引用），再失败才报错。
+            try:
+                return self.eval_expr(expr)
+            except Exception:
+                print(f"[runtime] ⚠️ eval 表达式失败 '{expr}': {e}")
+                raise FEMVariableError(f"无法求值表达式: {expr}") from e
 
         
     def _resolve_actor_path(self, path: str) -> Tuple[str, Optional[str]]:
@@ -2446,21 +2471,19 @@ class FEMRunner:
             # 由宿主按其默认决定（缺省应恢复"可用工具"）。
             actor_tools: Optional[bool] = None
             actor_tool_list: List[str] = []
-            actor_name = eparam
-            while actor_name.startswith('@') and actor_name not in self.script.actors:
-                resolved = self.vm.get(actor_name)
-                if not resolved or not isinstance(resolved, str) or not resolved.startswith('@'):
-                    break
-                actor_name = resolved
-            adef = self.script.actors.get(actor_name)
+            adef = self._resolve_actor_def(ad, eparam)
+            actor_source = ''
             if adef is not None:
                 actor_tools = getattr(adef, 'tools_enabled', None)
                 actor_tool_list = list(getattr(adef, 'tools', None) or [])
+                actor_source = str(getattr(adef, 'source', None) or '').strip()
             self._emit_event('ai_request', {
                 'wait_key': dsh_wait_key,
                 'node_name': _current_node_id,
                 'blocks': blocks,
                 'actor_info': actor_info,
+                # source：剧本 actor 声明的模型（裸 id 或 provider/model），宿主据此选模型
+                'source': actor_source,
                 'scope': str(ad.scope) if getattr(ad, 'scope', None) else '',
                 'scope_info': scope_info,
                 'actor_tools': actor_tools,
@@ -2476,6 +2499,8 @@ class FEMRunner:
                 self._dsh_trajectory_text = ''
                 return dsh_result or ''
         else:
+            # 直连模式（无 dsh 宿主）：函数级 import 保持局部作用域，勿上移
+            from femBridges.llmBridge import call_ai_with_blocks
             return await self.engine.run_in_thread(
                 call_ai_with_blocks,
                 blocks,
@@ -2484,14 +2509,39 @@ class FEMRunner:
                 user_api_key=getattr(self, 'user_api_key', None),
                 user_api_provider=getattr(self, 'user_api_provider', None),
                 user_api_url=getattr(self, 'user_api_url', None),
-                model=getattr(self, 'user_api_model', None),
+                # 直连模式：source 声明了模型则覆盖配置默认模型
+                model=self._resolve_ai_model(ad, eparam),
             )
 
-    def _extract_ai_assignments(self, llm_output: str) -> tuple:
+    async def handle_error(self, error: Exception, node_id: str = '') -> ErrorCategory:
+        """统一错误处理入口（错误三桶，2026-08-18 模块化）。
+
+        引擎各处遇到错误先调本方法归桶，再按桶决定行为：
+        - FATAL → emit flow_error（宿主转主模型与用户）+ 返回 FATAL（调用方终止/暂停）；
+        - AGENT → 返回 AGENT（调用方注入 feedback 重试本节点）；
+        - TOLERANT → log 忽略（调用方继续）。
+        执行者输出类错误（AI 赋值违规）不走这里——它们由
+        _extract_ai_assignments 的 assign_errors 通道处理（AGENT 语义）。"""
+        cat = classify_error(error)
+        if cat == ErrorCategory.FATAL:
+            print(f"[runtime]💥 FATAL 错误（剧本暂停）: {error}")
+            self._emit_event('flow_error', {
+                'error': str(error),
+                'node_name': node_id,
+            })
+        elif cat == ErrorCategory.TOLERANT:
+            print(f"[runtime]⚠️ TOLERANT 错误（忽略继续）: {error}")
+        else:
+            print(f"[runtime]🔁 AGENT 错误（反馈重试）: {error}")
+        return cat
+
+    def _extract_ai_assignments(self, llm_output: str, out_whitelist: Optional[set] = None) -> tuple:
         """提取 AI 输出中的 SET VARIABLE 赋值。
         返回 (SET_VARIABLE 列表, assign_errors 列表)：
-        - 解析/赋值失败（未声明变量等）→ assign_errors（触发重试）
-        - 格式类失败 → SET_VARIABLE（宽容路径，交给 resolve/丢弃）"""
+        - 解析/赋值失败（未声明变量、不在 out 白名单等）→ assign_errors（触发重试）
+        - 格式类失败 → SET_VARIABLE（宽容路径，交给 resolve/丢弃）
+        out_whitelist：本节点 out 声明的变量名集合；非 None 时 AI 只能赋值其中
+        的变量（防幻觉乱赋值），其余报 FEMVariableError 走重试。"""
         all_matches = re.findall(
             r'(?:SET\s+VARIABLE|设定变量)\s*[:：]\s*(?:<<|《|〈|《《)\s*(.+?)(?:>>|》|〉|》》)',
             llm_output
@@ -2501,6 +2551,13 @@ class FEMRunner:
         for match in all_matches:
             try:
                 var_name, expr = self._parse_single_assignment(match.strip())
+                # out 白名单：AI 只能赋值本节点 out 声明的变量（防幻觉乱赋值）。
+                if out_whitelist is not None and var_name not in out_whitelist:
+                    raise FEMVariableError(
+                        f"变量 '{var_name}' 不在本节点的 out 声明范围内（out 只声明了: "
+                        f"{', '.join(sorted(out_whitelist)) if out_whitelist else '无'}）。"
+                        f"AI 只能赋值 out 中声明的变量。"
+                    )
                 intent = parse_assign_syntax(expr, var_name)
                 op, val = intent
                 if op in ('set', 'add', 'remove') and isinstance(val, str):
@@ -2558,8 +2615,11 @@ class FEMRunner:
             print(f"[runtime]📤 out: {var_name}")
 
         # ── 收集 blocks 并调用 LLM ──
+        # 注意：此处不得 import llmBridge/llmProviders——其模块顶层 import requests，
+        # 而 dsh 宿主模式下系统 Python 无第三方依赖（纯标准库原则）。真正的 LLM
+        # 调用在 _invoke_ai_llm 内按 _dsh_ai_backend 分支延迟 import（2026-08-21
+        # 修复：原无条件死 import 使 dsh 模式 AI 节点必炸 No module named 'requests'）。
         from femCompiler.block_collector import collect_blocks
-        from femBridges.llmBridge import call_ai_with_blocks
 
         self._current_prompt = prompt
         # 直接传原始参数，让 _get_actor_info 上下文感知解析
@@ -2679,9 +2739,37 @@ class FEMRunner:
         max_tries = max(1, (getattr(ad, 'max_retries', None) or 2) + 1)
         SET_VARIABLE = []
         assign_errors = []
+        # out 白名单（防 AI 幻觉乱赋值）：本节点 out 声明的变量名集合。
+        out_whitelist = {
+            getattr(od, 'var_name', '') for od in (ad.outs or [])
+            if getattr(od, 'var_name', '')
+        }
         for _attempt in range(max_tries):
-            llm_output = await self._invoke_ai_llm(blocks, ad, eparam, actor_info, scope_info, _current_node_id)
-            SET_VARIABLE, assign_errors = self._extract_ai_assignments(llm_output)
+            try:
+                llm_output = await self._invoke_ai_llm(blocks, ad, eparam, actor_info, scope_info, _current_node_id)
+            except FEMTransientError as e:
+                # LLM 临时失败（限流/超时/网络）→ AGENT 桶：feedback 后重跑本节点
+                if _attempt >= max_tries - 1:
+                    print(f"[runtime]⚠️ LLM 临时失败重试用尽: {e}")
+                    llm_output = None
+                    break
+                feedback = f'- LLM 调用临时失败（限流/超时/网络）：{e}'
+                blocks['basic_safety'] = (blocks.get('basic_safety') or '') + (
+                    f'\n\n[系统提示] 你上一轮的 LLM 调用遇到临时故障（第 {_attempt + 1} 次），请重新输出完整内容。\n'
+                    f'{feedback}\n'
+                )
+                self._emit_event('ai_retry', {
+                    'node_name': _current_node_id,
+                    'attempt': _attempt + 1,
+                    'errors': [feedback],
+                })
+                continue
+            except FEMConfigError as e:
+                # LLM 配置错误（无 key/模型/URL）→ FATAL 桶：传播到 bridge worker
+                # 统一收尾（flow_error + 全停），不在此 emit 避免重复事件。
+                print(f"[runtime]💥 LLM 配置错误（FATAL）: {e}")
+                raise
+            SET_VARIABLE, assign_errors = self._extract_ai_assignments(llm_output, out_whitelist)
             if not assign_errors or _attempt >= max_tries - 1:
                 break
             feedback = '\n'.join(f'- {x}' for x in assign_errors)
@@ -3603,12 +3691,12 @@ class FEMRunner:
         print(f"[DEBUG _get_actor_info] 最终 actor_info = {info}")
         return info
 
-    def _resolve_ai_source(self, action, executor_param: str) -> str:
+    def _resolve_actor_def(self, action, executor_param: str):
+        """解析动作执行者对应的演员定义。
+
+        支持动态变量 @xxx 解析（执行者每轮可能是变量赋值的演员名），
+        非静态演员时回退 as_actor；找不到返回 None。
         """
-        解析当前 AI 动作实际调用的 API provider 标识。
-        返回 source 字符串，如 "openai"；若无法确定则返回 "unknown"。
-        """
-        # 1. 确定演员名
         actor_name = executor_param
         # 支持动态变量 @xxx 解析
         while actor_name.startswith('@') and actor_name not in self.script.actors:
@@ -3622,19 +3710,45 @@ class FEMRunner:
             if hasattr(action, 'as_actor') and action.as_actor:
                 actor_name = action.as_actor
 
-        # 2. 从演员定义中提取 source
         if actor_name in self.script.actors:
-            actor_def = self.script.actors[actor_name]
-            source = getattr(actor_def, 'source', None)
-            if source:
-                return str(source)
+            return self.script.actors[actor_name]
+        return None
 
-        # 3. 回退：使用用户自设的 API provider
+    def _resolve_ai_source(self, action, executor_param: str) -> str:
+        """
+        解析当前 AI 动作实际调用的 API provider 标识（限流分桶用）。
+        source 含 '/' 时取 provider 部分；裸 id / 无 source 回退用户自设 provider。
+        返回 provider 字符串，如 "deepseek"；若无法确定则返回 "unknown"。
+        """
+        adef = self._resolve_actor_def(action, executor_param)
+        if adef is not None:
+            source = getattr(adef, 'source', None)
+            if source:
+                s = str(source)
+                if '/' in s:
+                    return s.split('/', 1)[0]
+
+        # 回退：使用用户自设的 API provider
         if self.user_api_provider:
             return str(self.user_api_provider)
 
-        # 4. 兜底
+        # 兜底
         return "unknown"
+
+    def _resolve_ai_model(self, action, executor_param: str) -> str:
+        """
+        直连模式：source 声明的模型覆盖配置默认模型。
+        裸 id 原样使用；provider/model 取 '/' 后模型部分；无 source 用 user_api_model。
+        """
+        adef = self._resolve_actor_def(action, executor_param)
+        if adef is not None:
+            source = getattr(adef, 'source', None)
+            if source:
+                s = str(source)
+                if '/' in s:
+                    return s.split('/', 1)[1]
+                return s
+        return str(getattr(self, 'user_api_model', None) or '')
 
     # ── 条件表达式安全求值使用的 Python 内置安全命名空间 ──
     _SAFE_BUILTINS = {

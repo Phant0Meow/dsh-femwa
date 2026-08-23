@@ -17,9 +17,9 @@ vars:
 code:
   battle = file:"utils/battle.py"
 actors:
-  ai @knight = soul:2
-  ai @mage = soul:3
-  human @player = soul:9, source:0
+  ai @knight = soul:littlecat
+  ai @mage = soul:AI助手
+  human @player = soul:human, source:0
 action ep @func(battle.enemy_phase):
   in: hp, alive_party, battle_round
   out: hp

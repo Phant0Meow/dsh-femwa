@@ -85,7 +85,7 @@ def test_unsaved_relative_script_fails_via_bridge(run_events):
     fems = (
         'meta:\n  name = rel-unsaved\n'
         'code:\n  helper = file:"mt_test/file_a.py"\n'
-        'mainflow:\n  [START] -> END\n'
+        'mainflow:\n  [START] -> [END]\n'
     )
     events = run_events(fems, base_dir="")
     errs = [e["data"].get("error", "") for e in events if e["event"] == "flow_error"]
@@ -98,7 +98,7 @@ def test_saved_relative_script_runs_via_bridge(run_events):
     fems = (
         'meta:\n  name = rel-saved\n'
         'code:\n  helper = file:"mt_test/file_a.py"\n'
-        'mainflow:\n  [START] -> END\n'
+        'mainflow:\n  [START] -> [END]\n'
     )
     events = run_events(fems, base_dir=PYTHON_DIR)
     assert any(e["event"] == "flow_done" for e in events), [e["event"] for e in events]

@@ -30,9 +30,9 @@ import React, {
   useEffect,
   useMemo,
 } from 'react';
-import { ti, inp, btnP, btnS } from './common';
+import { ti, inp, btnP, btnS, getNodeSize } from './common';
 import { LibPanel } from './libPanel';
-import { ProjPanel } from './projectPanel';
+import { ProjPanel, useModelList, sourceOptions } from './projectPanel';
 import { BubbleOverlay } from './bubbleOverlay';
 import { FemPreview } from './femPreview';
 
@@ -40,21 +40,21 @@ import { FemPreview } from './femPreview';
 // 颜色 / 主题 token
 // ─────────────────────────────────────────────
 const T = {
-  bg: '#0d1117',
-  surface: '#161b27',
-  surfaceHover: '#1e2535',
-  border: '#2a3347',
-  borderLight: '#3a4560',
-  accent: '#3d5cf5',
-  accentGlow: 'rgba(61,92,245,0.25)',
-  textPrimary: '#e8edf8',
-  textSecondary: '#7a8aaa',
-  textMuted: '#4a5568',
-  tabActive: '#3d5cf5',
-  tabInactive: '#2a3347',
-  danger: '#ef4444',
-  success: '#22c55e',
-  warning: '#f59e0b',
+  bg: 'var(--fem-mobile-bg)',
+  surface: 'var(--fem-mobile-surface)',
+  surfaceHover: 'var(--fem-mobile-surface-hover)',
+  border: 'var(--fem-mobile-border)',
+  borderLight: 'var(--fem-mobile-border-light)',
+  accent: 'var(--fem-primary)',
+  accentGlow: 'var(--fem-primary-glow)',
+  textPrimary: 'var(--fem-mobile-text-1)',
+  textSecondary: 'var(--fem-text-3)',
+  textMuted: 'var(--fem-mobile-text-3)',
+  tabActive: 'var(--fem-primary)',
+  tabInactive: 'var(--fem-mobile-border)',
+  danger: 'var(--fem-danger)',
+  success: 'var(--fem-success)',
+  warning: 'var(--fem-warning)',
 };
 
 // ─────────────────────────────────────────────
@@ -62,14 +62,15 @@ const T = {
 // ─────────────────────────────────────────────
 const MobileGlobalStyle = () => (
   <style>{`
-    /* 禁止整体页面缩放 / 滚动 */
+    /* round44：全局 touch-action:none 是仓库卡片无法滚动的元凶——
+       Chrome 从触点向上累积 touch-action，body 的 none 污染整条链。
+       画布区自有独立规则（.fem-canvas-zone），此处不再全局禁触。 */
     html, body {
       overscroll-behavior: none;
-      touch-action: none;
       user-select: none;
       -webkit-user-select: none;
     }
-    /* 画布区允许自定义 touch-action */
+    /* 画布区禁止浏览器默认触摸行为（拖节点/连线/平移全走自定义手势） */
     .fem-canvas-zone {
       touch-action: none;
     }
@@ -122,6 +123,21 @@ const MobileGlobalStyle = () => (
       0%, 100% { opacity: 1; transform: scale(1); }
       50%       { opacity: 0.6; transform: scale(0.85); }
     }
+    /* round27：仓库拖拽 ghost 弹出（弹性放大+淡入，只动 opacity/transform） */
+    @keyframes ghostPopIn {
+      from { opacity: 0; transform: scale(0.7); }
+      to   { opacity: 1; transform: scale(1.05); }
+    }
+    /* round27：ghost 光晕呼吸（只动 box-shadow，与 popIn 属性不相交可同列） */
+    @keyframes ghostBreath {
+      from { box-shadow: 0 4px 16px var(--fem-primary-glow); }
+      to   { box-shadow: 0 6px 26px var(--fem-primary-glow-x); }
+    }
+    /* round27：画布"可放置"提示浮现 */
+    @keyframes dropHintIn {
+      from { opacity: 0; transform: scale(0.985); }
+      to   { opacity: 1; transform: scale(1); }
+    }
     /* 流式光标 */
     .mob-cursor { animation: blink 0.75s step-end infinite; }
     @keyframes blink { 50% { opacity: 0; } }
@@ -135,7 +151,8 @@ function MobileTitleBar({
   projName,
   flowStatus,
   femVisible,
-  onMenuOpen,
+  onBack,
+  onExpand,
   onToggleFem,
   onRun,
   onPause,
@@ -156,7 +173,7 @@ function MobileTitleBar({
         minHeight: 40,
         maxHeight: 56,
         background: T.surface,
-        borderBottom: `1px solid ${T.border}`,
+        borderBottom: `var(--fem-border-w) solid ${T.border}`,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'space-between',
@@ -174,41 +191,52 @@ function MobileTitleBar({
           width: '60%',
           height: '100%',
           background:
-            'linear-gradient(90deg,transparent,rgba(61,92,245,0.06),transparent)',
+            'linear-gradient(90deg,transparent,var(--fem-primary-glow-weak),transparent)',
           pointerEvents: 'none',
           animation: 'scanLine 4s linear infinite',
         }}
       />
 
-      {/* 左侧：菜单键 */}
-      <button
-        onClick={onMenuOpen}
-        style={{
-          background: 'none',
-          border: 'none',
-          cursor: 'pointer',
-          padding: '6px 8px 6px 0',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 4,
-          flexShrink: 0,
-        }}
-        aria-label="菜单"
-      >
-        {[0, 1, 2].map((i) => (
-          <span
-            key={i}
-            style={{
-              display: 'block',
-              width: i === 1 ? 16 : 22,
-              height: 2,
-              background: T.textSecondary,
-              borderRadius: 2,
-              transition: 'width 0.2s',
-            }}
-          />
-        ))}
-      </button>
+      {/* 左侧：插件模式 ←返回（全屏，开 dsh 边栏）/ →全屏（容器内，回沉浸）；独立模式无左侧键 */}
+      {onExpand ? (
+        <button
+          onClick={onExpand}
+          aria-label="全屏"
+          style={{
+            background: 'none',
+            border: 'none',
+            cursor: 'pointer',
+            padding: '6px 10px 6px 2px',
+            display: 'flex',
+            alignItems: 'center',
+            color: T.textSecondary,
+            fontSize: 22,
+            lineHeight: 1,
+            flexShrink: 0,
+          }}
+        >
+          →
+        </button>
+      ) : onBack ? (
+        <button
+          onClick={onBack}
+          aria-label="返回"
+          style={{
+            background: 'none',
+            border: 'none',
+            cursor: 'pointer',
+            padding: '6px 10px 6px 2px',
+            display: 'flex',
+            alignItems: 'center',
+            color: T.textSecondary,
+            fontSize: 22,
+            lineHeight: 1,
+            flexShrink: 0,
+          }}
+        >
+          ←
+        </button>
+      ) : null}
 
       {/* 中间：项目名 + 状态 */}
       <div
@@ -226,7 +254,7 @@ function MobileTitleBar({
             fontSize: 13,
             fontWeight: 800,
             color: T.textPrimary,
-            fontFamily: 'DM Sans, sans-serif',
+            fontFamily: 'var(--fem-font-sans)',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
@@ -241,14 +269,14 @@ function MobileTitleBar({
               style={{
                 width: 6,
                 height: 6,
-                borderRadius: '50%',
+                borderRadius: 'var(--fem-radius-pill)',
                 background: statusDot.c,
                 display: 'block',
                 animation: flowStatus === 'running' ? 'pulse 1.2s ease-in-out infinite' : 'none',
                 flexShrink: 0,
               }}
             />
-            <span style={{ fontSize: 10, color: statusDot.c, fontWeight: 700, fontFamily: 'JetBrains Mono, monospace' }}>
+            <span style={{ fontSize: 10, color: statusDot.c, fontWeight: 700, fontFamily: 'var(--fem-font-mono)' }}>
               {statusDot.label}
             </span>
           </div>
@@ -289,13 +317,13 @@ function MobileTitleBar({
           style={{
             background: femVisible ? T.accent : T.tabInactive,
             border: 'none',
-            borderRadius: 6,
+            borderRadius: 'var(--fem-radius-sm)',
             padding: '4px 8px',
             cursor: 'pointer',
             fontSize: 9.5,
             fontWeight: 800,
             color: femVisible ? 'white' : T.textSecondary,
-            fontFamily: 'JetBrains Mono, monospace',
+            fontFamily: 'var(--fem-font-mono)',
             letterSpacing: '0.04em',
             transition: 'background 0.15s, color 0.15s',
           }}
@@ -314,8 +342,8 @@ function MobileIconBtn({ onClick, label, color, title }) {
       title={title}
       style={{
         background: color + '22',
-        border: `1px solid ${color}44`,
-        borderRadius: 6,
+        border: `var(--fem-border-w) solid ${color}44`,
+        borderRadius: 'var(--fem-radius-sm)',
         width: 30,
         height: 30,
         display: 'flex',
@@ -333,118 +361,6 @@ function MobileIconBtn({ onClick, label, color, title }) {
 }
 
 // ─────────────────────────────────────────────
-// SideMenu（侧边滑出菜单）
-// ─────────────────────────────────────────────
-function MobileSideMenu({ open, onClose, onOpenApiKey, onOpenSoul }) {
-  if (!open) return null;
-  const items = [
-    {
-      icon: '🔑',
-      label: 'API 密钥',
-      sub: '配置模型接口',
-      action: onOpenApiKey,
-    },
-    {
-      icon: '👤',
-      label: '新建 Soul',
-      sub: '创建角色身份',
-      action: onOpenSoul,
-    },
-  ];
-  return (
-    <>
-      {/* 遮罩 */}
-      <div
-        onClick={onClose}
-        style={{
-          position: 'fixed',
-          inset: 0,
-          background: 'rgba(0,0,0,0.55)',
-          zIndex: 400,
-          animation: 'fadeInOverlay 0.18s ease',
-        }}
-      />
-      {/* 菜单板 */}
-      <div
-        style={{
-          position: 'fixed',
-          left: 0,
-          top: 0,
-          bottom: 0,
-          width: '72vw',
-          maxWidth: 300,
-          background: T.surface,
-          borderRight: `1px solid ${T.border}`,
-          zIndex: 401,
-          display: 'flex',
-          flexDirection: 'column',
-          animation: 'slideInMenu 0.22s cubic-bezier(0.4,0,0.2,1)',
-          boxShadow: '8px 0 32px rgba(0,0,0,0.4)',
-        }}
-      >
-        {/* 菜单头 */}
-        <div
-          style={{
-            padding: '20px 18px 14px',
-            borderBottom: `1px solid ${T.border}`,
-          }}
-        >
-          <div style={{ fontSize: 11, fontWeight: 800, color: T.accent, letterSpacing: '0.12em', fontFamily: 'JetBrains Mono, monospace', marginBottom: 4 }}>
-            FEM WORKFLOW
-          </div>
-          <div style={{ fontSize: 9, color: T.textMuted, fontFamily: 'JetBrains Mono, monospace' }}>
-            VISUAL EDITOR
-          </div>
-        </div>
-
-        {/* 菜单项 */}
-        <div style={{ padding: '10px 10px', flex: 1 }}>
-          {items.map((item) => (
-            <button
-              key={item.label}
-              onClick={() => { item.action?.(); onClose(); }}
-              style={{
-                width: '100%',
-                background: 'none',
-                border: 'none',
-                borderRadius: 10,
-                padding: '12px 14px',
-                display: 'flex',
-                alignItems: 'center',
-                gap: 12,
-                cursor: 'pointer',
-                textAlign: 'left',
-                marginBottom: 4,
-                transition: 'background 0.12s',
-              }}
-              onTouchStart={(e) => e.currentTarget.style.background = T.surfaceHover}
-              onTouchEnd={(e) => e.currentTarget.style.background = 'none'}
-            >
-              <span style={{ fontSize: 20, flexShrink: 0 }}>{item.icon}</span>
-              <div>
-                <div style={{ fontSize: 13.5, fontWeight: 700, color: T.textPrimary, fontFamily: 'DM Sans, sans-serif' }}>
-                  {item.label}
-                </div>
-                <div style={{ fontSize: 10.5, color: T.textMuted, marginTop: 1 }}>
-                  {item.sub}
-                </div>
-              </div>
-            </button>
-          ))}
-        </div>
-
-        {/* 底部版本 */}
-        <div style={{ padding: '12px 18px', borderTop: `1px solid ${T.border}` }}>
-          <div style={{ fontSize: 9, color: T.textMuted, fontFamily: 'JetBrains Mono, monospace' }}>
-            FEM EDITOR · MOBILE
-          </div>
-        </div>
-      </div>
-    </>
-  );
-}
-
-// ─────────────────────────────────────────────
 // FEM 预览侧板（右侧全高滑出）
 // ─────────────────────────────────────────────
 function MobileFemPanel({ visible, femText, onChange, femError, femDirty, onApply, onRestore, onGraphToFem, onClose }) {
@@ -456,7 +372,7 @@ function MobileFemPanel({ visible, femText, onChange, femError, femDirty, onAppl
         style={{
           position: 'fixed',
           inset: 0,
-          background: 'rgba(0,0,0,0.45)',
+          background: 'var(--fem-mask)',
           zIndex: 300,
           animation: 'fadeInOverlay 0.18s ease',
         }}
@@ -469,27 +385,27 @@ function MobileFemPanel({ visible, femText, onChange, femError, femDirty, onAppl
           bottom: 0,
           width: '88vw',
           maxWidth: 420,
-          background: '#0c1428',
-          borderLeft: `1px solid ${T.border}`,
+          background: 'var(--fem-mobile-bg-2)',
+          borderLeft: `var(--fem-border-w) solid ${T.border}`,
           zIndex: 301,
           display: 'flex',
           flexDirection: 'column',
           animation: 'slideInFem 0.22s cubic-bezier(0.4,0,0.2,1)',
-          boxShadow: '-8px 0 32px rgba(0,0,0,0.5)',
+          boxShadow: '-8px 0 32px var(--fem-mask)',
         }}
       >
         {/* 头部 */}
         <div
           style={{
             padding: '14px 16px 10px',
-            borderBottom: '1px solid #1e2d45',
+            borderBottom: 'var(--fem-border-w) solid var(--fem-mobile-border-strong)',
             display: 'flex',
             justifyContent: 'space-between',
             alignItems: 'center',
             flexShrink: 0,
           }}
         >
-          <span style={{ fontSize: 10, fontWeight: 800, color: '#9aaccb', textTransform: 'uppercase', letterSpacing: '0.1em', fontFamily: 'JetBrains Mono, monospace' }}>
+          <span style={{ fontSize: 10, fontWeight: 800, color: 'var(--fem-neutral)', textTransform: 'uppercase', letterSpacing: '0.1em', fontFamily: 'var(--fem-font-mono)' }}>
             FEM 预览
           </span>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
@@ -503,7 +419,7 @@ function MobileFemPanel({ visible, femText, onChange, femError, femDirty, onAppl
                 ...mobBtnP,
                 fontSize: 10,
                 padding: '4px 10px',
-                background: femDirty ? T.accent : '#475569',
+                background: femDirty ? T.accent : 'var(--fem-tag-bg)',
               }}
             >
               文→图
@@ -511,16 +427,16 @@ function MobileFemPanel({ visible, femText, onChange, femError, femDirty, onAppl
             <button
               onClick={onClose}
               style={{
-                background: '#1e2d45',
+                background: 'var(--fem-mobile-border-strong)',
                 border: 'none',
-                borderRadius: 6,
+                borderRadius: 'var(--fem-radius-sm)',
                 width: 28,
                 height: 28,
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'center',
                 cursor: 'pointer',
-                color: '#9aaccb',
+                color: 'var(--fem-neutral)',
                 fontSize: 14,
               }}
             >
@@ -531,7 +447,7 @@ function MobileFemPanel({ visible, femText, onChange, femError, femDirty, onAppl
 
         {/* 错误提示 */}
         {femError && (
-          <div style={{ margin: '8px 12px 0', padding: '6px 10px', background: '#300', border: '1px solid #622', borderRadius: 6, fontSize: 10, color: '#f87171', lineHeight: 1.5 }}>
+          <div style={{ margin: '8px 12px 0', padding: '6px 10px', background: 'var(--fem-mobile-danger-soft)', border: 'var(--fem-border-w) solid var(--fem-mobile-danger-border)', borderRadius: 'var(--fem-radius-sm)', fontSize: 10, color: 'var(--fem-danger-weak)', lineHeight: 1.5 }}>
             {femError}
           </div>
         )}
@@ -548,10 +464,10 @@ function MobileFemPanel({ visible, femText, onChange, femError, femDirty, onAppl
             outline: 'none',
             resize: 'none',
             padding: '12px 14px',
-            fontFamily: 'JetBrains Mono, monospace',
+            fontFamily: 'var(--fem-font-mono)',
             fontSize: 10.5,
             lineHeight: 1.8,
-            color: '#8fa8c8',
+            color: 'var(--fem-mobile-text-2-alt)',
             touchAction: 'auto',
             userSelect: 'text',
             WebkitUserSelect: 'text',
@@ -571,6 +487,7 @@ const BOTTOM_TABS = [
   { id: 'library', label: '仓库' },
   { id: 'project', label: '项目' },
   { id: 'props', label: '属性' },
+  { id: 'settings', label: '设置' },
 ];
 
 function MobileBottomPanel({
@@ -589,9 +506,14 @@ function MobileBottomPanel({
   onEdit,
   onEditModule,
   onDragStart,
-  onLibTouchStart,
+  // round49：四个触摸处理器全部面板级（挂在滚动容器上），落点无关——
+  // touchstart 用 closest('[data-fem-lib-drag]') 找拖拽目标；move/end 负责仲裁与拖拽。
+  onPanelTouchStart,
   onLibTouchMove,
   onLibTouchEnd,
+  onLibTouchCancel = null,
+  libArmedKey, // round27：长按激活拖拽的条目 key（点亮被按卡片）
+  htmlDraggable = false, // 手机端恒 false——draggable 卡片阻止触摸滚动
   onSelectLib,
   onNewModule,
   // Project props
@@ -613,6 +535,10 @@ function MobileBottomPanel({
   onCondChange,
   onEditAction,
   libSel,
+  // Settings（设置 tab：主题切换 + 新建 SOUL）
+  themeName,
+  onCycleTheme,
+  onOpenSoul,
 }) {
   const scrollRef = useRef(null);
   const WIN_H = typeof window !== 'undefined' ? window.innerHeight : 700;
@@ -625,8 +551,26 @@ function MobileBottomPanel({
 
   // 切换 tab 时滚回顶部
   useEffect(() => {
-    if (scrollRef.current) scrollRef.current.scrollTop = 0;
-  }, [activeTab]);
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;  }, [activeTab]);
+
+  // round46/49：仓库触摸四事件全挂**原生**监听——React 根级委派是 passive 的，
+  // armed 状态的 preventDefault 在那里无效。touchstart 用 passive:true（我们从不
+  // 在 start 阶段拦截，主动向 WebKit 声明"不挡滚动"，换取最快滚动启动路径）；
+  // move/end 保持非 passive（armed 拖拽需要 preventDefault）。
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !onLibTouchMove || !onLibTouchEnd) return;
+    if (onPanelTouchStart) el.addEventListener('touchstart', onPanelTouchStart, { passive: true });
+    el.addEventListener('touchmove', onLibTouchMove, { passive: false });
+    el.addEventListener('touchend', onLibTouchEnd, { passive: false });
+    el.addEventListener('touchcancel', onLibTouchCancel || (() => {}), { passive: true });
+    return () => {
+      if (onPanelTouchStart) el.removeEventListener('touchstart', onPanelTouchStart);
+      el.removeEventListener('touchmove', onLibTouchMove);
+      el.removeEventListener('touchend', onLibTouchEnd);
+      el.removeEventListener('touchcancel', onLibTouchCancel || (() => {}));
+    };
+  }, [onPanelTouchStart, onLibTouchMove, onLibTouchEnd, onLibTouchCancel]);
 
   // 鼠标拖拽（桌面调试用）
   const onHandleMouseDown = useCallback((e) => {
@@ -669,7 +613,7 @@ function MobileBottomPanel({
       style={{
         height: panelH,
         background: T.surface,
-        borderTop: `1px solid ${T.border}`,
+        borderTop: `var(--fem-border-w) solid ${T.border}`,
         display: 'flex',
         flexDirection: 'column',
         flexShrink: 0,
@@ -704,7 +648,7 @@ function MobileBottomPanel({
           style={{
             width: 36,
             height: 4,
-            borderRadius: 2,
+            borderRadius: 'var(--fem-radius-xs)',
             background: T.borderLight,
             opacity: 0.7,
             marginTop: 6,
@@ -716,7 +660,7 @@ function MobileBottomPanel({
       <div
         style={{
           display: 'flex',
-          borderBottom: `1px solid ${T.border}`,
+          borderBottom: `var(--fem-border-w) solid ${T.border}`,
           flexShrink: 0,
           background: T.bg,
           marginTop: 18,
@@ -730,20 +674,20 @@ function MobileBottomPanel({
               flex: 1,
               background: 'none',
               border: 'none',
-              borderBottom: activeTab === t.id ? `2px solid ${T.accent}` : '2px solid transparent',
+              borderBottom: activeTab === t.id ? `var(--fem-border-w-selected) solid ${T.accent}` : 'var(--fem-border-w-selected) solid transparent',
               padding: '7px 0',
               fontSize: 11.5,
               fontWeight: activeTab === t.id ? 800 : 500,
               color: activeTab === t.id ? T.accent : T.textMuted,
               cursor: 'pointer',
-              fontFamily: 'DM Sans, sans-serif',
+              fontFamily: 'var(--fem-font-sans)',
               letterSpacing: '0.02em',
               transition: 'color 0.15s, border-color 0.15s',
             }}
           >
             {t.label}
             {t.id === 'props' && (sel || libSel) && (
-              <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: '50%', background: T.accent, marginLeft: 4, verticalAlign: 'middle' }} />
+              <span style={{ display: 'inline-block', width: 5, height: 5, borderRadius: 'var(--fem-radius-pill)', background: T.accent, marginLeft: 4, verticalAlign: 'middle' }} />
             )}
           </button>
         ))}
@@ -761,9 +705,8 @@ function MobileBottomPanel({
           minHeight: 0,
           // 让桌面端组件在深色背景下可读
           '--text-primary': T.textPrimary,
-          color: '#1b2540',
-          background: 'white',
-          borderRadius: '8px 8px 0 0',
+          color: 'var(--fem-text-1)',
+          background: 'transparent', /* round12/15：去掉圆角卡片底，融入壳背景 */
         }}
       >
         {activeTab === 'library' && (
@@ -780,9 +723,8 @@ function MobileBottomPanel({
             onEdit={onEdit}
             onEditModule={onEditModule}
             onDragStart={onDragStart}
-            onLibTouchStart={onLibTouchStart}
-            onLibTouchMove={onLibTouchMove}
-            onLibTouchEnd={onLibTouchEnd}
+            armedKey={libArmedKey}
+            htmlDraggable={htmlDraggable}
             onSelectLib={onSelectLib}
             onNewModule={onNewModule}
           />
@@ -813,6 +755,45 @@ function MobileBottomPanel({
             lib={lib}
           />
         )}
+        {activeTab === 'settings' && (
+          <div>
+            <div style={sectionLabel}>设置</div>
+            <div style={{ display: 'flex', gap: 8, marginTop: 8, flexWrap: 'wrap' }}>
+              <button
+                onClick={onCycleTheme}
+                style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 4,
+                  padding: '7px 12px', borderRadius: 'var(--fem-radius-md)',
+                  fontSize: 12, fontWeight: 600,
+                  fontFamily: 'var(--fem-font-sans)',
+                  cursor: 'pointer',
+                  border: 'var(--fem-border-w) solid var(--fem-border-strong)',
+                  background: 'var(--fem-bg)',
+                  color: 'var(--fem-text-2)',
+                  flex: '0 0 auto',
+                }}
+              >
+                🎨 {themeName}
+              </button>
+              <button
+                onClick={onOpenSoul}
+                style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  padding: '7px 12px', borderRadius: 'var(--fem-radius-md)',
+                  fontSize: 12, fontWeight: 600,
+                  fontFamily: 'var(--fem-font-sans)',
+                  cursor: 'pointer',
+                  border: 'var(--fem-border-w) solid var(--fem-border-strong)',
+                  background: 'var(--fem-bg)',
+                  color: 'var(--fem-text-2)',
+                  flex: 1,
+                }}
+              >
+                新建 SOUL
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -838,15 +819,15 @@ function MobileLibPanel({ lib, mode, locationPath, allNames, onNew, onAdd, onAdd
   const specialNodes =
     mode === 'mainflow'
       ? [
-          { t: 'FOR', c: '#4f6ef7' },
-          { t: 'PAR', c: '#7e22ce' },
-          { t: 'END', c: '#ef4444' },
+          { t: 'FOR', c: 'var(--fem-primary-strong)' },
+          { t: 'PAR', c: 'var(--fem-special-par)' },
+          { t: 'END', c: 'var(--fem-danger)' },
         ]
       : [
-          { t: 'FOR', c: '#4f6ef7' },
-          { t: 'PAR', c: '#7e22ce' },
-          { t: 'BREAK', c: '#f59e0b' },
-          { t: 'OUT', c: '#ef4444' },
+          { t: 'FOR', c: 'var(--fem-primary-strong)' },
+          { t: 'PAR', c: 'var(--fem-special-par)' },
+          { t: 'BREAK', c: 'var(--fem-warning)' },
+          { t: 'OUT', c: 'var(--fem-danger)' },
         ];
 
   return (
@@ -856,7 +837,7 @@ function MobileLibPanel({ lib, mode, locationPath, allNames, onNew, onAdd, onAdd
         <span style={sectionLabel}>Actions</span>
         <button onClick={onNew} style={{ ...mobBtnP, padding: '3px 10px', fontSize: 10 }}>+ 新建</button>
       </div>
-      <div style={{ display: 'flex', gap: 7, overflowX: 'auto', paddingBottom: 4, WebkitOverflowScrolling: 'touch' }}>
+      <div style={{ display: 'flex', gap: 7, overflowX: 'auto', paddingBottom: 4, WebkitOverflowScrolling: 'touch', touchAction: 'pan-x' }}>
         {displayActions.length === 0 ? (
           <div style={{ fontSize: 11, color: T.textMuted, padding: '4px 0' }}>暂无 Action</div>
         ) : displayActions.map((a) => {
@@ -866,10 +847,10 @@ function MobileLibPanel({ lib, mode, locationPath, allNames, onNew, onAdd, onAdd
               key={a.id}
               onClick={() => onSelectLib?.('action', a.id)}
               style={{
-                background: '#1a2236',
-                borderRadius: 8,
-                border: `1.5px solid ${c}30`,
-                borderLeft: `3px solid ${c}`,
+                background: 'var(--fem-node-bg)',
+                borderRadius: 'var(--fem-radius-md)',
+                border: `var(--fem-node-border-w) solid var(--fem-node-border)`,
+                borderLeft: `var(--fem-border-w-accent) solid ${c}`,
                 padding: '6px 9px',
                 minWidth: 100,
                 maxWidth: 140,
@@ -881,10 +862,10 @@ function MobileLibPanel({ lib, mode, locationPath, allNames, onNew, onAdd, onAdd
                 {a.name}
               </div>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 4 }}>
-                <span style={{ fontSize: 9.5, fontWeight: 700, color: c, fontFamily: 'JetBrains Mono, monospace' }}>@{a.executorType}</span>
+                <span style={{ fontSize: 9.5, fontWeight: 700, color: c, fontFamily: 'var(--fem-font-mono)' }}>@{a.executorType}</span>
                 <button
                   onClick={(e) => { e.stopPropagation(); onAdd(a); }}
-                  style={{ background: c, border: 'none', borderRadius: 4, color: 'white', fontSize: 9, fontWeight: 700, padding: '1px 6px', cursor: 'pointer' }}
+                  style={{ background: 'var(--fem-btn-primary)', border: 'none', borderRadius: 'var(--fem-radius-sm)', color: 'var(--fem-on-accent)', fontSize: 9, fontWeight: 700, padding: '1px 6px', cursor: 'pointer' }}
                 >
                   +
                 </button>
@@ -898,16 +879,16 @@ function MobileLibPanel({ lib, mode, locationPath, allNames, onNew, onAdd, onAdd
       {displayModules.length > 0 && (
         <>
           <div style={{ ...sectionLabel, marginTop: 10, marginBottom: 6 }}>Modules</div>
-          <div style={{ display: 'flex', gap: 7, overflowX: 'auto', paddingBottom: 4 }}>
+          <div style={{ display: 'flex', gap: 7, overflowX: 'auto', paddingBottom: 4, touchAction: 'pan-x' }}>
             {displayModules.map((m) => (
               <div
                 key={m.id}
                 onClick={() => onSelectLib?.('module', m.id)}
                 style={{
-                  background: '#1a2236',
-                  borderRadius: 8,
-                  border: '1.5px solid #475569',
-                  borderLeft: '3px solid #475569',
+                  background: 'var(--fem-node-bg)',
+                  borderRadius: 'var(--fem-radius-md)',
+                  border: `var(--fem-node-border-w) solid var(--fem-node-border)`,
+                  borderLeft: 'var(--fem-border-w-accent) solid var(--fem-tag-bg)',
                   padding: '6px 9px',
                   minWidth: 100,
                   flexShrink: 0,
@@ -918,13 +899,13 @@ function MobileLibPanel({ lib, mode, locationPath, allNames, onNew, onAdd, onAdd
                 <div style={{ display: 'flex', gap: 4 }}>
                   <button
                     onClick={(e) => { e.stopPropagation(); onAddModule(m); }}
-                    style={{ background: '#475569', border: 'none', borderRadius: 4, color: 'white', fontSize: 9, fontWeight: 700, padding: '2px 6px', cursor: 'pointer', flex: 1 }}
+                    style={{ background: 'var(--fem-btn-primary)', border: 'none', borderRadius: 'var(--fem-radius-sm)', color: 'var(--fem-on-accent)', fontSize: 9, fontWeight: 700, padding: '2px 6px', cursor: 'pointer', flex: 1 }}
                   >
                     +画布
                   </button>
                   <button
                     onClick={(e) => { e.stopPropagation(); onEditModule?.(m); }}
-                    style={{ background: '#3d5cf5', border: 'none', borderRadius: 4, color: 'white', fontSize: 9, fontWeight: 700, padding: '2px 6px', cursor: 'pointer', flex: 1 }}
+                    style={{ background: 'var(--fem-primary)', border: 'none', borderRadius: 'var(--fem-radius-sm)', color: 'var(--fem-on-accent)', fontSize: 9, fontWeight: 700, padding: '2px 6px', cursor: 'pointer', flex: 1 }}
                   >
                     进入
                   </button>
@@ -961,37 +942,40 @@ function MobileLibPanel({ lib, mode, locationPath, allNames, onNew, onAdd, onAdd
       <div style={{ marginTop: 10 }}>
         <div style={sectionLabel}>特殊节点</div>
         <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
-          {specialNodes.map((s) => (
-            <button
-              key={s.t}
-              onClick={() => onAddSpecial(s.t)}
-              style={{
-                background: s.c + '18',
-                border: `1px solid ${s.c}44`,
-                borderRadius: 6,
-                padding: '4px 10px',
-                fontSize: 10.5,
-                fontWeight: 800,
-                color: s.c,
-                cursor: 'pointer',
-                fontFamily: 'JetBrains Mono, monospace',
-              }}
-            >
-              [{s.t}]
-            </button>
-          ))}
+          {specialNodes.map((s) => {
+            const spKey = { START: 'start', IN: 'start', END: 'end', OUT: 'end', BREAK: 'break', FOR: 'for', PAR: 'par' }[s.t] || 'for';
+            return (
+              <button
+                key={s.t}
+                onClick={() => onAddSpecial(s.t)}
+                style={{
+                  background: `var(--fem-sp-${spKey}-bg)`,
+                  border: `var(--fem-border-w) solid color-mix(in srgb, ${s.c} 50%, var(--fem-node-bg))`,
+                  borderRadius: 'var(--fem-radius-sm)',
+                  padding: '4px 10px',
+                  fontSize: 10.5,
+                  fontWeight: 800,
+                  color: s.c,
+                  cursor: 'pointer',
+                  fontFamily: 'var(--fem-font-mono)',
+                }}
+              >
+                [{s.t}]
+              </button>
+            );
+          })}
           <button
             onClick={onAddPosition}
             style={{
-              background: '#94a3b818',
-              border: '1px solid #94a3b844',
-              borderRadius: 6,
+              background: 'var(--fem-neutral-faint)',
+              border: 'var(--fem-border-w) solid var(--fem-neutral-border)',
+              borderRadius: 'var(--fem-radius-sm)',
               padding: '4px 10px',
               fontSize: 10.5,
               fontWeight: 700,
-              color: '#94a3b8',
+              color: 'var(--fem-neutral)',
               cursor: 'pointer',
-              fontFamily: 'JetBrains Mono, monospace',
+              fontFamily: 'var(--fem-font-mono)',
             }}
           >
             POSITION
@@ -1008,6 +992,8 @@ function MobileLibPanel({ lib, mode, locationPath, allNames, onNew, onAdd, onAdd
 function MobileProjPanel({ proj, actorNames, onChange }) {
   if (!proj) return null;
   const u = (x) => onChange({ ...proj, ...x });
+  // dsh 可用模型列表（source 下拉数据源）
+  const [models, modelErr] = useModelList();
   return (
     <div>
       <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
@@ -1035,7 +1021,7 @@ function MobileProjPanel({ proj, actorNames, onChange }) {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
         <span style={sectionLabel}>Actors</span>
         <button
-          onClick={() => u({ actors: [...(proj.actors || []), { name: '', type: 'ai', soul: '1', source: 'deepseek', tools: [] }] })}
+          onClick={() => u({ actors: [...(proj.actors || []), { name: '', type: 'ai', soul: '', source: '', tools: [] }] })}
           style={{ ...mobBtnP, padding: '2px 8px', fontSize: 10 }}
         >
           +
@@ -1055,8 +1041,27 @@ function MobileProjPanel({ proj, actorNames, onChange }) {
               placeholder="@Alice"
               style={{ ...mobInp, flex: 1, fontSize: 11 }}
             />
-            <input value={a.source} onChange={(e) => upd({ source: e.target.value })} placeholder="deepseek" style={{ ...mobInp, flex: 1, fontSize: 11 }} />
-            <button onClick={() => u({ actors: proj.actors.filter((_, j) => j !== i) })} style={{ background: 'none', border: 'none', color: '#f87171', fontSize: 16, cursor: 'pointer', flexShrink: 0, padding: 2 }}>×</button>
+            {a.type === 'ai' && models ? (
+              <select
+                value={a.source || ''}
+                onChange={(e) => upd({ source: e.target.value })}
+                style={{ ...mobInp, flex: 1, fontSize: 10 }}
+              >
+                {sourceOptions(models, a.source).map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <input
+                value={a.source}
+                onChange={(e) => upd({ source: e.target.value })}
+                placeholder={a.type === 'ai' ? (modelErr || 'deepseek') : '数字ID'}
+                style={{ ...mobInp, flex: 1, fontSize: 11 }}
+              />
+            )}
+            <button onClick={() => u({ actors: proj.actors.filter((_, j) => j !== i) })} style={{ background: 'none', border: 'none', color: 'var(--fem-danger-weak)', fontSize: 16, cursor: 'pointer', flexShrink: 0, padding: 2 }}>×</button>
           </div>
         );
       })}
@@ -1070,7 +1075,7 @@ function MobileProjPanel({ proj, actorNames, onChange }) {
         <div key={i} style={{ display: 'flex', gap: 5, marginBottom: 5, alignItems: 'center' }}>
           <input value={v.name} onChange={(e) => { const upd = [...proj.vars]; upd[i] = { ...upd[i], name: e.target.value }; u({ vars: upd }); }} placeholder="变量名" style={{ ...mobInp, flex: 1 }} />
           <input value={v.defaultValue} onChange={(e) => { const upd = [...proj.vars]; upd[i] = { ...upd[i], defaultValue: e.target.value }; u({ vars: upd }); }} placeholder="默认值" style={{ ...mobInp, flex: 2 }} />
-          <button onClick={() => u({ vars: proj.vars.filter((_, j) => j !== i) })} style={{ background: 'none', border: 'none', color: '#f87171', fontSize: 16, cursor: 'pointer', flexShrink: 0, padding: 2 }}>×</button>
+          <button onClick={() => u({ vars: proj.vars.filter((_, j) => j !== i) })} style={{ background: 'none', border: 'none', color: 'var(--fem-danger-weak)', fontSize: 16, cursor: 'pointer', flexShrink: 0, padding: 2 }}>×</button>
         </div>
       ))}
     </div>
@@ -1084,17 +1089,18 @@ function MobilePropsPanel({ sel, selNode, selEdge, selAction, nodes, edges, back
   if (sel?.type === 'node' && selNode) {
     const ns = nodeStates?.[selNode.id] || {};
     const action = selAction;
-    const { c } = action ? ti(action.executorType) : { c: '#94a3b8' };
+    const { c } = action ? ti(action.executorType) : { c: 'var(--fem-neutral)' };
     return (
       <div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 7, marginBottom: 10 }}>
           {action && (
-            <span style={{ background: c + '22', color: c, borderRadius: 5, padding: '2px 7px', fontSize: 10, fontWeight: 800, fontFamily: 'JetBrains Mono, monospace' }}>
+            <span style={{ background: `var(--fem-badge-bg-${['ai','human','mind','func','assign'].includes(action.executorType) ? action.executorType : 'ai'})`, color: `var(--fem-badge-fg-${['ai','human','mind','func','assign'].includes(action.executorType) ? action.executorType : 'ai'})`, borderRadius: 'var(--fem-radius-sm)', padding: '2px 7px', fontSize: 10, fontWeight: 800, fontFamily: 'var(--fem-font-mono)' }}>
               @{action.executorType}
             </span>
           )}
           <span style={{ fontSize: 13.5, fontWeight: 800, color: T.textPrimary }}>{action?.name || selNode.specialType || selNode.label || '节点'}</span>
         </div>
+        {selNode.label && <MobPropRow k="节点名" v={String(selNode.label).replace(/[\[\]]/g, '')} />}
         {action && (
           <>
             {action.executorActor && <MobPropRow k="执行者" v={action.executorActor} />}
@@ -1118,7 +1124,7 @@ function MobilePropsPanel({ sel, selNode, selEdge, selAction, nodes, edges, back
     return (
       <div>
         <div style={{ fontSize: 12, fontWeight: 700, color: T.textPrimary, marginBottom: 8 }}>连线属性</div>
-        {isBack && <div style={{ fontSize: 10, color: '#4f6ef7', fontWeight: 700, background: '#eef1ff22', borderRadius: 5, padding: '3px 7px', marginBottom: 6 }}>回环检测</div>}
+        {isBack && <div style={{ fontSize: 10, color: 'var(--fem-primary-strong)', fontWeight: 700, background: 'var(--fem-primary-soft-faint)', borderRadius: 'var(--fem-radius-sm)', padding: '3px 7px', marginBottom: 6 }}>回环检测</div>}
         {inEdges.length > 1 && <div style={{ fontSize: 10, color: T.warning, fontWeight: 700, marginBottom: 6 }}>Join 节点 ({inEdges.length} 入口)</div>}
         <div style={fieldLabel}>if 条件</div>
         <input
@@ -1164,7 +1170,7 @@ function MobPropRow({ k, v }) {
   return (
     <div style={{ display: 'flex', gap: 8, fontSize: 11.5, marginBottom: 5 }}>
       <span style={{ color: T.textMuted, minWidth: 44, flexShrink: 0 }}>{k}</span>
-      <span style={{ color: T.textPrimary, fontFamily: 'JetBrains Mono, monospace', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v}</span>
+      <span style={{ color: T.textPrimary, fontFamily: 'var(--fem-font-mono)', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v}</span>
     </div>
   );
 }
@@ -1185,7 +1191,7 @@ function MobileBubbleOverlay({ bubbleOverlay, nodes, nodeStates, actionStore, on
   const isAI = runType === 'ai';
   const isHuman = runType === 'human';
   const isStreaming = ns.status === 'ai_streaming';
-  const { c } = ti(action?.executorType) || { c: '#94a3b8' };
+  const { c } = ti(action?.executorType) || { c: 'var(--fem-neutral)' };
   const scrollRef = useRef(null);
 
   useEffect(() => {
@@ -1198,7 +1204,7 @@ function MobileBubbleOverlay({ bubbleOverlay, nodes, nodeStates, actionStore, on
     <>
       <div
         onClick={onClose}
-        style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 500, animation: 'fadeInOverlay 0.18s ease' }}
+        style={{ position: 'fixed', inset: 0, background: 'var(--fem-mask-heavy)', zIndex: 500, animation: 'fadeInOverlay 0.18s ease' }}
       />
       <div
         style={{
@@ -1208,11 +1214,11 @@ function MobileBubbleOverlay({ bubbleOverlay, nodes, nodeStates, actionStore, on
           transform: 'translate(-50%, -50%)',
           width: 'min(92vw, 460px)',
           maxHeight: '78vh',
-          background: 'white',
-          borderRadius: 16,
-          boxShadow: '0 24px 64px rgba(0,0,0,0.35)',
-          border: `2px solid ${c}`,
-          fontFamily: 'DM Sans, sans-serif',
+          background: 'var(--fem-surface)',
+          borderRadius: 'var(--fem-radius-xl)',
+          boxShadow: '0 24px 64px var(--fem-mask-soft)',
+          border: `var(--fem-border-w-selected) solid ${c}`,
+          fontFamily: 'var(--fem-font-sans)',
           zIndex: 501,
           display: 'flex',
           flexDirection: 'column',
@@ -1221,28 +1227,28 @@ function MobileBubbleOverlay({ bubbleOverlay, nodes, nodeStates, actionStore, on
         }}
       >
         {/* 头部 */}
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 16px', borderBottom: '1px solid #edf0f8', flexShrink: 0 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '14px 16px', borderBottom: 'var(--fem-border-w) solid var(--fem-border)', flexShrink: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
-            <span style={{ background: c + '18', color: c, borderRadius: 5, padding: '2px 7px', fontSize: 10, fontWeight: 800, fontFamily: 'JetBrains Mono, monospace' }}>
+            <span style={{ background: c + '18', color: c, borderRadius: 'var(--fem-radius-sm)', padding: '2px 7px', fontSize: 10, fontWeight: 800, fontFamily: 'var(--fem-font-mono)' }}>
               @{action?.executorType || '?'}
             </span>
-            <span style={{ fontWeight: 800, color: '#1b2540', fontSize: 15 }}>{action?.name || 'Node'}</span>
+            <span style={{ fontWeight: 800, color: 'var(--fem-text-1)', fontSize: 15 }}>{action?.name || 'Node'}</span>
           </div>
-          <button onClick={(e) => { e.stopPropagation(); onClose(); }} style={{ background: '#f1f5f9', border: 'none', fontSize: 15, cursor: 'pointer', color: '#64748b', borderRadius: 7, width: 30, height: 30, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
+          <button onClick={(e) => { e.stopPropagation(); onClose(); }} style={{ background: 'var(--fem-bg-2)', border: 'none', fontSize: 15, cursor: 'pointer', color: 'var(--fem-text-2-alt)', borderRadius: 'var(--fem-radius-md)', width: 30, height: 30, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
         </div>
 
         {/* 内容 */}
-        <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', padding: '14px 16px', lineHeight: 1.65, fontSize: 13, color: '#1b2540', touchAction: 'auto', WebkitOverflowScrolling: 'touch' }}>
+        <div ref={scrollRef} style={{ flex: 1, overflowY: 'auto', padding: '14px 16px', lineHeight: 1.65, fontSize: 13, color: 'var(--fem-text-1)', touchAction: 'auto', WebkitOverflowScrolling: 'touch' }}>
           {ns.context && <div style={{ whiteSpace: 'pre-wrap', marginBottom: 10 }}>{ns.context}</div>}
           {ns.showprompt && (
-            <div style={{ marginBottom: 10, background: '#f8fafc', padding: '8px 10px', borderRadius: 7 }}>
-              <div style={{ fontWeight: 700, color: '#7a8aaa', marginBottom: 3, fontSize: 10.5 }}>[节点提示]</div>
+            <div style={{ marginBottom: 10, background: 'var(--fem-bg)', padding: '8px 10px', borderRadius: 'var(--fem-radius-md)' }}>
+              <div style={{ fontWeight: 700, color: 'var(--fem-text-3)', marginBottom: 3, fontSize: 10.5 }}>[节点提示]</div>
               <div style={{ whiteSpace: 'pre-wrap', fontSize: 12 }}>{ns.showprompt}</div>
             </div>
           )}
           {isHuman && ns.prompt && (
-            <div style={{ marginBottom: 10, background: '#f8fafc', padding: '8px 10px', borderRadius: 7 }}>
-              <div style={{ fontWeight: 700, color: '#7a8aaa', marginBottom: 3, fontSize: 10.5 }}>[提示]</div>
+            <div style={{ marginBottom: 10, background: 'var(--fem-bg)', padding: '8px 10px', borderRadius: 'var(--fem-radius-md)' }}>
+              <div style={{ fontWeight: 700, color: 'var(--fem-text-3)', marginBottom: 3, fontSize: 10.5 }}>[提示]</div>
               <div style={{ whiteSpace: 'pre-wrap', fontSize: 12 }}>{ns.prompt}</div>
             </div>
           )}
@@ -1286,8 +1292,8 @@ function MobileHumanInput({ nodeId, onSubmit, outVars }) {
   };
 
   return (
-    <div style={{ flexShrink: 0, padding: '10px 14px 16px', borderTop: '1px solid #edf0f8' }}>
-      <div style={{ fontSize: 10, fontWeight: 700, color: '#f59e0b', marginBottom: 6 }}>⏳ 等待人类输入</div>
+    <div style={{ flexShrink: 0, padding: '10px 14px 16px', borderTop: 'var(--fem-border-w) solid var(--fem-border)' }}>
+      <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--fem-warning)', marginBottom: 6 }}>⏳ 等待人类输入</div>
       <textarea
         value={chatText}
         onChange={(e) => setChatText(e.target.value)}
@@ -1308,7 +1314,7 @@ function MobileHumanInput({ nodeId, onSubmit, outVars }) {
         <button onClick={handleSend} style={{ ...mobBtnP, padding: '7px 18px', fontSize: 12 }}>发送</button>
         {outVars.map((varName) => (
           <div key={varName} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-            <span style={{ fontSize: 10, fontWeight: 700, color: '#7a8aaa', fontFamily: 'JetBrains Mono, monospace' }}>{varName}:</span>
+            <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--fem-text-3)', fontFamily: 'var(--fem-font-mono)' }}>{varName}:</span>
             <input
               value={varValues[varName] || ''}
               onChange={(e) => setVarValues((p) => ({ ...p, [varName]: e.target.value }))}
@@ -1328,7 +1334,15 @@ function MobileHumanInput({ nodeId, onSubmit, outVars }) {
 // 节点拖拽直接操作 setNodes，不经过依赖闭包的 onMM
 // ─────────────────────────────────────────────
 const LONG_PRESS_MS = 200;
+// ── round49 仓库触摸仲裁 v2 常量：落点不参与裁决，只认位移与静止 ──
+const LIB_LONG_PRESS_MS = 300;    // 长按武装时限（比画布略长，区分"点选"与"拖"意图）
+const LIB_SCROLL_COMMIT_PX = 8;   // 位移防抖阈值：任一轴累计 ≥8px → 永判滚动，本手势绝不再拦截
+const LIB_DRAG_SLOP_PX = 4;       // 武装允许的累计漂移上限
+const LIB_STILL_MS = 120;         // 武装前要求最近 N ms 完全没动——慢速滚动必然被拒，根治"滑着滑着被劫持"
+const LIB_ARM_RECHECK_MS = 150;   // 未达静止条件的顺延复查间隔
+const LIB_ARM_MAX_WAIT_MS = 900;  // 顺延武装总上限（超时放弃，交还原生滚动）
 const MOVE_THRESHOLD = 5;
+const NODE_TOUCH_PAD = 12;     // 画布节点命中判定外扩（屏幕像素）——小节点更好碰
 
 function useMobileCanvasGesture({
   cvRef, pan, setPan, scale, setScale,
@@ -1353,20 +1367,39 @@ function useMobileCanvasGesture({
   const mid2  = (a, b) => ({ x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 });
   const clearTimer = () => { clearTimeout(timerRef.current); timerRef.current = null; };
 
-  // DOM hit-test：找节点体或端口
+  // DOM hit-test：找节点体、端口或连线热区
   const hitTest = (cx, cy) => {
     const el = document.elementFromPoint(cx, cy);
-    if (!el) return null;
-    const portEl = el.closest('[data-port-node]');
-    if (portEl) return {
-      type: 'port',
-      nodeId: portEl.dataset.portNode,
-      portDir: portEl.dataset.portDir || 'right',
-      portX: portEl.dataset.portX ? parseFloat(portEl.dataset.portX) : undefined,
-      portY: portEl.dataset.portY ? parseFloat(portEl.dataset.portY) : undefined,
-    };
-    const nodeEl = el.closest('[data-node-id]');
-    if (nodeEl) return { type: 'node', nodeId: nodeEl.dataset.nodeId };
+    if (el) {
+      const portEl = el.closest('[data-port-node]');
+      if (portEl) return {
+        type: 'port',
+        nodeId: portEl.dataset.portNode,
+        portDir: portEl.dataset.portDir || 'right',
+        portX: portEl.dataset.portX ? parseFloat(portEl.dataset.portX) : undefined,
+        portY: portEl.dataset.portY ? parseFloat(portEl.dataset.portY) : undefined,
+      };
+      const nodeEl = el.closest('[data-node-id]');
+      if (nodeEl) return { type: 'node', nodeId: nodeEl.dataset.nodeId };
+      // round26：连线热区路径带 data-edge-id，手机端点边不再依赖合成 click
+      const edgeEl = el.closest('[data-edge-id]');
+      if (edgeEl) return { type: 'edge', id: edgeEl.dataset.edgeId };
+    }
+    // round25：扩大命中——节点矩形外扩 NODE_TOUCH_PAD（屏幕像素转画布坐标），小节点更好碰
+    const rect = cvRef.current?.getBoundingClientRect();
+    if (!rect) return null;
+    const s = scaleRef.current || 1;
+    const p = panRef.current;
+    const wx = (cx - rect.left - p.x) / s;
+    const wy = (cy - rect.top - p.y) / s;
+    const pad = NODE_TOUCH_PAD / s;
+    for (let i = nodesRef.current.length - 1; i >= 0; i--) {
+      const n = nodesRef.current[i];
+      const { w, h } = getNodeSize(n);
+      if (wx >= n.x - pad && wx <= n.x + w + pad && wy >= n.y - pad && wy <= n.y + h + pad) {
+        return { type: 'node', nodeId: n.id };
+      }
+    }
     return null;
   };
 
@@ -1520,13 +1553,15 @@ function useMobileCanvasGesture({
       setDrag(null);
     }
 
-    // pending 抬手 = 短按（点击）：选中节点或取消选中
+    // pending 抬手 = 短按（点击）：选中节点/连线或取消选中
     if (phase === 'pending' && t) {
       clearTimer();
       const hit = hitTest(t.clientX, t.clientY);
       console.log('[touch tap] hit:', hit);
       if (hit?.type === 'node') {
         setSel({ type: 'node', id: hit.nodeId });
+      } else if (hit?.type === 'edge') {
+        setSel({ type: 'edge', id: hit.id });
       } else {
         setSel(null);
       }
@@ -1593,6 +1628,15 @@ setDrag={setDrag}
  * />
  */
 function MobileLayout({
+  // Theme
+  theme = 'dsh',
+  // 全屏层（插件模式手机端全屏沉浸用）：fixedMode=false 时降级为容器内 absolute
+  zIndex,
+  fixedMode = true,
+  // 返回键（插件模式：打开 dsh 边栏；独立模式不传）
+  onBack,
+  // 全屏键（插件模式容器内态：回全屏沉浸；独立模式不传）
+  onExpand,
   // Project
   proj, actorNames, onProjChange,
   // Canvas core
@@ -1618,12 +1662,13 @@ drag, setDrag, conn, setConn, isPanning, setNodes,
   femText, onFemChange, femError, femDirty,
   onApplyFem, onRestoreFem, onGraphToFem,
   // Modals
-  onOpenApiKey, onOpenSoul,
+  onOpenSoul,
+  // 设置（设置 tab：主题切换 + 新建 SOUL）
+  themeName, onCycleTheme,
   // Selection helpers
   backEdges,
   onDeleteNode, onDeleteEdge, onCondChange, onEditAction,
 }) {
-  const [menuOpen, setMenuOpen] = useState(false);
   const [femVisible, setFemVisible] = useState(false);
   const [bottomTab, setBottomTab] = useState('library');
 
@@ -1638,54 +1683,156 @@ const { onTouchStart, onTouchMove, onTouchEnd, dragReady } = useMobileCanvasGest
     handlePortDown, handlePortUp, setConn,
     nodes, setNodes, setDrag, setSel,
   });
-  // ── 从仓库触摸拖拽放置节点 ──
-  const libDragRef = useRef(null); // { type, item, x, y }
-  const [libDragGhost, setLibDragGhost] = useState(null); // { x, y, label }
+  // ── 从仓库触摸拖拽放置节点（round49 仲裁 v2：落点不参与裁决） ──
+  // 手势状态机：pending →（任一轴累计 ≥8px）scroll：彻底放手给原生 pan-y，绝不再拦截
+  //                    →（静止满 300ms：累计 ≤4px 且最近 120ms 无位移）drag：preventDefault 拖 ghost
+  // 落点仅用于 touchstart 时 closest('[data-fem-lib-drag]') 找"拖哪个"；
+  // 空白处/输入框/按钮落点连计时器都不启动，行为与纯原生滚动完全一致。
+  // 根因注记（v1 卡死）：旧版按落点逐卡挂监听，300ms 内位移 ≤4px 即武装——轻缓起手的
+  // 滚动被误判成长按，armed 后 preventDefault 把进行中的原生滚动当场掐死（列表冻结）。
+  const libDragRef = useRef(null); // { phase:'pending'|'drag', type, item, startX, startY, lastX, lastY, lastMoveAt, bornAt }
+  const libTimerRef = useRef(null);
+  // round47：ghost 与调试条改为 **ref 直写 DOM**——touchmove 里 setState 会重渲染
+  // 整棵编辑器树（主线程卡死，WebKit 来不及启动滚动=卡片滑不动的重要共犯）。
+  // 只有"armed 开关"保留 state 变更（驱动画布放置提示 + 抓起卡片高亮）。
+  const [libDragActive, setLibDragActive] = useState(false);
+  const ghostRef = useRef(null);
+  const ghostLabelRef = useRef(null);
+  const libDbgRef = useRef(null);
+  const dbg = (t) => { if (libDbgRef.current) libDbgRef.current.textContent = t; };
+  const panelScrollTop = () => { const el = document.querySelector('.fem-bottom-scroll'); return el ? Math.round(el.scrollTop) : 0; };
+  // round27：长按激活视觉反馈——当前被抓起条目的 key（"type:id"），null=无。
+  // 激活瞬间 set，touchEnd/取消清；透传 LibPanel 点亮被按卡片 + 画布浮现可放置提示。
+  const [libArmedKey, setLibArmedKey] = useState(null);
+  // round49：item 对象经 ref 解析（lib 数组常变，避免闭包陈旧）
+  const libRef = useRef(lib);
+  useEffect(() => { libRef.current = lib; }, [lib]);
 
-  const handleLibTouchStart = useCallback((e, type, item) => {
-    e.stopPropagation();
+  // 面板级 touchstart（passive，绝不 preventDefault）：
+  // 找拖拽候选并启动长按武装计时；非候选落点零干预。
+  const handlePanelTouchStart = useCallback((e) => {
+    if (libDragRef.current) return; // 已有手势在途（多指），不覆盖
     const t = e.touches[0];
-    libDragRef.current = { type, item, startX: t.clientX, startY: t.clientY, moved: false };
+    if (!t || !t.target) return;
+    // 打字/按钮落点：与拖拽无关，保持纯原生行为
+    if (t.target.closest && t.target.closest('input, textarea, select, button')) return;
+    const card = t.target.closest ? t.target.closest('[data-fem-lib-drag]') : null;
+    if (!card) return; // 空白处：无候选，纯滚动路径
+    const raw = card.getAttribute('data-fem-lib-drag') || '';
+    const sep = raw.indexOf(':');
+    if (sep <= 0) return;
+    const type = raw.slice(0, sep);
+    const id = raw.slice(sep + 1);
+    let item = null;
+    if (type === 'action') item = (libRef.current?.actions || []).find((x) => x.id === id);
+    else if (type === 'module') item = (libRef.current?.modules || []).find((x) => x.id === id);
+    else if (type === 'special' || type === 'position') item = id; // 特殊节点/POSITION 的 item 是字符串
+    if (!item) return;
+    clearTimeout(libTimerRef.current);
+    libDragRef.current = {
+      phase: 'pending', type, item,
+      startX: t.clientX, startY: t.clientY,
+      lastX: t.clientX, lastY: t.clientY,
+      lastMoveAt: performance.now(), bornAt: performance.now(),
+    };
+    dbg(`TS ${type} y=${Math.round(t.clientY)} st=${panelScrollTop()}`);
+    // 长按武装判定（可顺延）：到点复核"漂移小 + 最近确实没动"，慢速滚动会被正确拒绝
+    const tryArm = () => {
+      const st = libDragRef.current;
+      if (!st || st.phase !== 'pending') return;
+      const now = performance.now();
+      const driftX = Math.abs(st.lastX - st.startX);
+      const driftY = Math.abs(st.lastY - st.startY);
+      const stillLongEnough = now - st.lastMoveAt >= LIB_STILL_MS;
+      if (driftX > LIB_DRAG_SLOP_PX || driftY > LIB_DRAG_SLOP_PX || !stillLongEnough) {
+        if (now - st.bornAt < LIB_ARM_MAX_WAIT_MS) {
+          libTimerRef.current = setTimeout(tryArm, LIB_ARM_RECHECK_MS);
+          dbg(`ARM-WAIT dy=${Math.round(driftY)} still=${stillLongEnough ? 'y' : 'n'} → 复查`);
+        } else {
+          libDragRef.current = null; // 放弃武装，交还原生滚动（本手势不再有拖拽）
+          dbg(`ARM-GIVEUP dy=${Math.round(driftY)} → 原生滚动`);
+        }
+        return;
+      }
+      st.phase = 'drag';
+      navigator.vibrate?.(15); // iOS Safari 不支持 vibrate；iPhone 靠下方视觉反馈
+      dbg('ARMED 长按拖拽');
+      const label = typeof st.item === 'string' ? st.item : (st.item?.name || st.type);
+      setLibArmedKey(`${st.type}:${typeof st.item === 'string' ? st.item : st.item?.id}`);
+      setLibDragActive(true); // round49：补回 round47 丢失的调用——画布虚线放置提示恢复
+      if (ghostRef.current && ghostLabelRef.current) {
+        ghostLabelRef.current.textContent = label;
+        ghostRef.current.style.display = 'block';
+        ghostRef.current.style.left = `${st.startX - 50}px`;
+        ghostRef.current.style.top = `${st.startY - 20}px`;
+      }
+    };
+    libTimerRef.current = setTimeout(tryArm, LIB_LONG_PRESS_MS);
   }, []);
 
+  // 面板级 touchmove（非 passive）：
+  // drag 相位才 preventDefault；pending 相位只记账，≥8px 即承诺滚动并永久放手。
   const handleLibTouchMove = useCallback((e) => {
-    if (!libDragRef.current) return;
-    e.preventDefault();
-    e.stopPropagation();
+    const st = libDragRef.current;
+    if (!st) return;
     const t = e.touches[0];
-    const dx = t.clientX - libDragRef.current.startX;
-    const dy = t.clientY - libDragRef.current.startY;
-    if (!libDragRef.current.moved && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
-      libDragRef.current.moved = true;
+    if (st.phase === 'drag') {
+      e.preventDefault();
+      e.stopPropagation();
+      if (ghostRef.current) {
+        ghostRef.current.style.left = `${t.clientX - 50}px`;
+        ghostRef.current.style.top = `${t.clientY - 20}px`;
+      }
+      dbg(`DRAG dy=${Math.round(t.clientY - st.startY)} st=${panelScrollTop()}`);
+      return;
     }
-    if (libDragRef.current.moved) {
-      const label = typeof libDragRef.current.item === 'string'
-        ? libDragRef.current.item
-        : (libDragRef.current.item?.name || libDragRef.current.type);
-      setLibDragGhost({ x: t.clientX, y: t.clientY, label });
+    // pending：零拦截记账。任一轴累计 ≥LIB_SCROLL_COMMIT_PX → 判滚动意图，
+    // 清掉一切拖拽状态，本手势剩余时间与原生 pan-y 完全无关。
+    st.lastX = t.clientX; st.lastY = t.clientY;
+    st.lastMoveAt = performance.now();
+    const dx = Math.abs(t.clientX - st.startX);
+    const dy = Math.abs(t.clientY - st.startY);
+    if (dx >= LIB_SCROLL_COMMIT_PX || dy >= LIB_SCROLL_COMMIT_PX) {
+      clearTimeout(libTimerRef.current);
+      libDragRef.current = null;
+      dbg(`SCROLL dy=${Math.round(dy)} st=${panelScrollTop()}（永不拦截）`);
     }
+  }, []);
+
+  const handleLibTouchCancel = useCallback((e) => {
+    // 浏览器接管手势（原生滚动/系统语义），JS 事件流到此终止——全量复位
+    clearTimeout(libTimerRef.current);
+    dbg(`TCANCEL 浏览器接管 st=${panelScrollTop()}`);
+    if (ghostRef.current) ghostRef.current.style.display = 'none';
+    setLibArmedKey(null);
+    setLibDragActive(false);
+    libDragRef.current = null;
   }, []);
 
   const handleLibTouchEnd = useCallback((e) => {
-    if (!libDragRef.current?.moved) { libDragRef.current = null; setLibDragGhost(null); return; }
+    clearTimeout(libTimerRef.current);
+    setLibArmedKey(null); // 无论放置/取消，抓起态视觉必须回落
+    setLibDragActive(false);
+    dbg(`TE phase=${libDragRef.current?.phase} st=${panelScrollTop()}`);
+    if (ghostRef.current) ghostRef.current.style.display = 'none';
+    const st = libDragRef.current;
+    libDragRef.current = null;
+    if (!st || st.phase !== 'drag') return;
     const t = e.changedTouches[0];
-    setLibDragGhost(null);
     // 判断落点是否在画布区域内
     const cvRect = cvRef.current?.getBoundingClientRect();
-    if (!cvRect) { libDragRef.current = null; return; }
+    if (!cvRect) return;
     if (t.clientX < cvRect.left || t.clientX > cvRect.right || t.clientY < cvRect.top || t.clientY > cvRect.bottom) {
-      libDragRef.current = null;
       return;
     }
     // 转换为画布世界坐标
     const worldX = (t.clientX - cvRect.left - pan.x) / scale - 50;
     const worldY = (t.clientY - cvRect.top  - pan.y) / scale - 20;
-    const { type, item } = libDragRef.current;
+    const { type, item } = st;
     if (type === 'action') onAdd(item, worldX, worldY);
     else if (type === 'module') onAddModule(item, worldX, worldY);
     else if (type === 'special') onAddSpecial(item, worldX, worldY);  // item 此时是字符串如 'OUT'
     else if (type === 'position') onAddPosition(worldX, worldY);       // position 不需要 item
-    libDragRef.current = null;
   }, [pan, scale, cvRef, onAdd, onAddModule, onAddSpecial, onAddPosition]);
 
   // 当前选中实体
@@ -1695,13 +1842,15 @@ const { onTouchStart, onTouchMove, onTouchEnd, dragReady } = useMobileCanvasGest
 
   return (
     <div
+      data-fem-theme={theme}
       style={{
-        position: 'fixed',
+        position: fixedMode ? 'fixed' : 'absolute',
         inset: 0,
+        zIndex: zIndex,
         display: 'flex',
         flexDirection: 'column',
         background: T.bg,
-        fontFamily: 'DM Sans, sans-serif',
+        fontFamily: 'var(--fem-font-sans)',
         overflow: 'hidden',
       }}
     >
@@ -1712,7 +1861,8 @@ const { onTouchStart, onTouchMove, onTouchEnd, dragReady } = useMobileCanvasGest
         projName={proj?.name}
         flowStatus={flowStatus}
         femVisible={femVisible}
-        onMenuOpen={() => setMenuOpen(true)}
+        onBack={fixedMode ? onBack : undefined}
+        onExpand={fixedMode ? undefined : onExpand}
         onToggleFem={() => setFemVisible((v) => !v)}
         onRun={onRun}
         onPause={onPause}
@@ -1728,7 +1878,7 @@ const { onTouchStart, onTouchMove, onTouchEnd, dragReady } = useMobileCanvasGest
           flex: 1,
           position: 'relative',
           overflow: 'hidden',
-          backgroundImage: 'radial-gradient(circle, #2a3347 1px, transparent 1px)',
+          backgroundImage: 'var(--fem-mobile-canvas-dots)',
           backgroundSize: '22px 22px',
           cursor: isPanning ? 'grabbing' : conn ? 'crosshair' : 'default',
           minHeight: 0,
@@ -1783,9 +1933,45 @@ const { onTouchStart, onTouchMove, onTouchEnd, dragReady } = useMobileCanvasGest
               zIndex: 0,
             }}
           >
-            <div style={{ fontSize: 13, color: '#3a4560', fontWeight: 600 }}>从仓库添加 Action</div>
-            <div style={{ fontSize: 11, color: '#2a3347', marginTop: 5 }}>长按节点拖动 · 长按端口连线 · 双指缩放</div>
+            <div style={{ fontSize: 13, color: 'var(--fem-mobile-border-light)', fontWeight: 600 }}>从仓库添加 Action</div>
+            <div style={{ fontSize: 11, color: 'var(--fem-mobile-border)', marginTop: 5 }}>长按节点拖动 · 长按端口连线 · 双指缩放</div>
           </div>
+        )}
+
+        {/* round27：仓库拖拽激活中——画布浮现虚线可放置提示 + 顶部胶囊 */}
+        {libDragActive && (
+          <>
+            <div style={{
+              position: 'absolute',
+              inset: 8,
+              borderRadius: 'var(--fem-radius-lg)',
+              border: 'var(--fem-border-w-selected) dashed var(--fem-primary-glow-x)',
+              background: 'var(--fem-primary-soft-faint)',
+              pointerEvents: 'none',
+              zIndex: 150,
+              animation: 'dropHintIn 0.22s ease-out',
+            }} />
+            <div style={{
+              position: 'absolute',
+              top: 18,
+              left: '50%',
+              transform: 'translateX(-50%)',
+              background: 'var(--fem-primary-overlay)',
+              color: 'var(--fem-on-accent)',
+              padding: '3px 11px',
+              borderRadius: 'var(--fem-radius-md)',
+              fontSize: 10.5,
+              fontWeight: 700,
+              letterSpacing: '0.02em',
+              pointerEvents: 'none',
+              zIndex: 151,
+              whiteSpace: 'nowrap',
+              boxShadow: '0 4px 14px var(--fem-primary-glow-strong)',
+              animation: 'dropHintIn 0.25s ease-out',
+            }}>
+              松手放置到画布
+            </div>
+          </>
         )}
 
         {/* 长按就绪视觉反馈：在 dragReady 节点上方显示小环 */}
@@ -1802,9 +1988,9 @@ const { onTouchStart, onTouchMove, onTouchEnd, dragReady } = useMobileCanvasGest
               top: cy - 28,
               width: 56,
               height: 56,
-              borderRadius: '50%',
-              border: '2.5px solid rgba(61,92,245,0.7)',
-              boxShadow: '0 0 12px 4px rgba(61,92,245,0.25)',
+              borderRadius: 'var(--fem-radius-pill)',
+              border: 'var(--fem-border-w-selected) solid var(--fem-primary-glow-x)',
+              boxShadow: '0 0 12px 4px var(--fem-primary-glow)',
               pointerEvents: 'none',
               zIndex: 200,
               animation: 'pulse 0.6s ease-out',
@@ -1818,12 +2004,12 @@ const { onTouchStart, onTouchMove, onTouchEnd, dragReady } = useMobileCanvasGest
             position: 'absolute',
             bottom: 8,
             right: 10,
-            background: 'rgba(13,17,23,0.8)',
-            borderRadius: 5,
+            background: 'var(--fem-mobile-mask)',
+            borderRadius: 'var(--fem-radius-sm)',
             padding: '2px 7px',
             fontSize: 9.5,
             color: T.textMuted,
-            fontFamily: 'JetBrains Mono, monospace',
+            fontFamily: 'var(--fem-font-mono)',
             fontWeight: 700,
             pointerEvents: 'none',
             backdropFilter: 'blur(4px)',
@@ -1833,27 +2019,37 @@ const { onTouchStart, onTouchMove, onTouchEnd, dragReady } = useMobileCanvasGest
         </div>
       </div>
 
-      {/* 拖拽幽灵预览 */}
-      {libDragGhost && (
-        <div style={{
+      {/* 拖拽幽灵预览（round27：弹出动画 + 光晕呼吸，明确"已激活"）——round47 改常驻+ref 直写 */}
+      {/* round43b：临时调试悬浮层（验收后移除）——实时显示触摸判定链路 */}
+      <div
+        ref={libDbgRef}
+        style={{
+          position: 'fixed', top: 4, left: 4, right: 4, zIndex: 9999,
+          background: 'rgba(0,0,0,0.82)', color: '#7CFC98',
+          fontFamily: 'monospace', fontSize: 12, padding: '5px 8px',
+          borderRadius: 6, pointerEvents: 'none', whiteSpace: 'nowrap',
+          overflow: 'hidden', textOverflow: 'ellipsis',
+        }}
+      />
+      <div
+        ref={ghostRef}
+        style={{
+          display: 'none',
           position: 'fixed',
-          left: libDragGhost.x - 50,
-          top: libDragGhost.y - 20,
-          background: 'rgba(61,92,245,0.92)',
-          color: 'white',
-          borderRadius: 8,
+          background: 'var(--fem-primary-overlay)',
+          color: 'var(--fem-on-accent)',
+          borderRadius: 'var(--fem-radius-md)',
           padding: '6px 12px',
           fontSize: 12,
           fontWeight: 700,
           pointerEvents: 'none',
           zIndex: 999,
           whiteSpace: 'nowrap',
-          boxShadow: '0 4px 16px rgba(61,92,245,0.4)',
-          transform: 'scale(1.05)',
-        }}>
-          {libDragGhost.label}
-        </div>
-      )}
+          boxShadow: '0 4px 16px var(--fem-primary-glow-strong)',
+        }}
+      >
+        <span ref={ghostLabelRef} />
+      </div>
 
       {/* ── 底部面板 ── */}
       <MobileBottomPanel
@@ -1871,9 +2067,11 @@ const { onTouchStart, onTouchMove, onTouchEnd, dragReady } = useMobileCanvasGest
         onEdit={onEdit}
         onEditModule={onEditModule}
         onDragStart={onDragStart}
-        onLibTouchStart={handleLibTouchStart}
+        onPanelTouchStart={handlePanelTouchStart}
         onLibTouchMove={handleLibTouchMove}
         onLibTouchEnd={handleLibTouchEnd}
+        onLibTouchCancel={handleLibTouchCancel}
+        libArmedKey={libArmedKey}
         onSelectLib={(type, id) => {
           onSelectLib?.(type, id);
           setBottomTab('props');
@@ -1896,32 +2094,28 @@ const { onTouchStart, onTouchMove, onTouchEnd, dragReady } = useMobileCanvasGest
         onCondChange={onCondChange}
         onEditAction={onEditAction}
         libSel={libSel}
-      />
-
-      {/* ── 侧边菜单 ── */}
-      <MobileSideMenu
-        open={menuOpen}
-        onClose={() => setMenuOpen(false)}
-        onOpenApiKey={onOpenApiKey}
+        themeName={themeName}
+        onCycleTheme={onCycleTheme}
         onOpenSoul={onOpenSoul}
+        htmlDraggable={false}
       />
 
-{/* ── FEM 预览面板 — 直接复用桌面原版，包裹在滑出容器里 ── */}
+      {/* ── FEM 预览面板 — 直接复用桌面原版，包裹在滑出容器里 ── */}
       {femVisible && (
         <>
           <div
             onClick={() => setFemVisible(false)}
-            style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.45)', zIndex: 300 }}
+            style={{ position: 'fixed', inset: 0, background: 'var(--fem-mask)', zIndex: 300 }}
           />
           <div style={{
             position: 'fixed', right: 0, top: 0, bottom: 0,
             width: '88vw', maxWidth: 460,
-            background: '#0c1428',
-            borderLeft: `1px solid ${T.border}`,
+            background: 'var(--fem-mobile-bg-2)',
+            borderLeft: `var(--fem-border-w) solid ${T.border}`,
             zIndex: 301,
             display: 'flex', flexDirection: 'column',
             animation: 'slideInFem 0.22s cubic-bezier(0.4,0,0.2,1)',
-            boxShadow: '-8px 0 32px rgba(0,0,0,0.5)',
+            boxShadow: '-8px 0 32px var(--fem-mask)',
           }}>
             <FemPreview
               value={femText}
@@ -1958,7 +2152,7 @@ const sectionLabel = {
   color: T.textMuted,
   textTransform: 'uppercase',
   letterSpacing: '0.1em',
-  fontFamily: 'DM Sans, sans-serif',
+  fontFamily: 'var(--fem-font-sans)',
 };
 
 const fieldLabel = {
@@ -1971,13 +2165,13 @@ const fieldLabel = {
 const mobInp = {
   width: '100%',
   padding: '6px 9px',
-  borderRadius: 6,
-  border: `1.5px solid ${T.border}`,
+  borderRadius: 'var(--fem-radius-sm)',
+  border: `var(--fem-border-w-strong) solid ${T.border}`,
   fontSize: 11.5,
   color: T.textPrimary,
-  background: '#0d1117',
+  background: 'var(--fem-mobile-bg)',
   outline: 'none',
-  fontFamily: 'DM Sans, sans-serif',
+  fontFamily: 'var(--fem-font-sans)',
   transition: 'border-color 0.15s',
   boxSizing: 'border-box',
   touchAction: 'auto',
@@ -1987,38 +2181,38 @@ const mobInp = {
 
 const mobBtnP = {
   padding: '6px 14px',
-  borderRadius: 6,
-  background: T.accent,
-  color: 'white',
+  borderRadius: 'var(--fem-radius-sm)',
+  background: 'var(--fem-btn-primary)',
+  color: 'var(--fem-on-accent)',
   border: 'none',
   cursor: 'pointer',
   fontSize: 11.5,
   fontWeight: 700,
-  fontFamily: 'DM Sans, sans-serif',
+  fontFamily: 'var(--fem-font-sans)',
 };
 
 const mobBtnS = {
   padding: '5px 12px',
-  borderRadius: 6,
+  borderRadius: 'var(--fem-radius-sm)',
   background: 'transparent',
   color: T.textSecondary,
-  border: `1.5px solid ${T.border}`,
+  border: `var(--fem-border-w-strong) solid ${T.border}`,
   cursor: 'pointer',
   fontSize: 11.5,
   fontWeight: 600,
-  fontFamily: 'DM Sans, sans-serif',
+  fontFamily: 'var(--fem-font-sans)',
 };
 
 const mobBtnDanger = {
   padding: '6px 14px',
-  borderRadius: 6,
+  borderRadius: 'var(--fem-radius-sm)',
   background: 'transparent',
   color: T.danger,
-  border: `1.5px solid ${T.danger}44`,
+  border: `var(--fem-border-w-strong) solid ${T.danger}44`,
   cursor: 'pointer',
   fontSize: 11.5,
   fontWeight: 700,
-  fontFamily: 'DM Sans, sans-serif',
+  fontFamily: 'var(--fem-font-sans)',
 };
 
 // ─────────────────────────────────────────────
@@ -2036,7 +2230,6 @@ function useMobile(breakpoint = 768) {
 
 export {
   MobileLayout,
-  MobileSideMenu,
   MobileFemPanel,
   MobileBubbleOverlay,
   MobileHumanInput,

@@ -1,8 +1,8 @@
 /**
- * tools.ts — dsh-femwa 主模型专用工具（femwa-mount / femwa-run）。
+ * tools.ts — dsh-femwa 主模型专用工具（femwa-mount / femwa-run / femwa-script）。
  *
  * 只注册给主模型（无 parentSession 的 fem 会话 agent）；子代理（角色）
- * 不可见——挂载/运行剧本是导演的事。执行体通过依赖注入复用 index.ts 的
+ * 不可见——挂载/运行/查看剧本是导演的事。执行体通过依赖注入复用 index.ts 的
  * 现成链路（run / session-script），不在本文件重复实现。
  */
 
@@ -14,8 +14,23 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 export interface FemwaToolDeps {
   /** 挂载剧本到会话（写会话记录 {path}，用户 femgen 立即可见）。 */
   mountScript(sessionId: string, scriptPath: string): Promise<void>
-  /** 运行剧本（scriptPath 省略 = 运行已挂载剧本）。 */
-  runScript(sessionId: string, scriptPath?: string): Promise<void>
+
+  /** 取走自上次调用以来的编辑器上报错误（restore/解析失败等），随工具结果回传主模型。 */
+  takeEditorErrors?(sessionId: string): string[]
+  /** 从头运行已挂载的剧本（清 checkpoint，全新一轮）。 */
+  runScript(sessionId: string): Promise<void>
+  /** 停止当前运行（保留 checkpoint，可 resume 续跑）。 */
+  stopScript(sessionId: string): Promise<void>
+  /** 暂停当前运行（bridge 现有语义；保留 checkpoint）。 */
+  pauseScript(sessionId: string): Promise<void>
+  /** 从断点继续运行（不 reset 的 run：自动带 checkpoint 续跑）。 */
+  resumeScript(sessionId: string): Promise<void>
+  /** 读会话当前挂载的剧本内容（最终生效文本 + 来源记录）。 */
+  readScript(sessionId: string): Promise<{ path?: string; text?: string; finalText: string } | undefined>
+  /** 列出全部角色（soul_id + soul_name，精简；femwa-soul list）。 */
+  soulList(): Promise<{ souls: Array<{ soul_id: string; soul_name: string }> }>
+  /** 新建角色（全局，所有剧本可用；归属 u001；femwa-soul create）。 */
+  soulCreate(soulId: string, soulName: string, description: string): Promise<unknown>
   /** 是否为 fem 主会话（无 parentSession）——工具调用者校验。 */
   isFemMainSession(agent: Agent): boolean
 }
@@ -58,20 +73,79 @@ const mountTool: FemwaToolSchema = {
   },
 }
 
-/** femwa-run：运行剧本（省略 scriptPath = 运行已挂载的剧本）。 */
+/**
+ * femwa-run：控制当前 Fem 会话的剧本运行（from_scratch/stop/pause/resume）。
+ * 剧本本身不在此传——先 femwa-mount 挂载，或用 femGen 编辑器写入。
+ */
 const runTool: FemwaToolSchema = {
   name: 'femwa-run',
   description:
-    '在当前 Fem 会话运行剧本。省略 scriptPath 时运行已挂载的剧本（femwa-mount 挂载的）。' +
-    '运行后剧本由引擎驱动，角色发言显示在投影窗；运行期间你不会收到消息，跑完用户会告诉你。',
+    '控制当前 Fem 会话的剧本运行。action 必填，四选一：\n' +
+    '- from_scratch：从头开始运行已挂载的剧本（清空断点，全新一轮）\n' +
+    '- stop：停止正在运行的剧本（保留断点，之后可 resume 续跑）\n' +
+    '- pause：暂停正在运行的剧本（保留断点）\n' +
+    '- resume：从断点继续运行上次 stop/pause 的剧本（不从头）\n' +
+    '运行后剧本由引擎驱动，角色发言显示在投影窗；运行期间你不会收到消息，' +
+    '跑完/报错系统会通知你（见系统提示词【运行出错时】）。',
   parameters: {
     type: 'object',
     properties: {
-      scriptPath: {
+      action: {
         type: 'string',
-        description: '剧本文件完整路径（.fems）；省略 = 运行已挂载的剧本',
+        enum: ['from_scratch', 'stop', 'pause', 'resume'],
+        description: '对剧本运行的控制动作：from_scratch=从头运行 / stop=停止 / pause=暂停 / resume=从断点继续',
       },
     },
+    required: ['action'],
+    additionalProperties: false,
+  },
+}
+
+/** femwa-script：查看当前会话挂载的剧本内容（AI 读剧本用）。 */
+const viewScriptTool: FemwaToolSchema = {
+  name: 'femwa-script',
+  description:
+    '查看当前 Fem 会话挂载的剧本完整内容（最终生效版本：编辑器原文优先，否则读剧本文件地址指向的内容）。' +
+    '返回剧本全文、来源（file=文件地址 / session-text=会话内原文）和行数。' +
+    '写剧本/改剧本前先调用本工具，了解当前挂载的剧本是什么；会话未挂载剧本时会明确报错。',
+  parameters: {
+    type: 'object',
+    properties: {},
+    additionalProperties: false,
+  },
+}
+
+/** femwa-soul：管理角色库（list=查库选角 / create=新建角色）。 */
+const soulTool: FemwaToolSchema = {
+  name: 'femwa-soul',
+  description:
+    '管理角色库（souls）：\n' +
+    '- list：查看库中全部角色（soul_id + 名字）。写剧本选角前先调用本工具查库；\n' +
+    '- create：新建角色。参数 soul_id（剧本里用 soul:xxx 引用，不能含空格/逗号）、soul_name（显示名）、description（角色的灵魂设定，注入给扮演它的 AI）。\n' +
+    '角色是全局的（所有剧本可用）。soul 非必须：无角色设定的简单剧本（如 goal 模式）可以不写 soul；' +
+    '需要角色设定的剧本，库里没有的角色先用本工具 create 新建，再在剧本里引用。',
+  parameters: {
+    type: 'object',
+    properties: {
+      action: {
+        type: 'string',
+        enum: ['list', 'create'],
+        description: 'list=查看全部角色 / create=新建角色',
+      },
+      soul_id: {
+        type: 'string',
+        description: 'create 必填：角色唯一标识（剧本里 soul:xxx 引用；不能含空格/逗号）',
+      },
+      soul_name: {
+        type: 'string',
+        description: 'create 必填：角色显示名',
+      },
+      description: {
+        type: 'string',
+        description: 'create 必填：角色的灵魂设定（system prompt 片段，扮演该角色的 AI 会看到）',
+      },
+    },
+    required: ['action'],
     additionalProperties: false,
   },
 }
@@ -95,23 +169,27 @@ export function registerFemwaTools(
     }): () => void
   } }).tools
   if (tools === undefined) {
-    console.log('[dsh-femwa] tools service unavailable; femwa-mount/femwa-run not registered')
+    console.log('[dsh-femwa] tools service unavailable; femwa-mount/femwa-run/femwa-script not registered')
     return () => undefined
   }
 
   const disposers: Array<() => void> = []
 
-  const register = (schema: FemwaToolSchema, run: (args: Record<string, unknown>, agent: Agent) => Promise<unknown>): void => {
+  const register = (
+    schema: FemwaToolSchema,
+    run: (args: Record<string, unknown>, agent: Agent) => Promise<unknown>,
+    renderText?: (value: { ok: boolean; error?: string; script?: string; source?: string; lines?: number; path?: string; souls?: Array<{ soul_id: string; soul_name: string }>; note?: string }) => string,
+  ): void => {
     const dispose = tools.register({
       name: schema.name,
       description: schema.description,
       parameters: schema.parameters,
       output: {
         schema: { type: 'object', additionalProperties: true },
-        render: (_args: unknown, value: { ok: boolean; error?: string }) => [{
+        render: (_args: unknown, value: { ok: boolean; error?: string; script?: string; source?: string; lines?: number; path?: string }) => [{
           type: 'text',
           text: value.ok === true
-            ? JSON.stringify(value)
+            ? (renderText !== undefined ? renderText(value) : JSON.stringify(value))
             : `❌ ${value.error ?? '未知错误'}`,
         }],
       },
@@ -139,15 +217,79 @@ export function registerFemwaTools(
       return { ok: false, error: 'scriptPath 是必填参数' }
     }
     await deps.mountScript(String(agent.session.id), scriptPath)
-    return { ok: true, mounted: scriptPath }
+    const editorErrors = deps.takeEditorErrors?.(String(agent.session.id)) ?? []
+    return { ok: true, mounted: scriptPath, ...(editorErrors.length > 0 ? { editor_errors: editorErrors } : {}) }
   })
 
   register(runTool, async (args, agent) => {
-    const scriptPath = typeof args.scriptPath === 'string' && args.scriptPath.trim().length > 0
-      ? args.scriptPath.trim()
-      : undefined
-    await deps.runScript(String(agent.session.id), scriptPath)
-    return { ok: true, running: scriptPath ?? '已挂载剧本' }
+    const action = typeof args.action === 'string' ? args.action.trim() : ''
+    if (action !== 'from_scratch' && action !== 'stop' && action !== 'pause' && action !== 'resume') {
+      return { ok: false, error: 'action 是必填参数：from_scratch / stop / pause / resume 四选一' }
+    }
+    const sid = String(agent.session.id)
+    switch (action) {
+      case 'from_scratch': {
+        await deps.runScript(sid)
+        const editorErrors = deps.takeEditorErrors?.(sid) ?? []
+        return { ok: true, action, note: '已从头开始运行剧本', ...(editorErrors.length > 0 ? { editor_errors: editorErrors } : {}) }
+      }
+      case 'stop':
+        await deps.stopScript(sid)
+        return { ok: true, action, note: '已停止运行（断点保留，可 resume 续跑）' }
+      case 'pause':
+        await deps.pauseScript(sid)
+        return { ok: true, action, note: '已暂停运行（断点保留）' }
+      case 'resume':
+        await deps.resumeScript(sid)
+        return { ok: true, action, note: '已从断点继续运行' }
+    }
+  })
+
+  register(viewScriptTool, async (_args, agent) => {
+    const record = await deps.readScript(String(agent.session.id))
+    if (record === undefined) {
+      return { ok: false, error: '会话未挂载剧本：请先 femwa-mount 挂载，或用 femGen 编辑器写入剧本' }
+    }
+    return {
+      ok: true,
+      source: record.path !== undefined ? 'file' : 'session-text',
+      path: record.path,
+      lines: record.finalText.split('\n').length,
+      script: record.finalText,
+    }
+  }, (value) => {
+    const head = `📜 挂载剧本（${value.source ?? ''}${value.path !== undefined ? `: ${value.path}` : ''}，${value.lines ?? '?'} 行）`
+    return `${head}\n\n${value.script ?? ''}`
+  })
+
+  register(soulTool, async (args) => {
+    const action = typeof args.action === 'string' ? args.action.trim() : ''
+    if (action === 'list') {
+      const { souls } = await deps.soulList()
+      return { ok: true, souls }
+    }
+    if (action === 'create') {
+      const soulId = typeof args.soul_id === 'string' ? args.soul_id.trim() : ''
+      const soulName = typeof args.soul_name === 'string' ? args.soul_name.trim() : ''
+      const description = typeof args.description === 'string' ? args.description : ''
+      if (soulId.length === 0 || soulName.length === 0 || description.length === 0) {
+        return { ok: false, error: 'create 需要 soul_id / soul_name / description 三个参数（全部必填）' }
+      }
+      if (/[\s,，]/.test(soulId)) {
+        return { ok: false, error: `soul_id "${soulId}" 不能含空格或逗号（剧本里 soul:xxx 引用用）` }
+      }
+      await deps.soulCreate(soulId, soulName, description)
+      return { ok: true, note: `已创建角色 ${soulName}（soul_id=${soulId}，剧本里用 soul:${soulId} 引用）` }
+    }
+    return { ok: false, error: 'action 必填：list 或 create 二选一' }
+  }, (value) => {
+    if (value.note !== undefined) return value.note
+    if (Array.isArray(value.souls)) {
+      if (value.souls.length === 0) return '角色库为空'
+      return `🎭 角色库（${value.souls.length} 个角色）：\n`
+        + value.souls.map(s => `- ${s.soul_id}（${s.soul_name}）`).join('\n')
+    }
+    return JSON.stringify(value)
   })
 
   return () => {
