@@ -985,13 +985,10 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
   useEffect(() => {
     if (mainSid === undefined) return
     let cancelled = false
-    // 诊断足迹（卡死调查）：前端走到哪一步，host 日志可见。
-    void fetch(`/dsh-femwa/debug-log?msg=${encodeURIComponent(`viewbtn-mount sid=${String(sessionId)} main=${mainSid}`)}`).catch(() => undefined)
     void listProjectionWindows(mainSid)
       .then(w => {
         if (!cancelled) {
           setProj(w)
-          void fetch(`/dsh-femwa/debug-log?msg=${encodeURIComponent(`viewbtn-proj-ok god=${w.god ?? '-'} actors=${Object.keys(w.actors).join(',')}`)}`).catch(() => undefined)
         }
       })
       .catch(() => { /* 投影窗未建（未运行过剧本）：菜单降级为旧 CSS 过滤 */ })
@@ -1003,9 +1000,6 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
   // mainSid 名下（投影窗上操作也归属到主会话，保证跨窗状态一致）。
   const pickView = (id: string): void => {
     setOpen(false)
-    const target = id === 'offstage' ? mainSid : (proj.actors[id] ?? proj.god ?? mainSid)
-    // 诊断足迹：点击视角项的瞬间 + 跳转目标。
-    void fetch(`/dsh-femwa/debug-log?msg=${encodeURIComponent(`pickView id=${id} target=${target ?? '-'}`)}`).catch(() => undefined)
     if (id === 'offstage') {
       // 戏外 = 主会话本体；view 状态标记 offstage，CSS 过滤隐藏角色内容
       // （待主模型恢复后主会话表面回归干净）。投影窗上点戏外 = 跳回主会话。
@@ -1443,9 +1437,10 @@ export function apply(ctx: any): void {
   // （label 无此前缀）。fork 版组件见 lineage-fork.jsx（过滤逻辑全在那里），
   // 非 Fem 会话上行为与官方组件一致（无 fem 条目可滤）。priority -10 shadow
   // 官方默认 0（single 槽 lowest renders，见 ui-slots shadowing 语义）。
-  // （2026-08-23 布局重排三件套已回退：FemSubagentCount seat / fork 让位 /
-  // order -20 与 MutationObserver 母名改造——疑似视角切换卡死的引入点，
-  // 待根因确认后再逐件找回。）
+  // （2026-08-23 历史注记：布局重排第一版曾整体回退（当时疑似其引入视角切
+  // 换卡死），后确认卡死根因在 god 窗 chunk 重放数据层、与本文件无关；布局
+  // 重排 v2 已重新落地——视角按钮 order -20 / count 座位 order 10 / 母名
+  // 黑化走自有 style 元素（MutationObserver 路线永久弃用）。）
   slots.inject('conversation.session.header.lineage', () => slots.register(
     {
       name: 'conversation.session.header.lineage',
