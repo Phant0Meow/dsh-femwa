@@ -385,7 +385,7 @@ export function FemEditorView(props: FemScriptViewProps & {
 interface FemwaChatData {
   readonly actor?: string
   readonly text: string
-  readonly kind: 'role' | 'notice' | 'human_wait' | 'prompt' | 'error' | 'thinking' | 'tool_call' | 'speaker'
+  readonly kind: 'role' | 'notice' | 'human_wait' | 'prompt' | 'error' | 'thinking' | 'tool_call' | 'speaker' | 'sys'
   /**
    * Actor names this line is visible to (the action's scope). Absent =
    * visible to everyone (role/prompt/human_wait with unknown scope);
@@ -509,8 +509,9 @@ export function FemwaChatNodeView({ node, useSession }: ChatNodeViewProps<'femwa
   if (view === 'offstage') {
     // 戏外视角：主会话=纯 DSH 原生页面（user+主模型），femwa 行全部隐藏
     // （角色行/名字行/引擎通知/等待提示都属戏内，上帝窗承载；也遮住旧版本
-    // 写进主会话的历史残留行）。
-    return null
+    // 写进主会话的历史残留行）。唯一例外=sys 运行回执（femwa-run 动作成功
+    // 的状态条，属戏外系统消息而非戏内内容，host 只写主会话不进投影窗）。
+    if (kind !== 'sys') return null
   } else if (view !== 'god') {
     if (kind === 'notice' || kind === 'error' || kind === 'thinking' || kind === 'tool_call') return null
     // speaker 名字行不做 scope 过滤：角色视角也能看到所有角色的名字
@@ -569,7 +570,9 @@ export function FemwaChatNodeView({ node, useSession }: ChatNodeViewProps<'femwa
       </div>
     )
   }
-  if (kind === 'notice') {
+  if (kind === 'notice' || kind === 'sys') {
+    // sys=femwa-run 动作成功的用户回执（只存在于主会话表面），与引擎 notice
+    // 共用居中灰字样式；角色视角不过滤它（运行状态对各视角都有效）。
     return (
       <div style={{
         textAlign: 'center',
@@ -1128,6 +1131,8 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
       if (data === undefined) continue
       if (data.actor !== undefined && data.actor.length > 0) actors.add(data.actor)
       if (view === 'god') continue
+      // sys 运行回执：所有视角都显示（offstage 也放行），不计入隐藏数。
+      if (data.kind === 'sys') continue
       // offstage：femwa 行全隐藏，计数=全部。
       if (view === 'offstage' || data.kind === 'notice' || data.kind === 'error' || data.kind === 'thinking') {
         hiddenCount += 1

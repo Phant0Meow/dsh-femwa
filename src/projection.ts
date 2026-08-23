@@ -39,7 +39,7 @@ function appendChat(
   ctx: Context,
   session: Session,
   text: string,
-  kind: 'role' | 'notice' | 'human_wait' | 'prompt' | 'error' | 'thinking' = 'notice',
+  kind: 'role' | 'notice' | 'human_wait' | 'prompt' | 'error' | 'thinking' | 'sys' = 'notice',
   actor?: string,
   visible?: string[],
 ): void {
@@ -89,6 +89,15 @@ export function appendChatProjected(
     ...visible === undefined ? {} : { visible },
     seq: Date.now(),
   }, undefined, visible)
+}
+
+/** 主会话表面系统回执（kind='sys'）：femwa-run 四动作成功后的用户可见状态条。
+ * 与戏内信息走向相反——这条只进主会话、不进投影窗（god 窗的运行状态由引擎
+ * 事件 notice 承载；MIRROR_MAIN_EVENTS 白名单不含 dsh-femwa/chat，镜像天然
+ * 不收）。不进模型上下文：纯 UI 显示；需要唤醒主模型请用 engine-events 的
+ * steerMainAgent，两者勿混用。 */
+export function appendChatMain(ctx: Context, session: Session, text: string): void {
+  appendChat(ctx, session, text, 'sys')
 }
 
 // ── 2) 投影窗生命周期 ─────────────────────────────────────────────────────

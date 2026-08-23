@@ -71,8 +71,8 @@ declare module '@deepseek-ai/dsh-session/types' {
       actor?: string
       /** The line's text. */
       text: string
-      /** role = AI character line; notice = engine/flow status; human_wait = waiting for the user; prompt = node hint/announcement; error = engine error (red, system-like); thinking = subagent cot (folded). */
-      kind: 'role' | 'notice' | 'human_wait' | 'prompt' | 'error' | 'thinking'
+      /** role = AI character line; notice = engine/flow status; human_wait = waiting for the user; prompt = node hint/announcement; error = engine error (red, system-like); thinking = subagent cot (folded); tool_call = subagent tool invocation line (JSON body); speaker = subagent turn header name line; sys = femwa-run success receipt (main session surface only, user-facing). */
+      kind: 'role' | 'notice' | 'human_wait' | 'prompt' | 'error' | 'thinking' | 'tool_call' | 'speaker' | 'sys'
     }
   }
 }

@@ -9,6 +9,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import { appendChatMain } from './projection'
 
 /** index.ts 注入给工具的执行依赖。 */
 export interface FemwaToolDeps {
@@ -231,16 +232,21 @@ export function registerFemwaTools(
       case 'fresh_start': {
         await deps.runScript(sid)
         const editorErrors = deps.takeEditorErrors?.(sid) ?? []
+        // 成功回执写主会话表面给用户看（纯 UI 显示，不进模型上下文）。
+        appendChatMain(ctx, agent.session, '🎬 剧本已开始（在上帝视角窗口查看）')
         return { ok: true, action, note: '已从头开始运行剧本', ...(editorErrors.length > 0 ? { editor_errors: editorErrors } : {}) }
       }
       case 'stop':
         await deps.stopScript(sid)
+        appendChatMain(ctx, agent.session, '⏹ 剧本已停止')
         return { ok: true, action, note: '已停止运行（断点保留，可 resume 续跑）' }
       case 'pause':
         await deps.pauseScript(sid)
+        appendChatMain(ctx, agent.session, '⏸ 剧本已暂停')
         return { ok: true, action, note: '已暂停运行（断点保留）' }
       case 'resume':
         await deps.resumeScript(sid)
+        appendChatMain(ctx, agent.session, '▶️ 剧本已继续（在上帝视角窗口查看）')
         return { ok: true, action, note: '已从断点继续运行' }
     }
   })
