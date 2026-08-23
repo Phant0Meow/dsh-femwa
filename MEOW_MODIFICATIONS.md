@@ -1486,3 +1486,28 @@ pre-armed 分支依旧不 preventDefault（滚动不受影响）；仅 armed 分
 - 备份：MEOW_backups/{mobileView,libPanel}.jsx.bak-20260821-round46
 - esbuild 通过；原生绑定进产物
 - ⚠️ 待手机实测：armed 拖拽时面板静止、ghost 跟手；松手放置正常
+
+## 2026-08-23 femwa-run 动作更名：from_scratch → fresh_start
+
+用户拍板（原话）："Fresh start最好。确实也是一个常用语嘛，而且不管是第一次还是第N次都很适用，也没有歧义。一看就是从头开始的意思"。缘起：用户指出 from_scratch 是当年笔误（应为 from_start，又嫌笨重），且希望词义兼顾"第一次开始"与"第 N 次重新开始"、强调从头、不与 resume 混淆；曾考虑 run/start/restart/from_zero，最终选 fresh_start。
+### 修改明细
+1. `src/tools.ts`：enum/描述/校验/case 共 7 处 from_scratch → fresh_start
+2. `src/index.ts`：2 处注释
+3. `.agent-presets/dsh-femwa/agent.cordis.yml`（dsh-home）：系统提示词【运行】段 2 处——主模型人设文本的真正源头在此 preset，不在插件源码
+4. 不保留 from_scratch 旧值别名（纯笔误，仅两个用户）
+### 影响
+- 主模型调用 femwa-run 时 action 必须传 fresh_start；旧值会报"action 是必填参数：fresh_start / stop / pause / resume 四选一"
+- 生效条件：node build.mjs 重建 + 重启 3081（host 换血）
+
+## 2026-08-23 运行结果通知改造：femwa:notify section 废弃 → agent.steer 对话流直达
+
+用户需求（原话摘要）：编译错误在 femwa-run 返回里报错（非 ok）；跑到一半报错/全部跑完后"立即再发一条工具消息给主agent，把报错信息详细反馈"，"这些都是要发在对话流里"。调研结论：dsh 官方支持插件主动给模型发消息——`agent.steer(UserMessage)`（空闲即开新回合，忙碌时下一 step 边界消费，必达不打断），meow-memory 的 dream 任务即此机制。
+### 修改明细
+1. `src/engine-events.ts`：新增 steerMainAgent()（ctx.agents.get(sid) 或 ctx.get('agents') 拿主模型 agent，构造 {id,role:'user',content,source:{kind:'plugin',plugin:'dsh-femwa'}} 后 steer）；flow_done/flow_error 两分支的 runNotices.set 替换为 steerMainAgent；flow_stopped 分支仅删除 runNotices.set（停止/暂停由发起方经工具返回值已知悉）；删除 flow_start 的 ensureRunNotice 调用
+2. `src/persona.ts`：删除 femwa:notify 三件套（runNotices/runNoticeSections/injectRunNotice/ensureRunNotice）及头注释更新
+3. `src/tools.ts`：femwa-run 描述改为"跑完/出错会有 [dsh-femwa] 开头的插件消息直接发进对话流"
+4. 编译错误路径核实：startRunOnSession 编译失败同步 throw（index.ts L236），tools.ts catch 返回 ok:false——需求①天然满足未改码
+### 已知缺陷（动机）
+旧 femwa:notify section 把通知静默注入 system prompt，实测两次运行主模型均漏读（靠逐帧解压 session.jsonl.zstd 的 request/header 快照才实锤通知其实送达过）。
+### 生效条件
+node build.mjs 已重建；重启 3081 后生效。

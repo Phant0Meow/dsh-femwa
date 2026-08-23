@@ -12,16 +12,47 @@
  * （2026-08-23 重构，行为零变化；监听器注册顺序与原版一致）。
  */
 
+import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { FemwaBridge } from './bridge'
 import type { ResolvedConfig } from './config'
 import { broadcastSse } from './http'
-import { FEM_PRESET, presetOf, isFemAgent, ensureRunNotice, runNotices } from './persona'
+import { FEM_PRESET, presetOf, isFemAgent } from './persona'
 import { appendChatProjected, type GodMirror, type ProjectionRegistry } from './projection'
 import { runAiSubagent } from './subagent'
 import { writeCheckpoint, clearCheckpoint } from './state-files'
+
+/** 运行结局直达主模型对话流：以 plugin 来源构造 user 消息并 agent.steer()。
+ * dsh 官方语义（dsh-agent）：空闲的主模型立即开新回合收到通知；忙碌时在
+ * 下一 step 边界消费——必达、不打断当前回合。取代旧 femwa:notify
+ * systemPrompt section（布告栏式注入易被模型漏读，2026-08-23 废弃）。 */
+function steerMainAgent(ctx: Context, sessionId: string | SessionId, text: string): void {
+  try {
+    const sid = String(sessionId)
+    const bag = ctx as unknown as {
+      agents?: { get(id: string): { steer?: unknown } | undefined }
+      get?(name: string): { get(id: string): { steer?: unknown } | undefined } | undefined
+    }
+    const viaProp = bag.agents?.get(sid)
+    const viaSvc = typeof bag.get === 'function' ? bag.get('agents')?.get(sid) : undefined
+    const agent = (viaProp ?? viaSvc) as { steer?(message: unknown): void } | undefined
+    if (agent === undefined || typeof agent.steer !== 'function') {
+      console.log(`[dsh-femwa] steer skipped (main agent unavailable): sid=${sid}`)
+      return
+    }
+    agent.steer({
+      id: randomUUID(),
+      role: 'user',
+      content: [{ type: 'text', text }],
+      source: { kind: 'plugin', plugin: 'dsh-femwa' },
+    })
+    console.log(`[dsh-femwa] steered main agent: sid=${sid} len=${text.length}`)
+  } catch (error: unknown) {
+    console.log(`[dsh-femwa] steer failed: ${String(error)}`)
+  }
+}
 
 /** 引擎运行状态簿记（index.ts 总装创建唯一实例，全插件共享引用）：
  * 哪个会话在跑、是否 human 节点等待、节点→演员/scope 映射、错误表、SSE 重放缓冲。 */
@@ -137,8 +168,6 @@ export function registerEngineEventHandlers(ctx: Context, deps: EngineEventsDeps
     const d = (payload ?? {}) as Record<string, unknown>
     switch (eventType) {
       case 'flow_start': {
-        // 运行开始：确保主会话已挂 femwa:notify section（运行结果摘要注入上下文）。
-        ensureRunNotice(ctx, sessionId)
         // Script actors feed the view-perspective menu + projection windows.
         const actors = Array.isArray(d.actors)
           ? d.actors.filter((x): x is string => typeof x === 'string')
@@ -267,8 +296,8 @@ export function registerEngineEventHandlers(ctx: Context, deps: EngineEventsDeps
         void clearCheckpoint(resolved.femwaRoot, String(sessionId))
           .catch((error: unknown) => console.log(`[dsh-femwa] checkpoint clear failed: ${String(error)}`))
         appendChatProjected(ctx, session, projections, '✅ 剧本已跑完', 'notice')
-        // 通知主模型：跑完、断点已清（重跑从头开始，不可 resume）。
-        runNotices.set(String(sessionId), `Fem 剧本运行结果：✅ 已完整跑完。checkpoint 已清除——若要重跑，从头开始（不能用 resume 续跑）。`)
+        // 通知主模型（对话流直达，必达）：跑完、断点已清。
+        steerMainAgent(ctx, sessionId, '[dsh-femwa] 剧本运行结果：✅ 已完整跑完。checkpoint 已清除——若要重跑请用 fresh_start（不能 resume 续跑）。')
         break
       }
       case 'flow_error': {
@@ -278,19 +307,15 @@ export function registerEngineEventHandlers(ctx: Context, deps: EngineEventsDeps
         const text = `剧本出错：${String(d.error ?? 'unknown error')}`
         recordError(session.id, text)
         appendChatProjected(ctx, session, projections, text, 'error')
-        // 通知主模型：报错摘要（错误信息含类型/行号/错误行，供据此迭代修剧本）。
-        runNotices.set(String(sessionId), `Fem 剧本运行结果：❌ 运行出错。错误信息：${String(d.error ?? 'unknown error')}`)
+        // 通知主模型（对话流直达，必达）：报错详情供据此迭代修剧本。
+        steerMainAgent(ctx, sessionId, `[dsh-femwa] 剧本运行结果：❌ 运行出错。错误信息：${String(d.error ?? 'unknown error')}——可修复剧本后再 fresh_start。`)
         break
       }
       case 'flow_stopped': {
         runState.running = false
         // 暂停（引擎侧为 stop 半实现）与停止共用 flow_stopped：按发起方区分文案。
         appendChatProjected(ctx, session, projections, runState.pausedByUser ? '⏸ 剧本已暂停' : '⏹ 剧本已停止', 'notice')
-        // 通知主模型：暂停/停止，均保留 checkpoint，可用 resume 续跑。
-        runNotices.set(String(sessionId),
-          runState.pausedByUser
-            ? 'Fem 剧本运行结果：⏸ 已暂停（保留断点，可以用 resume 续跑）。'
-            : 'Fem 剧本运行结果：⏹ 已停止（保留断点，可以用 resume 续跑）。')
+        // 停止/暂停由发起方经 femwa-run 工具返回值或前端按钮已知悉，不再重复通知主模型。
         runState.pausedByUser = false
         break
       }

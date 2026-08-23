@@ -206,7 +206,7 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
   // ── 主模型专用工具：femwa-mount（挂载剧本到会话）/ femwa-run（控制运行）。
   //    执行体复用现有链路（writeSessionScript / startRunOnSession），只注入依赖。
   // 公共解析：会话校验 + 读挂载剧本（text 优先）+ 编译校验（check 命令）。
-  // from_scratch 与 resume 共用——AI 看到的=AI 跑的=编译过的。
+  // fresh_start 与 resume 共用——AI 看到的=AI 跑的=编译过的。
   const resolveMounted = async (sessionId: string): Promise<{ sid: SessionId; scriptText: string; effectivePath?: string }> => {
     const sid = SessionId(sessionId)
     const session = sessionsStore?.get(sid)
@@ -265,7 +265,7 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
       broadcastSse('script_changed', { sessionId })
     },
     runScript: async (sessionId) => {
-      // from_scratch：从头运行已挂载的剧本（清 checkpoint，reset=true）。
+      // fresh_start：从头运行已挂载的剧本（清 checkpoint，reset=true）。
       const { sid, scriptText, effectivePath } = await resolveMounted(sessionId)
       await startRunOnSession(ctx, resolved, bridge, runState, sid, scriptText, effectivePath, true)
     },

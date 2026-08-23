@@ -74,26 +74,26 @@ const mountTool: FemwaToolSchema = {
 }
 
 /**
- * femwa-run：控制当前 Fem 会话的剧本运行（from_scratch/stop/pause/resume）。
+ * femwa-run：控制当前 Fem 会话的剧本运行（fresh_start/stop/pause/resume）。
  * 剧本本身不在此传——先 femwa-mount 挂载，或用 femGen 编辑器写入。
  */
 const runTool: FemwaToolSchema = {
   name: 'femwa-run',
   description:
     '控制当前 Fem 会话的剧本运行。action 必填，四选一：\n' +
-    '- from_scratch：从头开始运行已挂载的剧本（清空断点，全新一轮）\n' +
+    '- fresh_start：从头开始运行已挂载的剧本（清空断点，全新一轮）\n' +
     '- stop：停止正在运行的剧本（保留断点，之后可 resume 续跑）\n' +
     '- pause：暂停正在运行的剧本（保留断点）\n' +
     '- resume：从断点继续运行上次 stop/pause 的剧本（不从头）\n' +
-    '运行后剧本由引擎驱动，角色发言显示在投影窗；运行期间你不会收到消息，' +
-    '跑完/报错系统会通知你（见系统提示词【运行出错时】）。',
+    '运行后剧本由引擎驱动，角色发言显示在投影窗，不进入你的上下文；' +
+    '编译错误随本工具返回值给出；跑到一半报错或全部跑完时，会有一条 [dsh-femwa] 开头的插件消息直接发进你的对话流。',
   parameters: {
     type: 'object',
     properties: {
       action: {
         type: 'string',
-        enum: ['from_scratch', 'stop', 'pause', 'resume'],
-        description: '对剧本运行的控制动作：from_scratch=从头运行 / stop=停止 / pause=暂停 / resume=从断点继续',
+        enum: ['fresh_start', 'stop', 'pause', 'resume'],
+        description: '对剧本运行的控制动作：fresh_start=从头运行 / stop=停止 / pause=暂停 / resume=从断点继续',
       },
     },
     required: ['action'],
@@ -223,12 +223,12 @@ export function registerFemwaTools(
 
   register(runTool, async (args, agent) => {
     const action = typeof args.action === 'string' ? args.action.trim() : ''
-    if (action !== 'from_scratch' && action !== 'stop' && action !== 'pause' && action !== 'resume') {
-      return { ok: false, error: 'action 是必填参数：from_scratch / stop / pause / resume 四选一' }
+    if (action !== 'fresh_start' && action !== 'stop' && action !== 'pause' && action !== 'resume') {
+      return { ok: false, error: 'action 是必填参数：fresh_start / stop / pause / resume 四选一' }
     }
     const sid = String(agent.session.id)
     switch (action) {
-      case 'from_scratch': {
+      case 'fresh_start': {
         await deps.runScript(sid)
         const editorErrors = deps.takeEditorErrors?.(sid) ?? []
         return { ok: true, action, note: '已从头开始运行剧本', ...(editorErrors.length > 0 ? { editor_errors: editorErrors } : {}) }

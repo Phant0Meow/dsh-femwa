@@ -2,11 +2,12 @@
  * persona.ts — Fem 会话的身份证 + 导演手册。
  *
  * 身份判定：presetOf / isFemAgent（会话 header 的 agentPreset 标记 + UI 切换
- * 的 live override）。主模型注入面：femwa:docs（语法文档指路）与 femwa:notify
- * （运行结果摘要，动态 text 读 runNotices），均走 systemPrompt.section——
- * 不污染用户可见聊天。registerPersonaHooks 负责 agent/created（override 重建）
- * 与 agent-preset/selected（切换时补注入/清除 docs section）两个钩子。
- * 从 index.ts 原样迁出（2026-08-23 重构；钩子从 apply() 提为注册函数）。
+ * 的 live override）。主模型注入面：femwa:docs（语法文档指路），走
+ * systemPrompt.section——不污染用户可见聊天。运行结果通知不走这里：
+ * 已改为 agent.steer 对话流直达（见 engine-events.ts steerMainAgent，
+ * 2026-08-23 废弃 femwa:notify section）。registerPersonaHooks 负责
+ * agent/created（override 重建）与 agent-preset/selected（切换时补注入/
+ * 清除 docs section）两个钩子。从 index.ts 原样迁出（2026-08-23 重构）。
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -78,60 +79,6 @@ export function injectFemwaDocs(agentCtx: Context): (() => void) | undefined {
   } catch (error: unknown) {
     console.log(`[dsh-femwa] femwa:docs section inject failed: ${String(error)}`)
     return undefined
-  }
-}
-
-// ── 运行结果通知（femwa:notify section，注入主模型上下文、不污染用户可见聊天）───
-// 机制：systemPrompt.section 的 text 支持函数，每次主模型调用组装 system prompt
-// 时动态求值（packages/core/system-prompt section+assemble）。运行结束事件把
-// 摘要写入 runNotices，section text 读它；无结果时返回空串（空 section 被过滤）。
-// 摘要不清空：保持到下一次运行覆盖（用户 2026-08-20 拍板"不清空"）。
-
-/** 最近一次剧本运行结果摘要（按主会话 id）→ femwa:notify section 的动态 text 源。
- * engine-events 的事件 switch 在 flow_done/flow_error/flow_stopped 时写入（导出共用实例）。 */
-export const runNotices = new Map<string, string>()
-
-/** femwa:notify section 的 effect disposer 表（按 sessionId，防同名重复注册）。 */
-const runNoticeSections = new Map<string, () => void>()
-
-/**
- * 向一个 agent ctx 注入 femwa:notify section（运行结果摘要，scoped：只对主会话
- * agent 生效，子代理不继承）。text 用函数每次 assemble 动态读 runNotices——没有
- * 运行结果时返回空串，被 renderPrompt 过滤。system prompt 不进用户可见聊天，
- * 满足"注入上下文、不污染界面"。仅注册不更新：run 事件更新 runNotices 即可。
- * @returns section 的 effect disposer；无 systemPrompt 或注册失败返回 undefined。
- */
-function injectRunNotice(agentCtx: Context, sid: string): (() => void) | undefined {
-  const systemPrompt = (agentCtx as unknown as { systemPrompt?: { section(s: { name: string; order: number; text: string | (() => string) }): () => void } }).systemPrompt
-  if (systemPrompt === undefined) return undefined
-  try {
-    return systemPrompt.section({
-      name: 'femwa:notify',
-      order: 60,
-      text: () => runNotices.get(sid) ?? '',
-    })
-  } catch (error: unknown) {
-    console.log(`[dsh-femwa] femwa:notify section inject failed: ${String(error)}`)
-    return undefined
-  }
-}
-
-/**
- * 确保某 Fem 主会话已注入 femwa:notify section（幂等）。flow_start 时调用——
- * 只在真正跑过剧本的会话上挂载。拿不到主会话 agent（极罕见）则跳过不阻断。
- */
-export function ensureRunNotice(ctx: Context, sessionId: SessionId): void {
-  const sid = String(sessionId)
-  if (runNoticeSections.has(sid)) return
-  const agent = (ctx as { agents?: { get(id: SessionId): { ctx: Context } | undefined } }).agents?.get(sessionId)
-  if (agent === undefined) {
-    console.log(`[dsh-femwa] femwa:notify inject skipped: main agent for ${sid} not found`)
-    return
-  }
-  const dispose = injectRunNotice(agent.ctx, sid)
-  if (dispose !== undefined) {
-    runNoticeSections.set(sid, dispose)
-    console.log(`[dsh-femwa] femwa:notify section injected (flow_start)`)
   }
 }
 
