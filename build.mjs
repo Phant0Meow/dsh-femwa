@@ -22,7 +22,15 @@ const clientOptions = {
   outfile: 'lib/client.js',
   // react 走 shell 单例（ModuleLoader 的 require 解析到 seed 里的 react），
   // 不能打进 bundle——否则双 React 实例会崩掉 slots 渲染。
-  external: ['react', 'react/jsx-runtime', 'react-dom', 'react-dom/client'],
+  // runtime/ui-primitives 同理（lineage-fork.jsx 复用官方 SubagentHeaderLineage
+  // 的 hooks 与图标）：external 后产物里 require('@deepseek-ai/...') 由
+  // ModuleLoader 解析到 shell 同一实例（与官方 ui-subagent 包的 bundle 模式一致）。
+  external: [
+    'react', 'react/jsx-runtime', 'react-dom', 'react-dom/client',
+    '@deepseek-ai/dsh-client-runtime',
+    '@deepseek-ai/dsh-client-runtime/*',
+    '@deepseek-ai/dsh-client-ui-primitives',
+  ],
   banner: {
     js: [
       'window.__ModuleLoader__.load({',

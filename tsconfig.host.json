@@ -1,0 +1,8 @@
+{
+  "//": "Host-side type check only (2026-08-23 refactor). The shared tsconfig includes client.tsx, whose react types are not installed in this plugin's node_modules — full-project tsc never passed even before the refactor. This config checks the Node-side modules only; run with: node <workspace>/typescript/bin/tsc -p tsconfig.host.json",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["src/**/*.ts"]
+}

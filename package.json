@@ -26,7 +26,11 @@
   "license": "Apache-2.0",
   "dsh": {
     "client": {
-      "platform": "web"
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-primitives"
+      ]
     },
     "bundle": {
       "patch": "./cordis.patch.yml"

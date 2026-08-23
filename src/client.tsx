@@ -14,13 +14,27 @@
  * dependency is react (shell singleton, external in the bundle).
  */
 
-import { useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
-import { createRoot } from 'react-dom/client'
 import type { ConversationNodeDefinition } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import FEMEditor from '../femGen/src/FemWorAuto'
+import { SubagentHeaderLineage as FemLineage } from './lineage-fork.jsx'
+
+/** 本页面实例 id：快照写带上它，host 广播时原样带回；前端跳过自己的
+ * script_changed 广播（否则自己写完→自己重拉→白转一圈还压住后续输入）。 */
+const PAGE_ID = `p${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`
+
+/** 冲突弹窗按钮统一样式（跟随 dsh 主题 token，暗色自适应）。 */
+const conflictBtnStyle: CSSProperties = {
+  padding: '6px 14px',
+  borderRadius: 8,
+  cursor: 'pointer',
+  fontSize: 13,
+  background: 'var(--dsw-surface-3, #fff)',
+  border: '1px solid var(--dsw-border, #ddd)',
+}
 
 /** Peer packages this plugin needs injected. */
 export const inject: string[] = ['slots', 'conversationEvents', 'sessions', 'workspaces']
@@ -36,6 +50,8 @@ interface ScriptViewInjected {
   /** Hard-stop the running workflow; the checkpoint stays for resume. */
   stopScript(): Promise<void>
   fetchErrors(sessionId: string): Promise<Array<{ ts: number; text: string }>>
+  /** 打开 dsh 侧边栏（手机版 femGen 返回键回调）。 */
+  toggleSidebar(): void
 }
 
 type FemScriptViewProps = { sessionId: string } & ScriptViewInjected
@@ -46,14 +62,27 @@ type FemScriptViewProps = { sessionId: string } & ScriptViewInjected
  *  挂载时读取会话状态（剧本记录 + 断点）用于恢复画布与「继续」按钮。
  *  savedPath=剧本文件地址（导出/导入产生）：非空 → 会话已保存（提示消失、
  *  支持相对寻址）；空 → 未保存（显示小字提示、依赖只支持绝对地址）。 */
-export function FemEditorView({ sessionId, saveScript, stopScript }: FemScriptViewProps) {
+export function FemEditorView({ sessionId, saveScript, stopScript, toggleSidebar }: FemScriptViewProps) {
   const [state, setState] = useState<{
     hasScript: boolean
     script?: string
     scriptPath?: string
+    rev?: number
     checkpoint: Record<string, string>
     running?: boolean
   } | null>(null)
+  /** 409 冲突弹窗：localFems=被拒的本地文本；remoteRev=裁决用的服务端当前 rev。 */
+  const [conflict, setConflict] = useState<{ localFems: string; remoteRev: number } | null>(null)
+  /** 编辑器恢复/解析失败横幅：用户可见 + 上报 host 并入 errors（主模型经 femwa-mount/run 工具结果可见）。 */
+  const [editorNotice, setEditorNotice] = useState<string | null>(null)
+  const onRestoreError = useCallback((message: string): void => {
+    setEditorNotice(message)
+    void fetch('/dsh-femwa/editor-error', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId, message, source: 'restore' }),
+    }).catch((error: unknown) => { console.warn('[dsh-femwa] editor-error 上报失败:', error) })
+  }, [sessionId])
 
   // 「Fem 编辑器」标签页激活时隐藏底部 composer，切走时恢复。
   // conversation.view 只渲染激活的视图（only: active.id），所以本组件挂载
@@ -69,40 +98,111 @@ export function FemEditorView({ sessionId, saveScript, stopScript }: FemScriptVi
     return () => { seat.style.display = '' }
   }, [])
 
-  useEffect(() => {
-    let cancelled = false
-    void fetch(`/dsh-femwa/session-state?sessionId=${encodeURIComponent(sessionId)}`)
-      .then(response => response.json())
-      .then((data: { ok?: boolean; script?: string; scriptPath?: string; checkpoint?: Record<string, string>; running?: boolean }) => {
-        if (!cancelled && data.ok === true) {
-          setState({
-            hasScript: data.script !== undefined,
-            script: data.script,
-            scriptPath: data.scriptPath,
-            checkpoint: data.checkpoint ?? {},
-            running: data.running === true,
-          })
-        }
-      })
-      .catch(() => { /* 编辑器仍可空白启动 */ })
-    return () => { cancelled = true }
+  /** 拉取 record 侧的原文：「放弃修改直接跑」时作为定稿覆盖前端两处。 */
+  const getRecordScript = useCallback(async (): Promise<string | undefined> => {
+    try {
+      const response = await fetch(`/dsh-femwa/session-state?sessionId=${encodeURIComponent(sessionId)}`)
+      const data = await response.json() as { ok?: boolean; script?: string }
+      return data.ok === true ? data.script : undefined
+    } catch {
+      return undefined
+    }
   }, [sessionId])
+
+  const loadSessionState = useCallback(async (): Promise<void> => {
+    const response = await fetch(`/dsh-femwa/session-state?sessionId=${encodeURIComponent(sessionId)}`)
+    const data = await response.json() as { ok?: boolean; script?: string; scriptPath?: string; rev?: number; checkpoint?: Record<string, string>; running?: boolean }
+    if (data.ok === true) {
+      setState({
+        hasScript: data.script !== undefined,
+        script: data.script,
+        scriptPath: data.scriptPath,
+        rev: data.rev ?? 0,
+        checkpoint: data.checkpoint ?? {},
+        running: data.running === true,
+      })
+    }
+  }, [sessionId])
+
+  useEffect(() => {
+    void loadSessionState().catch(() => { /* 编辑器仍可空白启动 */ })
+  }, [loadSessionState])
+
+  // 双链路②：femwa-mount 等外部写入会话记录后广播 script_changed → 重拉
+  // session-state。initialScript prop 变化会触发 femGen 恢复 effect 重新
+  // applyFEMText，已打开的编辑器画布即按最新记录重载。
+  // 多端语义（2026-08-22 定稿）：record 为准，外部更新静默接受覆盖。
+  useEffect(() => {
+    const es = new EventSource('/dsh-femwa/events')
+    es.onmessage = (ev: MessageEvent<string>): void => {
+      try {
+        const msg = JSON.parse(ev.data) as { type?: string; data?: Record<string, unknown> }
+        if (msg.type !== 'script_changed') return
+        if (String(msg.data?.pageId ?? '') === PAGE_ID) return
+        if (String(msg.data?.sessionId ?? '') !== String(sessionId)) return
+        void loadSessionState()
+          .catch((error: unknown) => { console.warn('[dsh-femwa] script_changed reload failed:', error) })
+      } catch {
+        // 非 JSON SSE 行忽略
+      }
+    }
+    return () => es.close()
+  }, [sessionId, loadSessionState])
 
   // 断点位置：主流程分支优先，其次任一分支（画布按节点 label 匹配）。
   const checkpointNode = state === null
     ? undefined
     : state.checkpoint['__main__'] ?? Object.values(state.checkpoint)[0]
 
-  // 画布编辑的实时快照写（femGen 防抖调用）：刷新/重启后按会话恢复。
-  // 会话记录 = {path?, text?}：编辑只写 text，保留已有地址。
-  const onSnapshot = (fems: string): void => {
+  // 显式落盘（2026-08-22 架构重构）：仅由「图生文本/文本生图」两个定稿按钮调用，
+  // 把传入文本写为会话记录。会话记录 = {path?, text?, rev}：只写 text 保留已有地址；
+  // 带 baseRev 做乐观锁——多端并发后写者输（409）→ 弹窗让用户选「加载最新/保留我的」。
+  const persistScript = (fems: string): void => {
     void fetch('/dsh-femwa/session-script', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ sessionId, fems }),
-    }).catch((error: unknown) => {
-      console.warn('[dsh-femwa] snapshot write failed:', error)
+      body: JSON.stringify({ sessionId, fems, pageId: PAGE_ID, ...(state?.rev === undefined ? {} : { baseRev: state.rev }) }),
     })
+      .then(async (response) => {
+        if (response.status !== 409) return
+        const data = await response.json().catch(() => null) as { ok?: boolean; record?: { rev?: number } } | null
+        setConflict({ localFems: fems, remoteRev: data?.record?.rev ?? 0 })
+      })
+      .catch((error: unknown) => {
+        console.warn('[dsh-femwa] persist write failed:', error)
+      })
+  }
+
+  /** 冲突裁决·加载最新：丢弃本地文本，按服务端当前记录重载画布。 */
+  const resolveConflictByReload = (): void => {
+    setConflict(null)
+    void loadSessionState()
+      .catch((error: unknown) => { console.warn('[dsh-femwa] conflict reload failed:', error) })
+  }
+
+  /** 冲突裁决·保留我的编辑：以服务端最新 rev 为基准强制重写本地文本。 */
+  const resolveConflictByOverride = (): void => {
+    if (conflict === null) return
+    const fems = conflict.localFems
+    void fetch('/dsh-femwa/session-script', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId, fems, baseRev: conflict.remoteRev, pageId: PAGE_ID }),
+    })
+      .then(async (response) => {
+        if (response.ok) {
+          const data = await response.json().catch(() => null) as { ok?: boolean; rev?: number } | null
+          setState(prev => prev === null ? prev : { ...prev, rev: data?.rev ?? prev.rev })
+          setConflict(null)
+          return
+        }
+        if (response.status === 409) {
+          // 覆盖期间又被别人写了：刷新弹窗里的 remoteRev，让用户再裁一次。
+          const data = await response.json().catch(() => null) as { record?: { rev?: number } } | null
+          setConflict({ localFems: fems, remoteRev: data?.record?.rev ?? conflict.remoteRev })
+        }
+      })
+      .catch((error: unknown) => { console.warn('[dsh-femwa] conflict override failed:', error) })
   }
 
   /** 预检（todo #2）：未保存（无剧本地址）时，剧本里的相对 file: 引用非法——
@@ -189,19 +289,69 @@ export function FemEditorView({ sessionId, saveScript, stopScript }: FemScriptVi
     // 确定高度（flex: 1 1 0 + min-height: 0 + overflow: hidden，trajectory
     // 同款机制），否则 FEMEditor 的 height:100% 解析失败、内容撑开使整个
     // 页面可无限下拉。标记随本视图卸载自动撤销。
-    <div data-conversation-composer-overlay="" style={{ height: '100%' }}>
+    <div data-conversation-composer-overlay="" style={{ position: 'relative', height: '100%' }}>
       <FEMEditor
         plugin
         onRun={onRun}
         onStop={onStop}
-        onSnapshot={onSnapshot}
+        onPersistScript={persistScript}
+        getRecordScript={getRecordScript}
         onExport={onExport}
         onImport={onImport}
+        onBackToShell={toggleSidebar}
         savedPath={state?.scriptPath}
         initialScript={state?.script}
         initialCheckpoint={checkpointNode}
         initialRunning={state?.running === true}
+        onRestoreError={onRestoreError}
       />
+      {conflict !== null && createPortal(
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(0,0,0,0.35)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div style={{
+            maxWidth: 420, width: 'calc(100% - 48px)', padding: '18px 20px', borderRadius: 12,
+            background: 'color-mix(in srgb, var(--dsw-surface-2, #f5f5f5) 96%, transparent)',
+            border: '1px solid var(--dsw-border, #e0e0e0)', boxShadow: '0 8px 28px rgba(0,0,0,0.22)',
+            fontSize: 13, lineHeight: 1.6,
+          }}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>⚔️ 剧本冲突</div>
+            <div style={{ color: 'var(--dsw-text-secondary, #666)', marginBottom: 14 }}>
+              本窗口的编辑和其他窗口/设备的保存冲突了（对方先写入）。以哪个为准？
+            </div>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button onClick={resolveConflictByReload} style={conflictBtnStyle}>加载最新版本</button>
+              <button
+                onClick={resolveConflictByOverride}
+                style={{ ...conflictBtnStyle, color: '#fff', background: '#d96b2b', borderColor: '#d96b2b' }}
+              >保留我的编辑</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+      {editorNotice !== null && createPortal(
+        <div style={{
+          position: 'fixed', left: 12, right: 12, bottom: 12, zIndex: 300,
+          display: 'flex', gap: 8, alignItems: 'flex-start',
+          padding: '10px 14px', borderRadius: 10, margin: '0 auto', maxWidth: 560,
+          background: 'color-mix(in srgb, #fdecea 92%, transparent)',
+          border: '1px solid #e5b3ad', boxShadow: '0 6px 20px rgba(0,0,0,0.18)',
+          fontSize: 12.5, lineHeight: 1.55,
+        }}>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 700, marginBottom: 2 }}>⚠️ 剧本恢复失败（已上报主模型）</div>
+            <div style={{ color: 'var(--dsw-text-secondary, #666)', whiteSpace: 'pre-wrap' }}>{editorNotice}</div>
+          </div>
+          <button
+            onClick={() => setEditorNotice(null)}
+            style={{ border: 'none', background: 'transparent', cursor: 'pointer', fontSize: 14, lineHeight: 1, padding: 2 }}
+            title="关闭"
+          >✕</button>
+        </div>,
+        document.body,
+      )}
     </div>
   )
 }
@@ -232,7 +382,12 @@ const viewBySession = new Map<string, string>()
 const viewListeners = new Map<string, Set<() => void>>()
 
 function currentView(sessionId: string | undefined): string {
-  return sessionId === undefined ? 'god' : (viewBySession.get(sessionId) ?? 'god')
+  if (sessionId === undefined) return 'god'
+  const stored = viewBySession.get(sessionId)
+  if (stored !== undefined) return stored
+  // 默认视图：投影窗=fem-proj- 前缀）=上帝视角全显；主会话=戏外（纯 DSH
+  // 原生 user+主模型页面，femwa 行全隐藏——含旧版本写进主会话的历史残留行）。
+  return sessionId.startsWith('fem-proj-') ? 'god' : 'offstage'
 }
 
 function setView(sessionId: string, view: string): void {
@@ -330,8 +485,10 @@ export function FemwaChatNodeView({ node, useSession }: ChatNodeViewProps<'femwa
   // thinking) are god-only, and dialogue lines show only when the actor's
   // scope includes this viewer. Absent `visible` = visible to everyone.
   if (view === 'offstage') {
-    // 戏外视角：只留用户/系统行（notice/error 之外的角色行全隐藏）。
-    if (kind === 'role' || kind === 'speaker' || kind === 'human_wait' || kind === 'prompt' || kind === 'tool_call') return null
+    // 戏外视角：主会话=纯 DSH 原生页面（user+主模型），femwa 行全部隐藏
+    // （角色行/名字行/引擎通知/等待提示都属戏内，上帝窗承载；也遮住旧版本
+    // 写进主会话的历史残留行）。
+    return null
   } else if (view !== 'god') {
     if (kind === 'notice' || kind === 'error' || kind === 'thinking' || kind === 'tool_call') return null
     // speaker 名字行不做 scope 过滤：角色视角也能看到所有角色的名字
@@ -380,7 +537,7 @@ export function FemwaChatNodeView({ node, useSession }: ChatNodeViewProps<'femwa
     return (
       <div style={{
         textAlign: 'left',
-        color: '#e5484d',
+        color: 'var(--dsw-danger, #e5484d)',
         fontSize: '12px',
         padding: '4px 0',
         whiteSpace: 'pre-wrap',
@@ -742,7 +899,9 @@ interface FemViewInjected {
 
 /** Session-header action: switch between god view and per-actor views.
  *  视角菜单：戏外=主会话本体 / 上帝=上帝投影窗 / 角色=角色投影窗。
- *  dsh 原生切换显示（主会话与子代理窗同一 UI 位置）。 */
+ *  dsh 原生切换显示（主会话与子代理窗同一 UI 位置）。
+ *  2026-08-23：order -10→-20（排到 preset 徽章之前，紧贴 session name）；
+ *  菜单支持点外部收起。 */
 export function FemViewButton({ useSession, useSessions, openSession, listProjectionWindows }: PropsRuntime<'conversation.session.header.actions'> & FemViewInjected) {
   const sessionId = useSession(snapshot => snapshot.sessionId)
   const view = useView(sessionId)
@@ -753,7 +912,25 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
   // preset each session's agent was composed from (agent-preset/selected
   // keeps it current after a runtime switch), so the menu is ready from boot
   // for existing Fem sessions and never appears on other modes.
-  const isFem = useSessions(state => state.byId[sessionId]?.agentPreset === 'dsh-femwa')
+  //
+  // 归属主会话（2026-08-23 扩展）：视角菜单同时服务两类窗口——
+  //   Fem 主会话（agentPreset=dsh-femwa 且无父）→ mainSid=自身；
+  //   Fem 投影窗（id 前缀 fem-proj-，parentSession 指向主会话）→ mainSid=父会话。
+  // 其余会话（普通子代理/非 fem）mainSid=undefined → 菜单不渲染，不受影响。
+  // 视角状态（viewBySession）与 actors/turn-scopes/projection-windows 三张
+  // 查询一律挂在 mainSid 名下——视角是「剧」的属性，不是「窗」的属性。
+  const mainSid = useSessions((state): string | undefined => {
+    if (typeof sessionId !== 'string') return undefined
+    const summary = state.byId[sessionId]
+    if (summary?.agentPreset === 'dsh-femwa' && summary?.parentId === undefined) return sessionId
+    if (sessionId.startsWith('fem-proj-')) {
+      const pid = summary?.parentId
+      return typeof pid === 'string' ? pid : undefined
+    }
+    return undefined
+  })
+  // isFem = 当前就在 Fem 主会话本体（投影窗上为 false：编辑器标签等主会话专属 UI 不跟随）。
+  const isFem = mainSid !== undefined && mainSid === sessionId
 
   // 非 Fem 会话：隐藏「Fem 编辑器」标签页。tab 列表 = conversation.view
   // 的全部注册条目（无按会话过滤的钩子），纯插件方案在 header 挂载时
@@ -769,8 +946,9 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
   // truth; chat-line actors below only backfill before the first run.
   const [scriptActors, setScriptActors] = useState<string[]>([])
   useEffect(() => {
+    if (mainSid === undefined) return
     let cancelled = false
-    void fetch(`/dsh-femwa/actors?sessionId=${encodeURIComponent(sessionId ?? '')}`)
+    void fetch(`/dsh-femwa/actors?sessionId=${encodeURIComponent(mainSid)}`)
       .then(response => response.json())
       .then((data: { ok?: boolean; actors?: string[] }) => {
         if (!cancelled && data.ok === true && data.actors !== undefined && data.actors.length > 0) {
@@ -779,41 +957,54 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
       })
       .catch(() => { /* menu falls back to actors seen in chat */ })
     return () => { cancelled = true }
-  }, [sessionId])
+  }, [mainSid])
 
   // 投影窗 id 列表（host 幂等创建；视角菜单跳转目标）。
   useEffect(() => {
-    if (!isFem || sessionId === undefined) return
+    if (mainSid === undefined) return
     let cancelled = false
-    void listProjectionWindows(sessionId)
-      .then(w => { if (!cancelled) setProj(w) })
+    // 诊断足迹（卡死调查）：前端走到哪一步，host 日志可见。
+    void fetch(`/dsh-femwa/debug-log?msg=${encodeURIComponent(`viewbtn-mount sid=${String(sessionId)} main=${mainSid}`)}`).catch(() => undefined)
+    void listProjectionWindows(mainSid)
+      .then(w => {
+        if (!cancelled) {
+          setProj(w)
+          void fetch(`/dsh-femwa/debug-log?msg=${encodeURIComponent(`viewbtn-proj-ok god=${w.god ?? '-'} actors=${Object.keys(w.actors).join(',')}`)}`).catch(() => undefined)
+        }
+      })
       .catch(() => { /* 投影窗未建（未运行过剧本）：菜单降级为旧 CSS 过滤 */ })
     return () => { cancelled = true }
-  }, [sessionId, isFem, listProjectionWindows, scriptActors.length])
+  }, [mainSid, listProjectionWindows, scriptActors.length])
 
   // 点击视角项：打开对应窗（戏外=主会话 / 上帝=上帝窗 / 角色=角色窗）。
-  // 投影窗不可用时（未运行剧本）降级为旧 CSS 过滤视图。
+  // 投影窗不可用时（未运行剧本）降级为旧 CSS 过滤视图。视角状态记在
+  // mainSid 名下（投影窗上操作也归属到主会话，保证跨窗状态一致）。
   const pickView = (id: string): void => {
     setOpen(false)
+    const target = id === 'offstage' ? mainSid : (proj.actors[id] ?? proj.god ?? mainSid)
+    // 诊断足迹：点击视角项的瞬间 + 跳转目标。
+    void fetch(`/dsh-femwa/debug-log?msg=${encodeURIComponent(`pickView id=${id} target=${target ?? '-'}`)}`).catch(() => undefined)
+    setOpen(false)
     if (id === 'offstage') {
-      // 戏外 = 主会话本体（当前会话）；view 状态标记 offstage，
-      // CSS 过滤隐藏角色内容（待主模型恢复后主会话表面回归干净）。
-      setView(sessionId, 'offstage')
+      // 戏外 = 主会话本体；view 状态标记 offstage，CSS 过滤隐藏角色内容
+      // （待主模型恢复后主会话表面回归干净）。投影窗上点戏外 = 跳回主会话。
+      setView(mainSid, 'offstage')
+      if (mainSid !== sessionId) openSession(mainSid)
       return
     }
     if (id === 'god' && proj.god !== undefined) {
-      setView(sessionId, 'god')
+      setView(mainSid, 'god')
       openSession(proj.god)
       return
     }
     const actorId = proj.actors[id]
     if (actorId !== undefined) {
-      setView(sessionId, id)
+      setView(mainSid, id)
       openSession(actorId)
       return
     }
     // 降级：无投影窗时保持旧行为（CSS 过滤显示）。
-    setView(sessionId, id)
+    setView(mainSid, id)
   }
 
   const snapshot = useSession(s => s)
@@ -824,16 +1015,16 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
   const [turnScopes, setTurnScopes] = useState<Record<string, string[]>>({})
   const turnCount = snapshot.turnTimings.size
   useEffect(() => {
-    if (!isFem || sessionId === undefined) return
+    if (mainSid === undefined) return
     let cancelled = false
-    void fetch(`/dsh-femwa/turn-scopes?sessionId=${encodeURIComponent(sessionId)}`)
+    void fetch(`/dsh-femwa/turn-scopes?sessionId=${encodeURIComponent(mainSid)}`)
       .then(response => response.json())
       .then((data: { ok?: boolean; scopes?: Record<string, string[]> }) => {
         if (!cancelled && data.ok === true && data.scopes !== undefined) setTurnScopes(data.scopes)
       })
       .catch(() => { /* 视角过滤降级为全显示（信息不丢） */ })
     return () => { cancelled = true }
-  }, [sessionId, turnCount, isFem])
+  }, [mainSid, turnCount])
 
   useEffect(() => {
     // 原生 assistant turn 的 DOM 锚点：data-chat-flow-key =
@@ -881,7 +1072,8 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
       if (data === undefined) continue
       if (data.actor !== undefined && data.actor.length > 0) actors.add(data.actor)
       if (view === 'god') continue
-      if (data.kind === 'notice' || data.kind === 'error' || data.kind === 'thinking') {
+      // offstage：femwa 行全隐藏，计数=全部。
+      if (view === 'offstage' || data.kind === 'notice' || data.kind === 'error' || data.kind === 'thinking') {
         hiddenCount += 1
         continue
       }
@@ -891,11 +1083,29 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
   }, [snapshot, view])
 
   const actors = scriptActors.length > 0 ? scriptActors : chatActors
-  // Fem sessions only: the menu is ready from boot on existing Fem sessions
-  // (roles backfilled from chat lines) and never shows on other modes, even
-  // after a run populated the host's actor cache.
-  if (!isFem) return null
-  const label = view === 'god' ? '上帝视角' : view === 'offstage' ? '戏外 · 主模型' : view
+  // Fem 主会话与 Fem 投影窗都显示视角菜单（投影窗上=同一份剧的视角切换）；
+  // 普通子代理/非 fem 会话 mainSid 为空 → 不渲染，完全不受影响。
+  if (mainSid === undefined) return null
+  // 视角栏显示「当前所处视角」：从当前窗口直接推导，而非查 viewBySession
+  // 记录——投影窗自身没有记录（pickView 写在 mainSid 名下），查记录会永远
+  // 落到默认值（2026-08-23 bug：诗人窗上仍显示"上帝视角"）。
+  //   主会话 → 已存储的视角（无记录=offstage，与 currentView 默认一致）；
+  //   god 投影窗 → 'god'；角色投影窗 → 反查 proj.actors 得角色名；
+  //   映射未就绪的 fem-proj-* 窗 → 兜底 'god'。
+  const activeViewId = ((): string | undefined => {
+    if (mainSid === sessionId) {
+      const stored = sessionId === undefined ? undefined : viewBySession.get(sessionId)
+      return stored ?? 'offstage'
+    }
+    if (sessionId === proj.god) return 'god'
+    for (const [name, winId] of Object.entries(proj.actors)) {
+      if (winId === sessionId) return name
+    }
+    return typeof sessionId === 'string' && sessionId.startsWith('fem-proj-') ? 'god' : undefined
+  })()
+  const label = activeViewId === 'god' ? '上帝视角'
+    : activeViewId === 'offstage' ? '戏外 · 主模型'
+    : activeViewId ?? '上帝视角'
   const menu = open
     ? (
         <div style={{
@@ -928,8 +1138,8 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
                 padding: '6px 10px',
                 border: 'none',
                 borderRadius: '6px',
-                background: item.id === view || (item.id === 'offstage' && view === 'offstage') ? 'var(--dsw-accent, #4a9eff)' : 'transparent',
-                color: item.id === view || (item.id === 'offstage' && view === 'offstage') ? '#fff' : 'var(--dsw-text-primary, #222)',
+                background: item.id === activeViewId ? 'var(--dsw-accent, #4a9eff)' : 'transparent',
+                color: item.id === activeViewId ? '#fff' : 'var(--dsw-text-primary, #222)',
                 cursor: 'pointer',
                 textAlign: 'left',
                 whiteSpace: 'nowrap',
@@ -947,7 +1157,9 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
         type="button"
         aria-haspopup="menu"
         aria-expanded={open}
-        title={view === 'god' ? '上帝视角：显示全部消息' : `角色视角：仅显示 ${view} 可见的消息`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={activeViewId === 'god' ? '上帝视角：显示全部消息' : activeViewId === 'offstage' ? '戏外 · 主模型' : `角色视角：仅显示 ${activeViewId} 可见的消息`}
         onClick={() => { setOpen(value => !value) }}
         style={{
           display: 'inline-flex',
@@ -957,7 +1169,7 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
           border: '1px solid var(--dsw-border, #ddd)',
           borderRadius: '999px',
           background: 'transparent',
-          color: view === 'god' ? 'var(--dsw-text-secondary, #666)' : 'var(--dsw-accent, #4a9eff)',
+          color: activeViewId === 'god' ? 'var(--dsw-text-secondary, #666)' : 'var(--dsw-accent, #4a9eff)',
           cursor: 'pointer',
           fontSize: '12px',
           whiteSpace: 'nowrap',
@@ -988,7 +1200,12 @@ export function apply(ctx: any): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const conversationEvents = ctx?.get?.('conversationEvents') as { register(def: unknown): void } | undefined
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const sessions = ctx?.get?.('sessions') as { open?(id: string): void } | undefined
+  const sessions = ctx?.get?.('sessions') as {
+    open?(id: string): void
+    openSubagent?(address: { parentSessionId: string; childSessionId: string; mode: string }): void
+    refreshSubagents?(parentSessionId: string): void
+    setSubagentCatalogOpen?(parentSessionId: string, open: boolean): void
+  } | undefined
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const workspaces = ctx?.get?.('workspaces') as {
     list?: { getSnapshot?(): { items?: Array<{ workspaceId: string; path: string }>; recentWorkspaceId?: string } }
@@ -1097,6 +1314,36 @@ export function apply(ctx: any): void {
     FemViewButton,
   ))
 
+  // ── 子代理下拉过滤（shadow 官方 lineage 槽位）─────────────────────────────
+  // Fem 剧本机制产生的会话——投影窗（id 前缀 fem-proj-）与节点子代理（label
+  // 前缀 fem-node-）——不出现在子代理目录里；主模型主动拉起的子代理不受影响
+  // （label 无此前缀）。fork 版组件见 lineage-fork.jsx（过滤逻辑全在那里），
+  // 非 Fem 会话上行为与官方组件一致（无 fem 条目可滤）。priority -10 shadow
+  // 官方默认 0（single 槽 lowest renders，见 ui-slots shadowing 语义）。
+  // （2026-08-23 布局重排三件套已回退：FemSubagentCount seat / fork 让位 /
+  // order -20 与 MutationObserver 母名改造——疑似视角切换卡死的引入点，
+  // 待根因确认后再逐件找回。）
+  slots.inject('conversation.session.header.lineage', () => slots.register(
+    {
+      name: 'conversation.session.header.lineage',
+      priority: -10,
+      locale: 'subagent',
+      inject: () => ({
+        openChild: (address: { parentSessionId: string; childSessionId: string; mode: string }): void => {
+          sessions?.openSubagent?.(address)
+        },
+        refresh: (parentSessionId: string): void => {
+          sessions?.refreshSubagents?.(parentSessionId)
+        },
+        setCatalogOpen: (parentSessionId: string, open: boolean): void => {
+          sessions?.setSubagentCatalogOpen?.(parentSessionId, open)
+        },
+      }),
+    },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    FemLineage as any,
+  ))
+
   const scriptViewInjected = (): ScriptViewInjected => ({
     listScripts: injected().listScripts,
     readScript: async (path: string): Promise<string> => {
@@ -1154,6 +1401,7 @@ export function apply(ctx: any): void {
       }
       return data.errors
     },
+    toggleSidebar: () => ctx.layout.toggleSidebar(),
   })
 
   slots.inject('conversation.view', () => slots.register(
@@ -1182,73 +1430,6 @@ export function apply(ctx: any): void {
     },
     ProjectionComposer,
   ))
-
-  // 流式预览条：独立 React 根（常驻，不依赖任何 tab 挂载）。
-  try {
-    const previewHost = document.createElement('div')
-    previewHost.id = 'dsh-femwa-stream-preview'
-    document.body.appendChild(previewHost)
-    createRoot(previewHost).render(<StreamPreviewBar />)
-  } catch (error: unknown) {
-    console.warn('[dsh-femwa] stream preview mount failed:', error)
-  }
-}
-// ── 流式输出预览条（方案丁）：SSE ai_token → 对话窗口底部覆盖条。
-// 纯插件实现：独立 React 根（react-dom shell 单例）+ portal 到 body；
-// 流式期间显示「角色名 + 累积正文」，节点完成（ai_done/flow_done/flow_error/human_wait）后消失。
-// 最终态仍由 dsh 原生 assistant-step 渲染（镜像裁剪后历史只存整块）。
-function StreamPreviewBar() {
-  const [stream, setStream] = useState<{ actor: string; text: string } | null>(null)
-  useEffect(() => {
-    const es = new EventSource('/dsh-femwa/events')
-    es.onmessage = (ev: MessageEvent<string>): void => {
-      try {
-        const msg = JSON.parse(ev.data) as { type?: string; data?: Record<string, unknown> }
-        if (msg.type === 'ai_token') {
-          const d = msg.data ?? {}
-          const actor = String(d.actor ?? d.node_name ?? 'AI')
-          const token = typeof d.token === 'string' ? d.token : ''
-          if (token.length === 0) return
-          setStream(s => ({
-            actor,
-            text: (s !== null && s.actor === actor ? s.text : '') + token,
-          }))
-        } else if (msg.type === 'ai_done' || msg.type === 'flow_done' || msg.type === 'flow_error' || msg.type === 'human_wait') {
-          setStream(null)
-        }
-      } catch {
-        // 非 JSON SSE 行忽略
-      }
-    }
-    return () => es.close()
-  }, [])
-  if (stream === null) return null
-  return createPortal(
-    <div style={{
-      position: 'fixed',
-      left: '50%',
-      transform: 'translateX(-50%)',
-      bottom: 96,
-      maxWidth: 720,
-      width: '90%',
-      padding: '8px 14px',
-      borderRadius: 10,
-      background: 'color-mix(in srgb, var(--dsw-surface-2, #f5f5f5) 92%, transparent)',
-      border: '1px solid var(--dsw-border, #e0e0e0)',
-      boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
-      fontSize: 13,
-      lineHeight: 1.5,
-      zIndex: 200,
-      pointerEvents: 'none',
-      whiteSpace: 'pre-wrap',
-      wordBreak: 'break-word',
-    }}>
-      <span style={{ fontWeight: 700, color: actorColor(stream.actor) }}>🎭 {stream.actor}</span>
-      <span style={{ color: 'var(--dsw-text-secondary, #666)' }}>：{stream.text}</span>
-      <span style={{ color: 'var(--dsw-text-tertiary, #999)' }}>…</span>
-    </div>,
-    document.body,
-  )
 }
 
 // ── 投影窗 composer（角色/上帝视角的可输入输入框）────────────────────────
