@@ -24,6 +24,7 @@ function LibPanel({
   // 供面板 touchstart 用 closest() 找"拖哪个"——落点不再参与手势裁决，卡片自身零触摸监听。
   armedKey = null, // round27：手机端长按激活抓起态（"type:id"）；桌面端不传=null 永不命中
   htmlDraggable = true, // round45：手机端传 false——draggable 卡片在触摸设备上会阻止原生滚动
+  cardLayout = 'list', // round51：'list'=全宽单列（桌面默认）；'grid3'=Actions/特殊节点一行三卡（仅手机传）
 }) {
   // round27：长按激活抓起态——被抓住的卡片亮主色边框+混底+微放大+光晕，平滑亮起/回落
   const grabTransition =
@@ -39,6 +40,16 @@ function LibPanel({
           boxShadow: '0 6px 18px var(--fem-primary-glow-strong)',
         }
       : {};
+  // round51：grid3 模式常量——行容器 flex 换行 + 单卡占 1/3 宽（扣除两个 7px 沟槽）。
+  // box-sizing:border-box 必须显式声明：否则 padding+边框加在 1/3 之外，第三张卡挤不下掉行。
+  const GRID_ROW = { display: 'flex', flexWrap: 'wrap', gap: 7 };
+  // round51b：特殊节点网格与下方 POSITION 卡之间原本靠卡片 marginBottom 撑开的 7px，
+  // 容器化后卡片 margin 清零会断——容器自己补回。
+  const SPECIAL_GRID_ROW = { ...GRID_ROW, marginBottom: 7 };
+  const gridItemStyle =
+    cardLayout === 'grid3'
+      ? { flex: '0 0 calc((100% - 14px) / 3)', marginBottom: 0, boxSizing: 'border-box', minWidth: 0 }
+      : null;
   const displayActions = (lib.actions || []).filter((a) => {
     if (!a.path) return false;
     if (a.path.length === 1 && a.path[0] === 'mainflow') return true;
@@ -112,7 +123,8 @@ function LibPanel({
           </div>
         </div>
       ) : (
-        displayActions.map((a) => {
+        <div style={cardLayout === 'grid3' ? GRID_ROW : undefined}>
+        {displayActions.map((a) => {
           const { c } = ti(a.executorType);
           const bk = ['ai', 'human', 'mind', 'func', 'assign'].includes(a.executorType) ? a.executorType : 'ai';
           return (
@@ -130,6 +142,7 @@ function LibPanel({
                 padding: '8px 10px',
                 marginBottom: 7,
                 cursor: 'grab',
+                ...(gridItemStyle || {}),
                 ...grabStyle(isGrabbed('action', a)),
                 transition: grabTransition,
               }}
@@ -230,7 +243,8 @@ function LibPanel({
               </div>
             </div>
           );
-        })
+        })}
+        </div>
       )}
       {/* New Module creation */}
       <div style={{ marginTop: 14, marginBottom: 10 }}>
@@ -390,7 +404,8 @@ if (name && (!allNames || !allNames.has || !allNames.has(name))) {
       >
         特殊节点
       </div>
-{specialNodes.map((s) => (
+      <div style={cardLayout === 'grid3' ? SPECIAL_GRID_ROW : undefined}>
+      {specialNodes.map((s) => (
           <div
             key={s.t}
             draggable={htmlDraggable}
@@ -400,9 +415,10 @@ if (name && (!allNames || !allNames.has || !allNames.has(name))) {
             background: 'var(--fem-node-bg)',
             borderRadius: 'var(--fem-radius-md)',
             border: `var(--fem-node-border-w) solid color-mix(in srgb, ${s.c} 50%, var(--fem-node-bg))`,
-            padding: '9px 11px',
+            padding: cardLayout === 'grid3' ? '7px 8px' : '9px 11px',
             marginBottom: 7,
             cursor: 'grab',
+            ...(gridItemStyle || {}),
             ...grabStyle(isGrabbed('special', s.t)),
             transition: grabTransition,
           }}
@@ -441,7 +457,8 @@ if (name && (!allNames || !allNames.has || !allNames.has(name))) {
             </button>
           </div>
         </div>
-      ))}
+        ))}
+      </div>
       {/* POSITION node */}
       <div
         draggable={htmlDraggable}

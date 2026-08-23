@@ -711,6 +711,7 @@ function MobileBottomPanel({
       >
         {activeTab === 'library' && (
           <LibPanel
+            cardLayout="grid3"
             lib={lib}
             mode={mode}
             locationPath={locationPath}
