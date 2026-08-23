@@ -249,7 +249,7 @@ function catalogMenuPosition(trigger) {
     };
 }
 /** One trigger-plus-tree dropdown over the catalog rooted at `rootSessionId`. */
-export function CatalogDropdown({ rootSessionId, currentSessionId, displayTitle, openTitle, variant, separator = false, useSessions, openChild, refresh, setCatalogOpen, t, }) {
+export function CatalogDropdown({ rootSessionId, currentSessionId, displayTitle, openTitle, variant, separator = false, showRunning = false, useSessions, openChild, refresh, setCatalogOpen, t, }) {
     const ancestorSwitcher = variant === 'switcher' && openTitle !== undefined;
     const catalogs = useSessions(state => state.subagentsByParent);
     const summaries = useSessions(state => state.byId);
@@ -505,7 +505,7 @@ export function CatalogDropdown({ rootSessionId, currentSessionId, displayTitle,
                     queueMicrotask(() => { focusAt(0); });
                 }, children: [variant === 'switcher'
                         ? _jsx("span", { className: css.switcherTitle, children: switcherDisplayTitle })
-                        : (_jsxs(_Fragment, { children: [descendants.runningCount > 0 && (_jsx("span", { className: css.activitySlot, children: _jsx(StateDot, { state: "ongoing" }) })), _jsx("span", { className: css.count, children: t(totalCountKey, { count: descendantCount }) })] })), variant === 'switcher'
+                        : (_jsxs(_Fragment, { children: [descendants.runningCount > 0 && (_jsx("span", { className: css.activitySlot, children: _jsx(StateDot, { state: "ongoing" }) })), _jsx("span", { className: css.count, children: t(totalCountKey, { count: descendantCount }) }), showRunning && descendants.runningCount > 0 && (_jsx("span", { className: css.count, children: ` ${descendants.runningCount} 个在跑` }))] })), variant === 'switcher'
                         ? _jsx(SubagentSwitcherIcon, {})
                         : _jsx(IconChevronDownOutline14, { className: open ? css.triggerOpen : undefined })] }), open && createPortal((_jsx("div", { ref: menuRef, className: css.menu, style: menuPosition, role: "tree", "aria-label": t('tree.aria'), onMouseEnter: cancelHoverClose, onMouseLeave: scheduleHoverClose, children: _jsx(CatalogRows, { parentSessionId: rootSessionId, currentSessionId: currentSessionId, catalog: presentedCatalog, catalogs: catalogs, summaries: summaries, expanded: expanded, level: 1, now: now, openChild: openChild, refresh: refresh, toggleBranch: toggleBranch, closeCatalog: () => { changeOpen(false); }, t: t }) })), document.body)] }));
 }
@@ -515,10 +515,22 @@ export function CatalogDropdown({ rootSessionId, currentSessionId, displayTitle,
  * @returns An ordinary-title descendant count, or a title-and-chevron sibling switcher.
  */
 export function SubagentHeaderLineage({ lineageSessionId, displayTitle, openTitle, useSessions, openChild, refresh, setCatalogOpen, t, }) {
-    const parentId = useSessions((state) => {
-        const summary = state.byId[lineageSessionId];
-        return summary?.origin === 'subagent' ? summary.parentId : undefined;
-    });
+    const summary = useSessions((state) => state.byId[lineageSessionId]);
+    const parentId = summary?.origin === 'subagent' ? summary.parentId : undefined;
+    // dsh-femwa fork 让位（2026-08-23 布局重排 v2）：Fem 剧本会话的面包屑区只留
+    // 斜杠与名字，子代理导航全部让给 actions 区——
+    //   投影窗（fem-proj- 前缀）→ 整个返回 null：骨架的段间 "/" 仍在，显示为
+    //     「母名 /」，随后是 actions 区 order -20 的视角按钮（单槽语义：占位
+    //     组件渲染 null 不触发 owner 的 fallback 子名 title）。
+    //   Fem 主会话 → 只画一个 "/" 分隔符（主会话的斜杠是本组件 separator 自带
+    //     的，让位后需补上），计数菜单移到 client.tsx 的 dsh-femwa-count 座位。
+    //   其余会话 → 与官方行为逐字一致。
+    const isFemProj = femwaHiddenId(lineageSessionId);
+    const isFemMain = !isFemProj && summary?.agentPreset === 'dsh-femwa' && parentId === undefined;
+    if (isFemProj)
+        return null;
+    if (isFemMain)
+        return _jsx("span", { className: css.separator, children: "/" });
     const shared = { useSessions, openChild, refresh, setCatalogOpen, t };
     if (parentId === undefined) {
         return (_jsx(CatalogDropdown, { rootSessionId: lineageSessionId, variant: "count", separator: true, ...shared }, lineageSessionId));

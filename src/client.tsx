@@ -20,7 +20,7 @@ import type { ConversationNodeDefinition } from '@deepseek-ai/dsh-client-runtime
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import FEMEditor from '../femGen/src/FemWorAuto'
-import { SubagentHeaderLineage as FemLineage } from './lineage-fork.jsx'
+import { SubagentHeaderLineage as FemLineage, CatalogDropdown } from './lineage-fork.jsx'
 
 /** 本页面实例 id：快照写带上它，host 广播时原样带回；前端跳过自己的
  * script_changed 广播（否则自己写完→自己重拉→白转一圈还压住后续输入）。 */
@@ -984,7 +984,6 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
     const target = id === 'offstage' ? mainSid : (proj.actors[id] ?? proj.god ?? mainSid)
     // 诊断足迹：点击视角项的瞬间 + 跳转目标。
     void fetch(`/dsh-femwa/debug-log?msg=${encodeURIComponent(`pickView id=${id} target=${target ?? '-'}`)}`).catch(() => undefined)
-    setOpen(false)
     if (id === 'offstage') {
       // 戏外 = 主会话本体；view 状态标记 offstage，CSS 过滤隐藏角色内容
       // （待主模型恢复后主会话表面回归干净）。投影窗上点戏外 = 跳回主会话。
@@ -1064,7 +1063,25 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
     return () => { style.textContent = '' }
   }, [view, turnScopes])
 
-  const { chatActors, hidden } = useMemo(() => {    const actors = new Set<string>()
+  // 点外部收起：菜单打开期间监听 document 的 pointerdown，点容器外任意空白处
+  // 自动收起（与 lineage-fork 官方子代理目录同款交互：pointerdown 即响应，
+  // 鼠标/触摸通用）。点击容器内不经此路径：按钮=toggle 关闭、菜单项=pickView
+  // 关闭，行为不变。注意：必须在 mainSid 早退 return 之前注册（hooks 不能
+  // 条件执行）。
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!open) return
+    const closeOutside = (event: PointerEvent): void => {
+      if (event.target instanceof Node && !rootRef.current?.contains(event.target)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('pointerdown', closeOutside)
+    return () => { document.removeEventListener('pointerdown', closeOutside) }
+  }, [open])
+
+  const { chatActors, hidden } = useMemo(() => {
+    const actors = new Set<string>()
     let hiddenCount = 0
     for (const node of (snapshot.chat?.nodes?.values() ?? [])) {
       if (node.kind !== 'femwa-role') continue
@@ -1152,11 +1169,9 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
       )
     : null
   return (
-    <div style={{ position: 'relative' }}>
+    <div ref={rootRef} style={{ position: 'relative' }}>
       <button
         type="button"
-        aria-haspopup="menu"
-        aria-expanded={open}
         aria-haspopup="menu"
         aria-expanded={open}
         title={activeViewId === 'god' ? '上帝视角：显示全部消息' : activeViewId === 'offstage' ? '戏外 · 主模型' : `角色视角：仅显示 ${activeViewId} 可见的消息`}
@@ -1181,6 +1196,34 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
       </button>
       {menu}
     </div>
+  )
+}
+
+/** Fem 主会话的子代理计数菜单（actions 尾部座位）：复用 fork 的 CatalogDropdown
+ *  count 变体 + showRunning 运行数文本。归属判定与 FemViewButton 的 mainSid
+ *  同源——只有站在 Fem 主会话本体时渲染；投影窗（子会话的 count 属于其母窗口）
+ *  与普通会话返回 null，不受影响。 */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function FemSubagentCount({ useSession, useSessions, openChild, refresh, setCatalogOpen, t }: any) {
+  const sessionId = useSession((s: { sessionId?: string }) => s.sessionId) as string | undefined
+  const mainSid = useSessions((state): string | undefined => {
+    if (typeof sessionId !== 'string') return undefined
+    const summary = state.byId[sessionId]
+    if (summary?.agentPreset === 'dsh-femwa' && summary?.parentId === undefined) return sessionId
+    return undefined
+  })
+  if (mainSid === undefined) return null
+  return (
+    <CatalogDropdown
+      rootSessionId={mainSid}
+      variant="count"
+      showRunning
+      useSessions={useSessions}
+      openChild={openChild}
+      refresh={refresh}
+      setCatalogOpen={setCatalogOpen}
+      t={t}
+    />
   )
 }
 
@@ -1304,14 +1347,43 @@ export function apply(ctx: any): void {
     },
     FemwaChatNodeView,
   ))
+  // FemViewButton：order -20 = preset 徽章(-10)之前、紧贴面包屑区——主窗口
+  // 「name / 👁视角  Fem剧本模式 …」；投影窗「母名 / 👁@演员」（fork 让位后
+  // 面包屑只剩斜杠，见 lineage-fork.jsx SubagentHeaderLineage）。
   slots.inject('conversation.session.header.actions', () => slots.register(
     {
       name: 'conversation.session.header.actions',
       id: 'dsh-femwa-view',
-      order: 10,
+      order: -20,
       inject: viewInjected,
     },
     FemViewButton,
+  ))
+
+  // ── 子代理计数座位（actions 尾部）─────────────────────────────────────────
+  // Fem 主会话的官方"N 个子代理"计数菜单：原在面包屑区（lineage 槽），fork
+  // 让位后移到这里。order 10 = preset(-10) 之后、job-list(20) 之前，即用户要的
+  // 「Fem剧本模式 → 几个子代理 → 几个在跑」。locale 复用官方 'subagent'
+  // 命名空间拿文案；仅 Fem 主会话本体渲染，投影窗/普通会话返回 null。
+  slots.inject('conversation.session.header.actions', () => slots.register(
+    {
+      name: 'conversation.session.header.actions',
+      id: 'dsh-femwa-count',
+      order: 10,
+      locale: 'subagent',
+      inject: () => ({
+        openChild: (address: { parentSessionId: string; childSessionId: string; mode: string }): void => {
+          sessions?.openSubagent?.(address)
+        },
+        refresh: (parentSessionId: string): void => {
+          sessions?.refreshSubagents?.(parentSessionId)
+        },
+        setCatalogOpen: (parentSessionId: string, open: boolean): void => {
+          sessions?.setSubagentCatalogOpen?.(parentSessionId, open)
+        },
+      }),
+    },
+    FemSubagentCount,
   ))
 
   // ── 子代理下拉过滤（shadow 官方 lineage 槽位）─────────────────────────────
