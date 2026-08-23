@@ -1692,15 +1692,12 @@ const { onTouchStart, onTouchMove, onTouchEnd, dragReady } = useMobileCanvasGest
   // 滚动被误判成长按，armed 后 preventDefault 把进行中的原生滚动当场掐死（列表冻结）。
   const libDragRef = useRef(null); // { phase:'pending'|'drag', type, item, startX, startY, lastX, lastY, lastMoveAt, bornAt }
   const libTimerRef = useRef(null);
-  // round47：ghost 与调试条改为 **ref 直写 DOM**——touchmove 里 setState 会重渲染
+  // round47：ghost 改为 **ref 直写 DOM**——touchmove 里 setState 会重渲染
   // 整棵编辑器树（主线程卡死，WebKit 来不及启动滚动=卡片滑不动的重要共犯）。
   // 只有"armed 开关"保留 state 变更（驱动画布放置提示 + 抓起卡片高亮）。
   const [libDragActive, setLibDragActive] = useState(false);
   const ghostRef = useRef(null);
   const ghostLabelRef = useRef(null);
-  const libDbgRef = useRef(null);
-  const dbg = (t) => { if (libDbgRef.current) libDbgRef.current.textContent = t; };
-  const panelScrollTop = () => { const el = document.querySelector('.fem-bottom-scroll'); return el ? Math.round(el.scrollTop) : 0; };
   // round27：长按激活视觉反馈——当前被抓起条目的 key（"type:id"），null=无。
   // 激活瞬间 set，touchEnd/取消清；透传 LibPanel 点亮被按卡片 + 画布浮现可放置提示。
   const [libArmedKey, setLibArmedKey] = useState(null);
@@ -1735,7 +1732,6 @@ const { onTouchStart, onTouchMove, onTouchEnd, dragReady } = useMobileCanvasGest
       lastX: t.clientX, lastY: t.clientY,
       lastMoveAt: performance.now(), bornAt: performance.now(),
     };
-    dbg(`TS ${type} y=${Math.round(t.clientY)} st=${panelScrollTop()}`);
     // 长按武装判定（可顺延）：到点复核"漂移小 + 最近确实没动"，慢速滚动会被正确拒绝
     const tryArm = () => {
       const st = libDragRef.current;
@@ -1747,16 +1743,13 @@ const { onTouchStart, onTouchMove, onTouchEnd, dragReady } = useMobileCanvasGest
       if (driftX > LIB_DRAG_SLOP_PX || driftY > LIB_DRAG_SLOP_PX || !stillLongEnough) {
         if (now - st.bornAt < LIB_ARM_MAX_WAIT_MS) {
           libTimerRef.current = setTimeout(tryArm, LIB_ARM_RECHECK_MS);
-          dbg(`ARM-WAIT dy=${Math.round(driftY)} still=${stillLongEnough ? 'y' : 'n'} → 复查`);
         } else {
           libDragRef.current = null; // 放弃武装，交还原生滚动（本手势不再有拖拽）
-          dbg(`ARM-GIVEUP dy=${Math.round(driftY)} → 原生滚动`);
         }
         return;
       }
       st.phase = 'drag';
       navigator.vibrate?.(15); // iOS Safari 不支持 vibrate；iPhone 靠下方视觉反馈
-      dbg('ARMED 长按拖拽');
       const label = typeof st.item === 'string' ? st.item : (st.item?.name || st.type);
       setLibArmedKey(`${st.type}:${typeof st.item === 'string' ? st.item : st.item?.id}`);
       setLibDragActive(true); // round49：补回 round47 丢失的调用——画布虚线放置提示恢复
@@ -1783,7 +1776,6 @@ const { onTouchStart, onTouchMove, onTouchEnd, dragReady } = useMobileCanvasGest
         ghostRef.current.style.left = `${t.clientX - 50}px`;
         ghostRef.current.style.top = `${t.clientY - 20}px`;
       }
-      dbg(`DRAG dy=${Math.round(t.clientY - st.startY)} st=${panelScrollTop()}`);
       return;
     }
     // pending：零拦截记账。任一轴累计 ≥LIB_SCROLL_COMMIT_PX → 判滚动意图，
@@ -1795,14 +1787,12 @@ const { onTouchStart, onTouchMove, onTouchEnd, dragReady } = useMobileCanvasGest
     if (dx >= LIB_SCROLL_COMMIT_PX || dy >= LIB_SCROLL_COMMIT_PX) {
       clearTimeout(libTimerRef.current);
       libDragRef.current = null;
-      dbg(`SCROLL dy=${Math.round(dy)} st=${panelScrollTop()}（永不拦截）`);
     }
   }, []);
 
   const handleLibTouchCancel = useCallback((e) => {
     // 浏览器接管手势（原生滚动/系统语义），JS 事件流到此终止——全量复位
     clearTimeout(libTimerRef.current);
-    dbg(`TCANCEL 浏览器接管 st=${panelScrollTop()}`);
     if (ghostRef.current) ghostRef.current.style.display = 'none';
     setLibArmedKey(null);
     setLibDragActive(false);
@@ -1813,7 +1803,6 @@ const { onTouchStart, onTouchMove, onTouchEnd, dragReady } = useMobileCanvasGest
     clearTimeout(libTimerRef.current);
     setLibArmedKey(null); // 无论放置/取消，抓起态视觉必须回落
     setLibDragActive(false);
-    dbg(`TE phase=${libDragRef.current?.phase} st=${panelScrollTop()}`);
     if (ghostRef.current) ghostRef.current.style.display = 'none';
     const st = libDragRef.current;
     libDragRef.current = null;
@@ -2020,17 +2009,6 @@ const { onTouchStart, onTouchMove, onTouchEnd, dragReady } = useMobileCanvasGest
       </div>
 
       {/* 拖拽幽灵预览（round27：弹出动画 + 光晕呼吸，明确"已激活"）——round47 改常驻+ref 直写 */}
-      {/* round43b：临时调试悬浮层（验收后移除）——实时显示触摸判定链路 */}
-      <div
-        ref={libDbgRef}
-        style={{
-          position: 'fixed', top: 4, left: 4, right: 4, zIndex: 9999,
-          background: 'rgba(0,0,0,0.82)', color: '#7CFC98',
-          fontFamily: 'monospace', fontSize: 12, padding: '5px 8px',
-          borderRadius: 6, pointerEvents: 'none', whiteSpace: 'nowrap',
-          overflow: 'hidden', textOverflow: 'ellipsis',
-        }}
-      />
       <div
         ref={ghostRef}
         style={{
