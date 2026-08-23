@@ -1080,6 +1080,29 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
     return () => { document.removeEventListener('pointerdown', closeOutside) }
   }, [open])
 
+  // fem-proj 母名颜色（2026-08-23 需求1）：投影窗的母 session 名由骨架直接渲染
+  // （非末段非 subagent 的段不经过任何插件槽位），官方样式是 .crumb 的三级灰
+  // （--dsw-alias-label-tertiary）；主会话名的黑来自 .crumbCurrent 的
+  // --dsw-alias-label-primary。用户要求两者一致——把 fem-proj 下第一段面包屑
+  // 覆盖成同一 token（自动跟随深浅主题）。插件侧安全注入点=按当前会话切换全局
+  // 样式文本：本组件在每个打开的会话头都挂载，sessionId 带 fem-proj- 前缀时
+  // 启用规则，切走/卸载即清空。零 DOM 结构改动（MutationObserver 路线弃用，
+  // 上次事故根源）。哈希类名取自 rc.2 构建产物 ui-conversation/lib/client.js
+  // （升级快照时需对照重放）。
+  useEffect(() => {
+    const STYLE_ID = 'dsh-femwa-proj-mother-name'
+    let style = document.getElementById(STYLE_ID) as HTMLStyleElement | null
+    if (style === null) {
+      style = document.createElement('style')
+      style.id = STYLE_ID
+      document.head.appendChild(style)
+    }
+    style.textContent = typeof sessionId === 'string' && sessionId.startsWith('fem-proj-')
+      ? '.c-Z2Na_crumbs .c-Z2Na_crumbSeg:first-child .c-Z2Na_crumb { color: var(--dsw-alias-label-primary); pointer-events: none; }'
+      : ''
+    return () => { style.textContent = '' }
+  }, [sessionId])
+
   const { chatActors, hidden } = useMemo(() => {
     const actors = new Set<string>()
     let hiddenCount = 0
