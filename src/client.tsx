@@ -66,7 +66,25 @@ type FemScriptViewProps = { sessionId: string } & ScriptViewInjected
  *  挂载时读取会话状态（剧本记录 + 断点）用于恢复画布与「继续」按钮。
  *  savedPath=剧本文件地址（导出/导入产生）：非空 → 会话已保存（提示消失、
  *  支持相对寻址）；空 → 未保存（显示小字提示、依赖只支持绝对地址）。 */
-export function FemEditorView({ sessionId, saveScript, stopScript, toggleSidebar }: FemScriptViewProps) {
+export function FemEditorView(props: FemScriptViewProps & {
+  /** 会话槽标准 share（运行时对 session-scoped 槽位必传）：proj 窗解析母会话用。 */
+  useSessions?: (sel: (s: { byId: Record<string, { parentId?: string } | undefined> }) => string | undefined) => string | undefined
+}) {
+  const { saveScript, stopScript, toggleSidebar } = props
+  // proj 窗入口（2026-08-23）：编辑器数据全部挂主会话——剧本记录/断点/运行态
+  // 都在主 sid 名下。母 id 从会话表 parentId 取（proj id 的角色键可含 - ，字符串
+  // 反解不可逆）；在主会话本体打开时原样使用自身 id。以下整个组件体继续用
+  // 变量名 sessionId，零内文改动。
+  const rawSessionId = props.sessionId
+  const motherId = props.useSessions?.((s) => {
+    const summary = s.byId[rawSessionId]
+    return typeof summary?.parentId === 'string' ? summary.parentId : undefined
+  })
+  const sessionId = typeof rawSessionId === 'string'
+    && rawSessionId.startsWith('fem-proj-')
+    && typeof motherId === 'string'
+    ? motherId
+    : rawSessionId
   const [state, setState] = useState<{
     hasScript: boolean
     script?: string
@@ -933,19 +951,19 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
     }
     return undefined
   })
-  // isFem = 当前就在 Fem 主会话本体（投影窗上为 false：编辑器标签等主会话专属 UI 不跟随）。
-  const isFem = mainSid !== undefined && mainSid === sessionId
 
-  // 非 Fem 会话：隐藏「Fem 编辑器」标签页。tab 列表 = conversation.view
-  // 的全部注册条目（无按会话过滤的钩子），纯插件方案在 header 挂载时
-  // DOM 隐藏该按钮；本组件随会话切换重挂载，Fem 会话恢复显示。
+  // 「Fem 编辑器」标签页显示范围（2026-08-23 扩展）：Fem 主会话 + proj 窗都
+  // 显示（proj 窗内编辑器数据经 useSessions 解析回主会话，见 FemEditorView）；
+  // 其余会话照旧 DOM 隐藏。tab 列表 = conversation.view 的全部注册条目（无按
+  // 会话过滤的钩子），纯插件方案在 header 挂载时 DOM 隐藏该按钮；本组件随
+  // 会话切换重挂载，fem 家族窗口恢复显示。
   useEffect(() => {
     const tab = [...document.querySelectorAll<HTMLElement>('[role="tab"]')]
       .find(el => el.textContent === 'Fem 编辑器')
     if (tab === undefined) return
-    tab.style.display = isFem ? '' : 'none'
+    tab.style.display = mainSid !== undefined ? '' : 'none'
     return () => { tab.style.display = '' }
-  }, [isFem])
+  }, [mainSid])
   // Script actors from the host (complete after a run) — the menu's source of
   // truth; chat-line actors below only backfill before the first run.
   const [scriptActors, setScriptActors] = useState<string[]>([])
