@@ -16,6 +16,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
+// Font Awesome Free solid 图标内联组件（currentColor 随文字色）：视角按钮与菜单用。
+import { FaEye, FaPodcast, FaRobot, FaUserSecret } from './fa-icons'
+// 官方下箭头（dsh 子代理计数下拉同款）：视角按钮右侧的展开指示。
+import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ConversationNodeDefinition } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -1164,16 +1168,18 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
           fontSize: '13px',
         }}>
           {[
-            { id: 'offstage', label: '🎬 戏外 · 主模型' },
-            { id: 'god', label: '👁 上帝视角' },
-            ...actors.map(actor => ({ id: actor, label: `🎭 ${actor}` })),
+            { id: 'offstage', label: '戏外 · 主模型', Icon: FaRobot },
+            { id: 'god', label: '上帝视角', Icon: FaPodcast },
+            ...actors.map(actor => ({ id: actor, label: actor, Icon: FaUserSecret })),
           ].map(item => (
             <button
               key={item.id}
               type="button"
               onClick={() => { pickView(item.id) }}
               style={{
-                display: 'block',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '7px',
                 width: '100%',
                 padding: '6px 10px',
                 border: 'none',
@@ -1185,7 +1191,8 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
                 whiteSpace: 'nowrap',
               }}
             >
-              {item.label}
+              <item.Icon size={14} />
+              <span>{item.label}</span>
             </button>
           ))}
         </div>
@@ -1203,19 +1210,21 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
           display: 'inline-flex',
           alignItems: 'center',
           gap: '4px',
-          padding: '2px 8px',
-          border: '1px solid var(--dsw-border, #ddd)',
-          borderRadius: '999px',
+          border: 'none',
           background: 'transparent',
-          color: activeViewId === 'god' ? 'var(--dsw-text-secondary, #666)' : 'var(--dsw-accent, #4a9eff)',
+          padding: 0,
+          color: 'var(--dsw-alias-label-primary, #222)',
           cursor: 'pointer',
           fontSize: '12px',
           whiteSpace: 'nowrap',
         }}
       >
-        <span aria-hidden>👁</span>
+        <FaEye size={12} />
         <span>{label}</span>
         {view !== 'god' && hidden > 0 && <span style={{ opacity: 0.75 }}>· 隐藏{hidden}</span>}
+        <span style={{ display: 'inline-flex', alignItems: 'center', transform: open ? 'rotate(180deg)' : undefined, transition: 'transform 150ms ease' }}>
+          <IconChevronDownOutline14 />
+        </span>
       </button>
       {menu}
     </div>
@@ -1241,6 +1250,7 @@ function FemSubagentCount({ useSession, useSessions, openChild, refresh, setCata
       rootSessionId={mainSid}
       variant="count"
       showRunning
+      hideWhenZero
       useSessions={useSessions}
       openChild={openChild}
       refresh={refresh}

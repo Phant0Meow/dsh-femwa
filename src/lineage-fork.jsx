@@ -249,7 +249,7 @@ function catalogMenuPosition(trigger) {
     };
 }
 /** One trigger-plus-tree dropdown over the catalog rooted at `rootSessionId`. */
-export function CatalogDropdown({ rootSessionId, currentSessionId, displayTitle, openTitle, variant, separator = false, showRunning = false, useSessions, openChild, refresh, setCatalogOpen, t, }) {
+export function CatalogDropdown({ rootSessionId, currentSessionId, displayTitle, openTitle, variant, separator = false, showRunning = false, hideWhenZero = false, useSessions, openChild, refresh, setCatalogOpen, t, }) {
     const ancestorSwitcher = variant === 'switcher' && openTitle !== undefined;
     const catalogs = useSessions(state => state.subagentsByParent);
     const summaries = useSessions(state => state.byId);
@@ -438,10 +438,15 @@ export function CatalogDropdown({ rootSessionId, currentSessionId, displayTitle,
     // or a failed load worth retrying). A bare loading catalog is not evidence:
     // selecting any session schedules a refresh whose loading snapshot would
     // otherwise flash the action in and out on childless sessions.
+    // hideWhenZero（dsh-femwa count 座位专用，2026-08-23）：官方 visible 看
+    // 过滤前的 catalog.entries.length——Fem 主会话的目录里躺着被 fork 剥掉的
+    // 投影窗/节点子代理条目，于是显示"0 个子代理"仍挂着。开启本开关后改看
+    // 过滤后的 descendantCount（= 屏显数字），0 则整个触发器（文字+箭头）隐藏，
+    // 与 dsh 真零子代理时的行为一致。默认关闭=官方路径逐字节不变。
     const visible = presentedCatalog !== undefined
         && (variant === 'switcher'
             || presentedCatalog.state === 'error'
-            || presentedCatalog.entries.length > 0
+            || (!hideWhenZero && presentedCatalog.entries.length > 0)
             || descendantCount > 0);
     useEffect(() => {
         if (visible)
