@@ -2444,7 +2444,7 @@ nodes={nodes}
                   const isCycleEdge = allCycleEdges.has(e.id);
                   const isParCycle = parCycleEdges.has(e.id);
                   const isParBroken = parBrokenEdges.has(e.id);
-                  const isForBroken = forBrokenEdges.has(e.id);
+                  const isForBroken = forBrokenEdges.has(e.id) && !isCycleEdge; // && !isCycleEdge 对齐桌面端双保险（forBrokenEdges 计算时已排除环边）
                   const isSel = sel?.type === 'edge' && sel.id === e.id;
                   if (e.src === e.tgt) {
                     const ss = getNodeSize(s);
@@ -2471,7 +2471,9 @@ nodes={nodes}
                   if (!geo) return null;
                   const { pathDs, labelPos, srcDir, tgtDir } = geo;
                   const stroke = isSel ? 'var(--fem-edge-sel)' : isParBroken || isForBroken ? 'var(--fem-danger)' : isCycleEdge || isParCycle ? 'var(--fem-edge)' : 'var(--fem-edge-flow)';
-                  const dashed = isParBroken || isForBroken ? '5,3' : isCycleEdge ? '7,3' : null;
+                  // 虚线规则对齐桌面端（仅断裂边虚线）：环边实线——旧版 isCycleEdge?'7,3'
+                  // 是手机端独有样式，把 FOR 循环回边错误画成虚线（2026-08-24 猫猫报告）
+                  const dashed = isParBroken || isForBroken ? '5,3' : null;
                   const markerId = isSel ? 'as' : isParBroken || isForBroken ? 'al' : isCycleEdge || isParCycle ? 'a_for' : 'a';
                   return (
                     <g key={e.id}>
