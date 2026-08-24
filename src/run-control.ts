@@ -277,7 +277,14 @@ export async function handleRunOnSession(
     return
   }
   if (runState.running) {
-    writeJson(res, 409, { ok: false, error: '已有剧本在运行中，请先停止' })
+    // 引擎一次只能演一场：409 带上归属会话，前端/模型能分清是谁家在跑。
+    const owner = String(runState.sessionId ?? '?')
+    writeJson(res, 409, {
+      ok: false,
+      error: owner === sessionId
+        ? '本会话已有剧本在运行中，请先停止'
+        : `另一会话（${owner}）的剧本正在运行（引擎同时只能演一场），请先停止`,
+    })
     return
   }
   const fems = typeof body.fems === 'string' && body.fems.trim().length > 0 ? body.fems : undefined

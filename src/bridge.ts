@@ -22,6 +22,11 @@ export class FemwaBridge {
   private nextId = 1
   private lineBuf = ''
 
+  /** 进程退出回调（index.ts 接线）：引擎半路死亡时不会有任何终止事件
+   * （flow_done/flow_stopped），宿主 runState.running 会卡 true——在这里
+   * 让总装层清理孤儿运行态（2026-08-24）。 */
+  onExited?: (outcome: unknown) => void
+
   get alive(): boolean {
     return this.handle !== undefined
   }
@@ -79,6 +84,9 @@ export class FemwaBridge {
         }
         this.pending.clear()
         this.handle = undefined
+        try { this.onExited?.(outcome) } catch (error: unknown) {
+          console.log(`[dsh-femwa] onExited callback failed: ${String(error)}`)
+        }
       }, (error: unknown) => {
         console.log(`[dsh-femwa] bridge spawn failed: ${String(error)}`)
         this.handle = undefined

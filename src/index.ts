@@ -162,6 +162,16 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
 
   const sessionsStore = ctx.get('sessions') as { get(id: SessionId): Session | undefined } | undefined
 
+  // 引擎进程半路死亡时不会有任何终止事件，runState 会卡成孤儿 running=true
+  // ——此后所有会话的 femwa-run 都被「已有剧本在运行中」拒绝。这里清账。
+  bridge.onExited = (): void => {
+    if (runState.running || runState.humanWait !== undefined) {
+      console.log('[dsh-femwa] bridge exited mid-run; clearing stale running state')
+    }
+    runState.running = false
+    runState.humanWait = undefined
+  }
+
   /** 投影窗注册表：sid → { god, actors }（角色/上帝视角的子代理窗）。 */
   const projections = createProjectionRegistry(ctx)
 
@@ -217,7 +227,12 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
       throw new Error('当前会话不是 Fem 剧本模式')
     }
     if (runState.running) {
-      throw new Error('已有剧本在运行中，请先停止')
+      // 引擎一次只能演一场：跨会话拒绝时必须说清归属，否则新会话的主模型
+      // 会误判成「本会话已有剧本在跑」（2026-08-24 用户实测踩坑）。
+      const owner = String(runState.sessionId ?? '?')
+      throw new Error(owner === sessionId
+        ? '本会话已有剧本在运行中，请先停止'
+        : `另一会话（${owner}）的剧本正在运行（引擎同时只能演一场）：可先 femwa-run stop 停掉它再重试`)
     }
     const scriptText = await readSessionScriptText(resolved.femwaRoot, sessionId)
     if (scriptText === undefined) {

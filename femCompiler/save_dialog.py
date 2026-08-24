@@ -188,7 +188,12 @@ class SaveQueue:
                 item = self._queue.get(timeout=0.1)
 
                 if item is None:
-
+                    # 毒丸修复（2026-08-24）：哨兵必须 task_done 归账。否则
+                    # Queue 的 unfinished 计数永远 ≥1，同进程第二轮 run 的
+                    # wait_empty 卡死在 queue.join() → flow_done 永不发出
+                    # → 宿主 running 永远 true（「时灵时不灵」+ 新会话被
+                    # 「已有剧本在运行中」拒绝的共同根因）。
+                    self._queue.task_done()
                     break
                 if len(item) == 2:
                     typ, kwargs = item

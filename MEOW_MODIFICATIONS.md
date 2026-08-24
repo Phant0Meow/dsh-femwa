@@ -1511,3 +1511,22 @@ pre-armed 分支依旧不 preventDefault（滚动不受影响）；仅 armed 分
 旧 femwa:notify section 把通知静默注入 system prompt，实测两次运行主模型均漏读（靠逐帧解压 session.jsonl.zstd 的 request/header 快照才实锤通知其实送达过）。
 ### 生效条件
 node build.mjs 已重建；重启 3081 后生效。
+
+## 2026-08-24 跑完通知时灵时不灵 + 新会话被「已有剧本在运行中」误拒：SaveQueue 哨兵毒丸根因修复
+### 根因（日志+复现双实锤）
+femCompiler/save_dialog.py wait_empty() 塞 None 哨兵后，_worker_loop 消费它时直接 break、不调 task_done() → Queue unfinished 计数从第一次 wait_empty 结束起永远 ≥1 → 同引擎进程第二轮 run 的 wait_empty 卡死在 queue.join() → flow_done 永不发出 → runState.running 卡 true。表现=①同进程第一场戏通知必达、之后每场全部静默（flow_error/stop 路径不走 wait_empty 不受影响，故「时灵时不灵」）；②running 全局单例卡死后任何新会话 femwa-run 被 resolveMounted 守卫拒绝，主模型对用户说「目前已有剧本在跑」（meow-3081-console.log L255-265 现行实录）。
+### 修改明细
+1. femCompiler/save_dialog.py：哨兵分支补 self._queue.task_done()（一行根因修复）
+2. src/bridge.ts：新增 onExited 回调，进程退出时触发
+3. src/index.ts：bridge.onExited 接线清孤儿 running/humanWait；resolveMounted 守卫文案带归属会话 id（本会话 vs 另一会话区分）
+4. src/run-control.ts：handleRunOnSession 409 同样带归属会话
+5. tests/repro_wait_empty_poison.py：复现脚本（monkeypatch 写入零 DB 触碰；修复前 ROUND 2 必挂 queue.join()，修复后两轮全过）
+### 验证
+- 复现脚本：stash 对照旧代码 ROUND 2 挂死/新代码 PASS
+- pytest 全量 80/80 通过
+- node build.mjs + tsc -p tsconfig.host.json 零错误；重启 3081
+- 端到端：同一会话连跑 notify-theater 两场，两场均 flow_done+sys 广播+steered main agent（修复前第二场必卡死且后续全 409）
+### 已知遗留（待议不动）
+- shutdown 命令在 run 线程未清完 state[runner] 时会再调一次 runner.stop() → 双 flow_stopped（test_stop_cancels_fork_branch 偶发 flaky，12 次采样出现 1 次；与本修复无关的既有竞态）
+- handleCreateSession 带 fems 时绕过 running 守卫直接覆盖 runState（跨会话事件串窗风险）
+- 首跑竞态：broadcast dropped (no projection window) 仍在（todo 0mt6kvlfh）
