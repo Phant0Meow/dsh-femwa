@@ -432,6 +432,17 @@ const [userApiModel, setUserApiModel] = useState(() => {
     return [...normal, ...forOutEdges];
   }, [edges, nodes]);
 
+  // [femwa-diag] 渲染期端点缺失计数：>0 = 有边因 nm 查不到节点被静默 return null
+  const diagMissingEdgeCount = useMemo(
+    () => sortedEdges.reduce((acc, e) => (nm.get(e.src) && nm.get(e.tgt) ? acc : acc + 1), 0),
+    [sortedEdges, nm]
+  );
+  useEffect(() => {
+    if (diagMissingEdgeCount > 0) {
+      console.log('[femwa-diag] RENDER-DROP edges-with-missing-endpoints=' + diagMissingEdgeCount + ' / total=' + sortedEdges.length + ' nodes=' + nodes.length);
+    }
+  }, [diagMissingEdgeCount, sortedEdges.length, nodes.length]);
+
 
   // 按 FOR 节点分组的环边映射
   const cycleEdgesMap = useMemo(() => findAllCycleEdges(nodes, edges), [nodes, edges]);
@@ -777,6 +788,8 @@ const parOutNodeMap = useMemo(() => {
   // 依赖 props（session-state 异步返回后才会触发），且 props 稳定后只执行一次。
   useEffect(() => {
     if (!plugin) return;
+    // [femwa-diag] 恢复触发器：undefined=会话无剧本记录；空串=记录异常
+    try { console.log('[femwa-diag] restore-effect script=' + (initialScript === undefined ? 'undefined' : String(initialScript.length)) + 'ch running=' + String(initialRunning) + ' ckpt=' + String(initialCheckpoint ?? 'none')); } catch {}
     if (initialScript && initialScript.trim().length > 0) {
       try {
         applyFEMText(initialScript);
@@ -920,6 +933,9 @@ const parOutNodeMap = useMemo(() => {
         f.path?.every((s, i) => s === locationPath[i])
     );
     if (flow) {
+      // [femwa-diag] 路径切换加载 flowStore：若此处 edges=0 而 applyFEMText 曾给出 >0，
+      // 即「恢复后被空/陈旧 flowStore 条目覆盖」的直接证据（连接线丢失调查）。
+      try { console.log('[femwa-diag] locpath-load path=' + locationPath.join('/') + ' nodes=' + (flow.nodes || []).length + ' edges=' + (flow.edges || []).length); } catch {}
       setNodes(flow.nodes || []);
       setEdges(flow.edges || []);
     } else {
@@ -1383,6 +1399,8 @@ const handleWorkflowEvent = useCallback((evt) => {
     switch (type) {
       case 'module_enter': {
         const enterName = data.module_name;
+        // [femwa-diag] SSE 导航事件会切换画布路径——跨会话串扰时这里是第一现场
+        try { console.log('[femwa-diag] evt module_enter module=' + enterName + ' dataSid=' + (data?.sessionId ?? 'none')); } catch {}
         console.log('[module_enter] module_name:', enterName, 'moduleStack:', [...moduleStackRef.current]);
         moduleStackRef.current.push(enterName);
         const targetModule = moduleStoreRef.current.find(m => m.name === enterName);
@@ -2138,6 +2156,8 @@ if (draggedNode.type === 'for_out' && n.id === draggedNode.forNodeId) {
     setFlowStore(newFlowStore);
     setNodes(newNodes);
     setEdges(newEdges);
+    // [femwa-diag] 恢复链路取证：文本生图落画布时的规模快照（连接线丢失调查）
+    try { console.log('[femwa-diag] applyFEMText path=' + targetPath.join('/') + ' nodes=' + newNodes.length + ' edges=' + newEdges.length); } catch {}
     console.log('6. setState 完成');
     setFemDirty(false);
     setGraphDirty(false);

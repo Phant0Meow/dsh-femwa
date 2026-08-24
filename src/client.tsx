@@ -134,6 +134,8 @@ export function FemEditorView(props: FemScriptViewProps & {
   const loadSessionState = useCallback(async (): Promise<void> => {
     const response = await fetch(`/dsh-femwa/session-state?sessionId=${encodeURIComponent(sessionId)}`)
     const data = await response.json() as { ok?: boolean; script?: string; scriptPath?: string; rev?: number; checkpoint?: Record<string, string>; running?: boolean }
+    // [femwa-diag] 记录形态取证：script 长度 / 地址 / running（连接线丢失调查）
+    console.log(`[femwa-diag] session-state sid=${sessionId} ok=${String(data.ok)} script=${data.script === undefined ? 'undefined' : String(data.script.length) + 'ch'} path=${data.scriptPath ?? 'none'} rev=${String(data.rev)} running=${String(data.running)}`)
     if (data.ok === true) {
       setState({
         hasScript: data.script !== undefined,
