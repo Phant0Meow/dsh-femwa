@@ -1553,3 +1553,14 @@ FEMEditor 手机端插件模式 mobileFs useState(true) 每次挂载默认全屏
 2. src/client.tsx FemEditorView：首帧 useRef 快照 pendingTabTransfer（渲染期先于消费 effect，标记完整），视角跳转落编辑器时传 initialMobileFs=false
 ### 影响面
 手动点编辑器 tab/侧边栏/独立模式全部照旧默认全屏；仅「经视角菜单跳转且落在编辑器 tab」的手机端挂载改为常规态起步。桌面端不读 mobileFs 不受影响。
+
+## 2026-08-24 手机端 femGen 默认态改版：无条件「header 在上」起步（推翻沉浸优先）
+### 需求（用户真机反馈后原话）
+「切换过去之后……到底是全屏显示，还是在Header下面显示，取决于这个视角之前是怎么设置的。我希望的是，切过来的时候一定是在Header下面显示。默认在Header下面显示，除非用户手动点全屏。」
+### 上一版（7b90594 initialMobileFs 豁免）为何失效
+会话切换经 SessionProvider key={sessionId} 整体重挂载（ui-renderer session-provider.tsx 实证），但目标窗上次停在对话 tab 时编辑器要等 tab 对齐点击后才挂载——豁免标记已在点击瞬间被清掉，晚到的挂载读不到 → 回落默认全屏；停在编辑器则首帧读到 → 非全屏。故表现为「看之前怎么设置」。
+### 新方案（用户规则升级：默认=header 在下，与跳转无关）
+1. femGen/src/FemWorAuto.jsx：mobileFs 初始值 useState(true→false)；删除未发布的 initialMobileFs prop（签名还原）
+2. src/client.tsx：删除 arrivedViaViewJumpRef 快照与 initialMobileFs 传参（7b90594 管道整体撤除）；pendingTabTransfer 标签页跟手保留
+### 行为
+任何挂载（视角跳转/手动开窗/切 tab 重挂载）一律 header 在上；全屏键进沉浸、返回键退出；独立模式与桌面端不读 mobileFs 零影响。

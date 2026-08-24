@@ -107,11 +107,6 @@ export function FemEditorView(props: FemScriptViewProps & {
     && typeof motherId === 'string'
     ? motherId
     : rawSessionId
-  // 视角跳转落编辑器（2026-08-24）：首帧快照一次性标记——本组件因视角跳转
-  // 挂载时，手机端 femGen 以「header 在上」的常规态起步（不进全屏沉浸）。
-  // 渲染期先于任何消费 effect 执行，标记必然完整；useRef 只留首帧值，后续
-  // 标记被清掉也不影响本次挂载。
-  const arrivedViaViewJumpRef = useRef(pendingTabTransfer !== null && pendingTabTransfer.kind === 'editor')
   const [state, setState] = useState<{
     hasScript: boolean
     script?: string
@@ -354,7 +349,6 @@ export function FemEditorView(props: FemScriptViewProps & {
         initialScript={state?.script}
         initialCheckpoint={checkpointNode}
         initialRunning={state?.running === true}
-        initialMobileFs={!arrivedViaViewJumpRef.current}
         onRestoreError={onRestoreError}
       />
       {conflict !== null && createPortal(
