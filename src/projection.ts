@@ -276,13 +276,17 @@ export function projectionAppend(
   targetActors?: string[],
 ): void {
   const targets = targetActors !== undefined && targetActors.length === 0 ? undefined : targetActors
-  // 源级幂等（2026-08-23）：子代理镜像事件带 _srcSeq（子代理会话事件 seq），
-  // 落窗前对账——同一子代理事件绝不写进同一窗第二遍（重复 block-start/end
-  // 会让渲染层卡死，见小猫咪窗 2026-08-23）。chat 行无 _srcSeq 不受影响。
-  // 结构事件（turn/step 骨架）不带 _srcSeq（dsh 迁移器对 turn/end 强制两键，
-  // 见 mirrorMainEventToGod 同款注释），幂等改由结构等价键兜底：同
-  // type+turn(:step) 已存在即跳过。真实源 start 与合成 start 的竞态也靠它拦。
-  const srcSeq = (data as { _srcSeq?: number })._srcSeq
+  // 源级幂等（2026-08-23）：子代理镜像事件带 _srcSeq（「子会话id#seq」复合键，
+  // 2026-08-24 起命名空间隔离；主会话镜像仍为裸数字 seq）——同一源事件绝不写
+  // 进同一窗第二遍（重复 block-start/end 会让渲染层卡死，见小猫咪窗 2026-08-23）。
+  // 此前裸 seq 跨源共用一个判重空间：one-shot 子会话的本地 seq 高度重叠，兄弟
+  // 子代理互相误杀尾部事件（2026-08-24 故事接龙第5棒 block-end/message 被第2棒
+  // 同号占用→悬空 block-start=「有名字没内容」），复合键后各源互不干扰。
+  // chat 行无 _srcSeq 不受影响。结构事件（turn/step 骨架）不带 _srcSeq（dsh
+  // 迁移器对 turn/end 强制两键，见 mirrorMainEventToGod 同款注释），幂等改由
+  // 结构等价键兜底：同 type+turn(:step) 已存在即跳过。真实源 start 与合成
+  // start 的竞态也靠它拦。
+  const srcSeq = (data as { _srcSeq?: number | string })._srcSeq
   const structKey = (eventType: string, d: Record<string, unknown>): string | undefined => {
     if (typeof d.turn !== 'number') return undefined
     if (eventType === 'turn/start' || eventType === 'turn/end') return `${eventType}:${d.turn}`
@@ -295,7 +299,7 @@ export function projectionAppend(
   const appendTo = (win: Session | undefined): void => {
     if (win === undefined) return
     if (srcSeq !== undefined) {
-      const dup = win.events.some(e => (e.data as { _srcSeq?: number } | undefined)?._srcSeq === srcSeq)
+      const dup = win.events.some(e => (e.data as { _srcSeq?: number | string } | undefined)?._srcSeq === srcSeq)
       if (dup) return
     }
     if (skey !== undefined && win.events.some(e => structKey(e.type, (e.data ?? {}) as Record<string, unknown>) === skey)) return
@@ -449,7 +453,9 @@ export function createGodMirror(deps: {
     const windows = projections.get(sid)
     if (windows?.god === undefined) return
     const srcSeq = Number(event.seq)
-    const dupBySrc = windows.god.events.some(e => (e.data as { _srcSeq?: number } | undefined)?._srcSeq === srcSeq)
+    // 窗内可能存有子代理镜像的「id#seq」字符串复合键（2026-08-24 命名空间隔离），
+    // 与本处裸数字键永不相等，天然互不干扰；类型随之放宽为 number | string。
+    const dupBySrc = windows.god.events.some(e => (e.data as { _srcSeq?: number | string } | undefined)?._srcSeq === srcSeq)
     if (dupBySrc) return
     const mTurn = (event.data as { turn?: number }).turn
     const mStep = (event.data as { step?: number }).step

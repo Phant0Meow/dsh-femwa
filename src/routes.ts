@@ -19,7 +19,8 @@ import {
   readSessionScriptText, readCheckpoint, writeCheckpoint, clearCheckpoint,
 } from './state-files'
 import { handleCreateSession, handleRunOnSession, handleSaveScript, handleReadScript, collectLlmModels } from './run-control'
-import { appendEvent, type GodMirror, type ProjectionRegistry } from './projection'
+import { appendEvent, appendChatProjected, type GodMirror, type ProjectionRegistry } from './projection'
+import { randomUUID } from 'node:crypto'
 
 export interface RoutesDeps {
   resolved: ResolvedConfig
@@ -510,8 +511,11 @@ export function registerRoutes(ctx: Context, deps: RoutesDeps): void {
       path: '/dsh-femwa/projection-input',
       handler: (req: IncomingMessage, res: ServerResponse): void => {
         void (async () => {
-          // 投影窗输入（本次：消息 append 到投影窗表面显示，不路由）。
-          // 后续 todo 接入真实路由（发给谁/打断）。
+          // 投影窗输入路由（2026-08-24 用户定稿语义）：
+          // ①剧本未跑/暂停/已停止 → 走主窗口前门 session.prompt（queue），消息以
+          //   真实用户身份进入主会话对话流；上帝窗镜像自然映射，本窗不留痕；
+          // ②跑本中且人类节点等待 → bridge human_input 喂引擎（wait_key），并广播 role 行进各投影窗；
+          // ③跑本中其他时候 → 人类插话（编译器规划中的打断语义，暂不实现）：仅本窗留痕。
           const raw = await readBody(req) as Record<string, unknown>
           const sessionId = typeof raw.sessionId === 'string' && raw.sessionId.trim().length > 0 ? raw.sessionId : ''
           const text = typeof raw.text === 'string' && raw.text.trim().length > 0 ? raw.text.trim() : ''
@@ -525,14 +529,77 @@ export function registerRoutes(ctx: Context, deps: RoutesDeps): void {
             writeJson(res, 404, { ok: false, error: `session ${sessionId} not found` })
             return
           }
-          // 打开当前 turn（无则新开），append user 消息（surface）。
-          const lastTurn = [...win.events].reverse().find(e => e.type === 'turn/start')
-          const turn = lastTurn === undefined ? 1 : (lastTurn.data as { turn?: number }).turn ?? 1
+          // 主会话 id：优先 parentSession 头；兜底从 fem-proj-<sid>-<actorKey> 尾段剥离
+          //（actorKey 只含 [A-Za-z0-9_]，不含 '-'，故最后一个 '-' 右侧必是 actorKey）。
+          const parentHeader = (win.header as { parentSession?: string } | undefined)?.parentSession
+          const mainSid = typeof parentHeader === 'string' && parentHeader.length > 0
+            ? parentHeader
+            : (sessionId.startsWith('fem-proj-')
+              ? sessionId.slice('fem-proj-'.length).replace(/-[^-]*$/, '')
+              : '')
+          const waiting = runState.running === true && runState.pausedByUser !== true
+            && runState.humanWait !== undefined
+          const idle = runState.running !== true || runState.pausedByUser === true
+          if (idle) {
+            // ①直达主模型（2026-08-24 用户定稿，反转 steer 注入方案）：走主窗口
+            // 同一条前门 session.prompt（queue 模式）——消息以真实用户身份进入主
+            // 会话对话流并触发回合；上帝窗镜像本就映射主会话全部对话，双方发言
+            // 自然出现在投影窗，本地不再重复留痕。空闲=立即开新回合；忙碌=进队
+            // 列下一步边界消费——与主窗口打字行为完全一致。
+            const base = (process.env.DSH_WEB_URL ?? 'http://127.0.0.1:3081').replace(/\/+$/, '')
+            const promptRes = await fetch(`${base}/api/session.prompt`, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({
+                type: 'client-request',
+                rpcId: randomUUID(),
+                method: 'session.prompt',
+                payload: {
+                  sessionId: mainSid,
+                  mode: 'queue',
+                  content: [{ type: 'text', text }],
+                },
+              }),
+            })
+            const promptBody = await promptRes.json().catch(() => undefined) as
+              | { result?: { value?: { accepted?: boolean } }; error?: { code?: string; message?: string } }
+              | undefined
+            if (!promptRes.ok || promptBody?.error !== undefined) {
+              // 失败必须可见：落日志 + 回传前端（composer 保留草稿）
+              console.log(`[dsh-femwa] projection-input -> session.prompt failed: http=${promptRes.status}`
+                + ` error=${JSON.stringify(promptBody?.error ?? null)}`)
+              writeJson(res, 200, {
+                ok: false,
+                routed: 'main',
+                error: promptBody?.error?.message ?? `session.prompt http ${promptRes.status}`,
+              })
+              return
+            }
+            console.log(`[dsh-femwa] projection input -> main session.prompt accepted: sid=${mainSid} len=${text.length}`)
+            writeJson(res, 200, { ok: true, routed: 'main' })
+            return
+          }
+          // ②③跑本中：投影窗本地留痕（用户自己说的话要看得见；①不需要——镜像已覆盖）
           appendEvent(win, 'user/message', {
             content: [{ type: 'text', text }],
             source: { kind: 'user' },
           }, { surfaceOp: 'append' })
-          writeJson(res, 200, { ok: true })
+          if (waiting) {
+            // ②人类节点发言：按剧本喂给引擎 + 广播 role 行（全窗可见）
+            await bridge.send('human_input', {
+              wait_key: String(runState.humanWait?.waitKey ?? ''),
+              body: { chat_text: text, variables: {} },
+            })
+            const main = sessionsStore?.get(SessionId(mainSid))
+            if (main !== undefined) {
+              appendChatProjected(ctx, main, projections, text, 'role', '人类')
+            }
+            writeJson(res, 200, { ok: true, routed: 'human-node' })
+            return
+          }
+          // ③人类插话（打断语义待编译器实现）：已本窗留痕，暂不路由
+          console.log(`[dsh-femwa] projection input kept local (interjection not implemented): len=${text.length}`)
+          writeJson(res, 200, { ok: true, routed: 'interjection-todo' })
         })().catch((error: unknown) => {
           writeJson(res, 500, { ok: false, error: String(error) })
         })

@@ -1630,8 +1630,9 @@ export function apply(ctx: any): void {
 
 // ── 投影窗 composer（角色/上帝视角的可输入输入框）────────────────────────
 // dsh 对 origin=subagent 会话默认挂 SubagentReadOnlyComposer（只读）；
-// 投影窗（fem-proj-*）需要可输入。本次：输入 → POST /dsh-femwa/projection-input
-// （消息 append 到投影窗表面显示）；真实路由（发给谁/打断）留后续 todo。
+// 投影窗（fem-proj-*）需要可输入。输入 → POST /dsh-femwa/projection-input，
+// 由 host 按运行状态路由（2026-08-24 定稿）：剧本未跑→steer 直达主模型；
+// 人类节点等待→喂引擎 wait_key；跑本中其他时候→本窗留痕（插话待实现）。
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function ProjectionComposer({ useSession }: any) {
   const sessionId = useSession((s: { sessionId?: string }) => s.sessionId) as string | undefined

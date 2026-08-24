@@ -417,7 +417,15 @@ export async function runAiSubagent(
     // projectionAppend 的结构等价查重兜底。
     const structural = watchedEvent.type === 'turn/start' || watchedEvent.type === 'turn/end'
       || watchedEvent.type === 'step/start' || watchedEvent.type === 'step/end'
-    const data = structural ? { ...raw } : { ...raw, _srcSeq: Number(watchedEvent.seq) }
+    // _srcSeq 用「子会话id#seq」复合键（2026-08-24 故事接龙 bug）：one-shot 子
+    // 会话的本地 seq 都从相近小值起步，兄弟子代理之间必然撞号——projectionAppend
+    // 按 _srcSeq 全局判重会把后到者的尾部事件静默误杀（第5棒的 block-end 263/264
+    // 与 message 267 被第2棒同号占用→悬空 block-start 渲染不出内容=「有名字没
+    // 内容」）。加子会话 id 前缀做命名空间隔离；主会话镜像保持裸数字键（单一
+    // 来源无撞号），且数字 !== 字符串，新旧键天然互不干扰。
+    const data = structural
+      ? { ...raw }
+      : { ...raw, _srcSeq: `${String(run.id)}#${Number(watchedEvent.seq)}` }
     if ('turn' in data) data.turn = mappedTurn
     if ('step' in data && typeof data.step === 'number') data.step = data.step
     // surface-eligible 事件（assistant/message、tool/result）要求 surfaceOp。

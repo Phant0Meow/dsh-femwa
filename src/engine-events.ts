@@ -27,8 +27,9 @@ import { writeCheckpoint, clearCheckpoint } from './state-files'
 /** 运行结局直达主模型对话流：以 plugin 来源构造 user 消息并 agent.steer()。
  * dsh 官方语义（dsh-agent）：空闲的主模型立即开新回合收到通知；忙碌时在
  * 下一 step 边界消费——必达、不打断当前回合。取代旧 femwa:notify
- * systemPrompt section（布告栏式注入易被模型漏读，2026-08-23 废弃）。 */
-function steerMainAgent(ctx: Context, sessionId: string | SessionId, text: string): void {
+ * systemPrompt section（布告栏式注入易被模型漏读，2026-08-23 废弃）。
+ * 2026-08-24 起导出共用：投影窗输入框「剧本未跑→直达主模型」路由同款通道。 */
+export function steerMainAgent(ctx: Context, sessionId: string | SessionId, text: string): void {
   try {
     const sid = String(sessionId)
     const bag = ctx as unknown as {
