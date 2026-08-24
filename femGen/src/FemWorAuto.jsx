@@ -2563,6 +2563,7 @@ nodes={nodes}
           bubbleOverlay={bubbleOverlay}
           onBubbleClose={handleBubbleClose}
           submitHumanInput={submitHumanInput}
+          onBubbleClick={handleBubbleClick}
           femText={femText}
           onFemChange={(v) => { setFemText(v); setFemDirty(true); }}
           femError={femError}

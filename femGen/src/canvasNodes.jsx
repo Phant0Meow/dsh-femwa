@@ -142,9 +142,10 @@ function ActionNodeView({
 
 
 
-      {/* 小气泡 - 有状态时自动显示，运行完不消失 */}
+      {/* 小气泡 - 有状态时自动显示，运行完不消失（data-bubble-node：手机端触摸仲裁识别用） */}
       {hasState && node.type === 'action' && (
         <div
+          data-bubble-node={node.id}
           onClick={(e) => {
             e.stopPropagation();
             onBubbleClick && onBubbleClick(node.id);

@@ -1349,6 +1349,7 @@ function useMobileCanvasGesture({
   cvRef, pan, setPan, scale, setScale,
   handlePortDown, handlePortUp, setConn,
   nodes, setNodes, setDrag, setSel,
+  onBubbleClick,
 }) {
   const stateRef  = useRef({ phase: 'idle' });
   const pinchRef  = useRef({ dist: 0, x: 0, y: 0 });
@@ -1368,7 +1369,7 @@ function useMobileCanvasGesture({
   const mid2  = (a, b) => ({ x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 });
   const clearTimer = () => { clearTimeout(timerRef.current); timerRef.current = null; };
 
-  // DOM hit-test：找节点体、端口或连线热区
+  // DOM hit-test：找节点体、端口、连线热区或运行时小气泡
   const hitTest = (cx, cy) => {
     const el = document.elementFromPoint(cx, cy);
     if (el) {
@@ -1380,6 +1381,9 @@ function useMobileCanvasGesture({
         portX: portEl.dataset.portX ? parseFloat(portEl.dataset.portX) : undefined,
         portY: portEl.dataset.portY ? parseFloat(portEl.dataset.portY) : undefined,
       };
+      // 运行时小气泡（节点上方）——须在 node 之前判（气泡是节点的 DOM 后代，closest 都会命中 node-id）
+      const bubbleEl = el.closest('[data-bubble-node]');
+      if (bubbleEl) return { type: 'bubble', nodeId: bubbleEl.dataset.bubbleNode };
       const nodeEl = el.closest('[data-node-id]');
       if (nodeEl) return { type: 'node', nodeId: nodeEl.dataset.nodeId };
       // round26：连线热区路径带 data-edge-id，手机端点边不再依赖合成 click
@@ -1434,7 +1438,8 @@ function useMobileCanvasGesture({
         navigator.vibrate?.(12);
         handlePortDown(fakeEv(cx, cy), hit.nodeId, hit.portDir, hit.portX, hit.portY);
 
-      } else if (hit?.type === 'node') {
+      // 长按在节点体或其小气泡上 = 拖动该节点（气泡视觉上属于节点，桌面端按住气泡同样触发节点拖拽）
+      } else if (hit?.type === 'node' || hit?.type === 'bubble') {
         const node = nodesRef.current.find(n => n.id === hit.nodeId);
         if (!node) return;
         navigator.vibrate?.(18);
@@ -1552,11 +1557,14 @@ function useMobileCanvasGesture({
       setDrag(null);
     }
 
-    // pending 抬手 = 短按（点击）：选中节点/连线或取消选中
+    // pending 抬手 = 短按（点击）：开气泡 / 选中节点/连线 / 取消选中
     if (phase === 'pending' && t) {
       clearTimer();
       const hit = hitTest(t.clientX, t.clientY);
-      if (hit?.type === 'node') {
+      if (hit?.type === 'bubble') {
+        // 轻点运行时小气泡 = 打开气泡弹层（对齐桌面端 onClick→onBubbleClick；不改 sel，与桌面一致）
+        onBubbleClick?.(hit.nodeId);
+      } else if (hit?.type === 'node') {
         setSel({ type: 'node', id: hit.nodeId });
       } else if (hit?.type === 'edge') {
         setSel({ type: 'edge', id: hit.id });
@@ -1568,7 +1576,7 @@ function useMobileCanvasGesture({
     stateRef.current = remaining.length === 0
       ? { phase: 'idle' }
       : { phase: 'canvasPan', cx: remaining[0].clientX, cy: remaining[0].clientY };
-  }, [handlePortUp, setConn, setDrag, setSel]);
+  }, [handlePortUp, setConn, setDrag, setSel, onBubbleClick]);
 
   return { onTouchStart, onTouchMove, onTouchEnd, dragReady };
 }
@@ -1656,6 +1664,7 @@ drag, setDrag, conn, setConn, isPanning, setNodes,
   nodeStates, actionStore, activeNodeIds, errorNodeIds,
   // Bubble
   bubbleOverlay, onBubbleClose, submitHumanInput,
+  onBubbleClick,
   // FEM
   femText, onFemChange, femError, femDirty,
   onApplyFem, onRestoreFem, onGraphToFem,
@@ -1680,6 +1689,7 @@ const { onTouchStart, onTouchMove, onTouchEnd, dragReady } = useMobileCanvasGest
     cvRef, pan, setPan, scale, setScale,
     handlePortDown, handlePortUp, setConn,
     nodes, setNodes, setDrag, setSel,
+    onBubbleClick,
   });
   // ── 从仓库触摸拖拽放置节点（round49 仲裁 v2：落点不参与裁决） ──
   // 手势状态机：pending →（任一轴累计 ≥8px）scroll：彻底放手给原生 pan-y，绝不再拦截
