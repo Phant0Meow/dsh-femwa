@@ -444,7 +444,8 @@ export const THEME_CSS = `
 
 /* ══ 流光推进（round36 补挂）：六层 dash 光带的 dashoffset 动画 ══
    288→0 递减 = 沿路径正向（箭头方向）前进；各层 cycle 均 288，
-   层间 animationDelay（inline）做中心对齐相位。 */
+   层间 animationDelay（inline）做彗星相位对齐——v9 起长层滞后、前端对齐：
+   强光在前如彗头、尾巴向后渐淡（详见 FemWorAuto.jsx SHIMMER_LAYERS 注释）。 */
 .fem-edge-comet-layer { animation: femEdgeSweep 3.2s linear infinite; }
 @keyframes femEdgeSweep {
   from { stroke-dashoffset: 288; }

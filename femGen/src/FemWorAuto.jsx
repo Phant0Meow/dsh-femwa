@@ -25,20 +25,21 @@ import { FemPreview } from './femPreview';
 import { MobileLayout, useMobile } from './mobileView';
 import { FEM_THEMES } from './themes';
 
-// ═══ 金线流光 v8（round35：多层 dash 光带回撤定稿）═══
-// 蒙版/光珠方案在"带 transform 的元素"上被探针实证不可靠（E/F 格 0 白像素），
-// 回撤到唯一构造性保证"随弯+零溢出"的形态：**流光就是同一条路径的描边**——
-// 六层长度递增(16→76px)、透明度递减(1→0.04)的同路径 dash 短划，中心对齐
-// （负 animation-delay 后移 (len-16)/2 ÷90s），层叠+圆帽把台阶抹成连续渐变。
-// cycle 均 288；主题门控=.fem-edge-comet-layer CSS（默认 opacity:0，dsh-dark/dsh 点亮）。
-// 语义边（红/琥珀）不调用本组件。
+// ═══ 金线流光 v9（2026-08-24 彗星形态修正：强光在前、尾巴向后渐去）═══
+// v8（round35 多层 dash 回撤）构造不变：流光=同一条路径的描边，六层长度递增(16→76px)、
+// 透明度递减(1→0.04)、层叠圆帽抹平台阶。仅修正相位对齐方向——
+// v8 负 delay 让长层【超前】(len-16)/2px → 亮核在后、淡尾伸向前方，与行进方向相反（猫猫报告）；
+// v9 改为长层【滞后】len-16px（前端对齐）→ 亮核在前如彗头，尾巴向后渐淡。
+// 滞后用相位环回表达（滞后 D ≡ 超前 288-D，cycle 均 288、速度 90px/s=femEdgeSweep 288px/3.2s，
+// 仍写负 delay 避免正 delay 的首帧空窗）：delay_i = -(288-(len_i-16))/90 s。
+// 主题门控=.fem-edge-comet-layer CSS 不变（默认 opacity:0，dsh-dark/dsh 点亮）；语义边（红/琥珀）不调用本组件。
 const SHIMMER_LAYERS = [
   { len: 16, op: 1,    delay: 0 },
-  { len: 28, op: 0.5,  delay: -0.0667 },
-  { len: 40, op: 0.28, delay: -0.1333 },
-  { len: 52, op: 0.16, delay: -0.2 },
-  { len: 64, op: 0.08, delay: -0.2667 },
-  { len: 76, op: 0.04, delay: -0.3333 },
+  { len: 28, op: 0.5,  delay: -3.0667 },
+  { len: 40, op: 0.28, delay: -2.9333 },
+  { len: 52, op: 0.16, delay: -2.8 },
+  { len: 64, op: 0.08, delay: -2.6667 },
+  { len: 76, op: 0.04, delay: -2.5333 },
 ];
 function EdgeShimmer({ d, w }) {
   return (
