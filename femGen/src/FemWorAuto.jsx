@@ -90,7 +90,7 @@ function structuralSignature(nodes, edges) {
   return JSON.stringify({ ns, es });
 }
 
-export default function FEMEditor({ plugin = false, onRun, onStop, initialScript, initialCheckpoint, initialRunning = false, onExport, onImport, savedPath, onBackToShell, onRestoreError, onPersistScript, getRecordScript } = {}) {
+export default function FEMEditor({ plugin = false, onRun, onStop, initialScript, initialCheckpoint, initialRunning = false, onExport, onImport, savedPath, onBackToShell, onRestoreError, onPersistScript, getRecordScript, initialMobileFs = true } = {}) {
 // 插件模式：由 dsh-femwa 注入（plugin=true）——运行/停止走插件回调，
 // SSE 连插件广播路由；独立模式保留原后端调用（getBackendBaseUrl）。
 // initialScript/initialCheckpoint/initialRunning：会话恢复（刷新/重启/运行中打开）。
@@ -2261,7 +2261,9 @@ const selNode = sel?.type === 'node' ? nm.get(sel.id) : null;
   // ── 响应式布局检测 ──
   const isMobile = useMobile(768);
   // 插件模式手机端全屏态：默认全屏沉浸（盖住 dsh 外壳），返回键退出全屏并开 dsh 边栏
-  const [mobileFs, setMobileFs] = useState(true);
+  // initialMobileFs（2026-08-24）：视角跳转落编辑器时宿主传 false——以 header
+  // 在上的常规态起步，进不进全屏由用户手动按全屏键决定。
+  const [mobileFs, setMobileFs] = useState(initialMobileFs);
   const themeName = FEM_THEMES.find((t) => t.id === themeSel)?.name || themeSel;
 
   // actorNames（手机端 ProjPanel 需要）

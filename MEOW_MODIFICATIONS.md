@@ -1542,3 +1542,14 @@ femCompiler/save_dialog.py wait_empty() 塞 None 哨兵后，_worker_loop 消费
 3. FemViewButton 挂载 effect 消费：非 fem 家族窗口（mainSid undefined）不消费防误触发；轮询 ~2s 等 tab 环；只认可见 tab（offsetParent 过滤，防点中普通会话上 display:none 的编辑器按钮）；已一致不点击（不多写持久化）；点击走官方链路=与手点行为完全一致
 ### 影响面
 不经视角菜单的开窗（侧边栏/面包屑）完全不受影响，保留各窗自然记忆；无新增存储。
+
+## 2026-08-24 视角跳转落编辑器：手机端以「header 在上」常规态起步，不进全屏沉浸
+### 需求（用户原话）
+「在fem编辑器切换视角的话，切换过来的femgen网页还是不要全屏，保持之前的状态（之前能切换说明上面header在上面呢）。切换之后保留之前header在上面的状态，除非用户手动按了那个全屏的按钮」
+### 根因
+FEMEditor 手机端插件模式 mobileFs useState(true) 每次挂载默认全屏沉浸（zIndex 900 盖住 dsh 外壳）→ 视角跳转=新会话挂载=必然全屏起步，header 被盖、视角菜单不可达。
+### 修改明细
+1. femGen/src/FemWorAuto.jsx：新增 initialMobileFs=true prop，mobileFs 初始值改用它（一行级；默认路径零变化）
+2. src/client.tsx FemEditorView：首帧 useRef 快照 pendingTabTransfer（渲染期先于消费 effect，标记完整），视角跳转落编辑器时传 initialMobileFs=false
+### 影响面
+手动点编辑器 tab/侧边栏/独立模式全部照旧默认全屏；仅「经视角菜单跳转且落在编辑器 tab」的手机端挂载改为常规态起步。桌面端不读 mobileFs 不受影响。
