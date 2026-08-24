@@ -672,11 +672,32 @@ function getAllNames(lib, proj) {
   return names;
 }
 
+// ═══ FOR ↔ for_out 拖拽位置联动（桌面端 onMM 与手机端 nodeDrag 共用一份定义） ═══
+// nodes=全量节点数组，draggedNode=被拖节点（含最新引用），(newX,newY)=被拖节点新位置。
+// 返回联动后的新数组：拖 FOR → for_out 小圆点跟随；拖 for_out → FOR 反向跟随；
+// par_out 完全自由移动，不做任何联动（两个条件天然不命中）。
+function applyForLinkage(nodes, draggedNode, newX, newY) {
+  return nodes.map((n) => {
+    if (n.id === draggedNode.id) {
+      return { ...n, x: newX, y: newY };
+    }
+    // 拖拽 FOR 节点 → 联动 for_out 小圆点（PAR 不联动）
+    if (draggedNode.specialType === 'FOR' && n.type === 'for_out' && n.id === draggedNode.forOutNodeId) {
+      return { ...n, x: newX + SPW - 22, y: newY + (SPH - 22) / 2 };
+    }
+    // 拖拽 for_out 小圆点 → 联动 FOR 节点（par_out 不联动）
+    if (draggedNode.type === 'for_out' && n.id === draggedNode.forNodeId) {
+      return { ...n, x: newX - SPW + 22, y: newY - (SPH - 22) / 2 };
+    }
+    return n;
+  });
+}
+
 export {
   ErrorBoundary, FontStyle, TYPES, ti, SPECIAL_COLORS, SINK_ONLY,
   nid, eid, aid, mid, actionId, NW, NH, MW, MH, SPW, SPH, PSW, PSH,
   getNodeSize, getSmartPorts, smartBezier, getControlPoints, bezierMidpoint,
   computeEdgeGeometry,
   findBackEdges, findAllCycleEdges, inp, btnP, btnS, F as Field,
-  PortCircle, PR, makeDefaultNodes, getAllNames,
+  PortCircle, PR, makeDefaultNodes, getAllNames, applyForLinkage,
 };

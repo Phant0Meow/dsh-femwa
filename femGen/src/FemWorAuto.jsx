@@ -10,7 +10,7 @@ import {
   getNodeSize, getSmartPorts, smartBezier, getControlPoints, bezierMidpoint,
   computeEdgeGeometry,
   findBackEdges, findAllCycleEdges, inp, btnP, btnS, Field,
-  PortCircle, PR, makeDefaultNodes, getAllNames,
+  PortCircle, PR, makeDefaultNodes, getAllNames, applyForLinkage,
 } from './common';
 import { parseFEMS } from './femParser';
 import { buildFEM } from './femGenerator';
@@ -1826,21 +1826,8 @@ const submitHumanInput = useCallback(
           if (!draggedNode) return p;
           const newX = drag.ox + (e.clientX - drag.sx) / scale;
           const newY = drag.oy + (e.clientY - drag.sy) / scale;
-          return p.map((n) => {
-            if (n.id === drag.id) {
-              return { ...n, x: newX, y: newY };
-            }
-// 拖拽 FOR 节点 → 联动 for_out 小圆点（PAR 不联动）
-if (draggedNode.specialType === 'FOR' && n.type === 'for_out' && n.id === draggedNode.forOutNodeId) {
-  return { ...n, x: newX + SPW - 22, y: newY + (SPH - 22) / 2 };
-}
-// 拖拽 for_out 小圆点 → 联动 FOR 节点（par_out 不联动）
-if (draggedNode.type === 'for_out' && n.id === draggedNode.forNodeId) {
-  return { ...n, x: newX - SPW + 22, y: newY - (SPH - 22) / 2 };
-}
-// par_out 完全自由移动，不做任何联动
-            return n;
-          });
+          // FOR↔for_out 联动已抽到 common.applyForLinkage（与手机端 nodeDrag 共用一份定义）
+          return applyForLinkage(p, draggedNode, newX, newY);
         });
         return;
       }
@@ -2472,10 +2459,20 @@ nodes={nodes}
                       </g>
                     );
                   }
-                  const { pathDs, labelPos, srcDir, tgtDir } = computeEdgeGeometry(e, s, t, isCycleEdge, allCycleEdges, portEdgeGroupMap);
+                  // 对齐桌面端的对象传参（2026-08-24 修复：旧版位置传参使 isCycleEdge/isParEdge/
+                  // portEdgeGroupMap 全部退化为默认值——PAR 五线并一条、同端口多边不分流）
+                  const geo = computeEdgeGeometry(e, s, t, {
+                    isCycleEdge,
+                    isParEdge: isParCycle || isParBroken,
+                    parLineCount: 5,
+                    parGap: 6,
+                    portEdgeGroupMap,
+                  });
+                  if (!geo) return null;
+                  const { pathDs, labelPos, srcDir, tgtDir } = geo;
                   const stroke = isSel ? 'var(--fem-edge-sel)' : isParBroken || isForBroken ? 'var(--fem-danger)' : isCycleEdge || isParCycle ? 'var(--fem-edge)' : 'var(--fem-edge-flow)';
                   const dashed = isParBroken || isForBroken ? '5,3' : isCycleEdge ? '7,3' : null;
-                  const markerId = isSel ? 'as' : isParBroken || isForBroken ? 'al' : isCycleEdge ? 'a_for' : 'a';
+                  const markerId = isSel ? 'as' : isParBroken || isForBroken ? 'al' : isCycleEdge || isParCycle ? 'a_for' : 'a';
                   return (
                     <g key={e.id}>
                       {pathDs.map((d, i) => (
@@ -2483,7 +2480,8 @@ nodes={nodes}
                       ))}
                       {pathDs.map((d, i) => (
                         <g key={`v${i}`}>
-                          <path d={d} fill="none" stroke={stroke} strokeDasharray={dashed} markerEnd={i===pathDs.length-1?`url(#${markerId})`:undefined} style={{pointerEvents:'none', strokeWidth: isSel?'var(--fem-edge-w-sel)':'var(--fem-edge-w-thin)'}} />
+                          {/* 每条线都带箭头（对齐桌面端；单线边行为不变） */}
+                          <path d={d} fill="none" stroke={stroke} strokeDasharray={dashed} markerEnd={`url(#${markerId})`} style={{pointerEvents:'none', strokeWidth: isSel?'var(--fem-edge-w-sel)':'var(--fem-edge-w-thin)'}} />
                           {/* 流光：仅金线（红色语义边不发光） */}
                           {!(isParBroken || isForBroken) && <EdgeShimmer d={d} w={0.85} />}
                         </g>

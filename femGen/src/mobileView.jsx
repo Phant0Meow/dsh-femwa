@@ -30,7 +30,7 @@ import React, {
   useEffect,
   useMemo,
 } from 'react';
-import { ti, inp, btnP, btnS, getNodeSize } from './common';
+import { ti, inp, btnP, btnS, getNodeSize, applyForLinkage } from './common';
 import { LibPanel } from './libPanel';
 import { ProjPanel, useModelList, sourceOptions } from './projectPanel';
 import { BubbleOverlay } from './bubbleOverlay';
@@ -1428,7 +1428,6 @@ function useMobileCanvasGesture({
       if (stateRef.current.phase !== 'pending') return;
       const { cx, cy } = stateRef.current;
       const hit = hitTest(cx, cy);
-      console.log('[touch longpress] hit:', hit);
 
       if (hit?.type === 'port') {
         stateRef.current = { phase: 'conn', srcNodeId: hit.nodeId };
@@ -1447,7 +1446,6 @@ function useMobileCanvasGesture({
           startCx: cx, startCy: cy,
           startNx: node.x, startNy: node.y,
         };
-        console.log('[touch longpress] nodeDrag start, node:', hit.nodeId, 'pos:', node.x, node.y);
 
       } else {
         stateRef.current = { phase: 'canvasPan', cx, cy };
@@ -1492,15 +1490,18 @@ function useMobileCanvasGesture({
       return;
     }
 
-    // 节点拖拽：直接算 delta，调 setNodes
+    // 节点拖拽：直接算 delta，调 setNodes（FOR↔for_out 联动与桌面端共用一份定义）
     if (phase === 'nodeDrag') {
       setDragReady(null);
       const s  = stateRef.current;
       const sc = scaleRef.current;
       const newX = s.startNx + (t.clientX - s.startCx) / sc;
       const newY = s.startNy + (t.clientY - s.startCy) / sc;
-      console.log('[touch nodeDrag] move to', newX, newY);
-      setNodes(prev => prev.map(n => n.id === s.nodeId ? { ...n, x: newX, y: newY } : n));
+      setNodes(prev => {
+        const draggedNode = prev.find(n => n.id === s.nodeId);
+        if (!draggedNode) return prev;
+        return applyForLinkage(prev, draggedNode, newX, newY);
+      });
       return;
     }
 
@@ -1536,12 +1537,9 @@ function useMobileCanvasGesture({
     const t        = changed[0];
     const remaining = Array.from(e.touches);
 
-    console.log('[touch end] phase:', phase);
-
     // 连线结束：在抬起处 hit-test 找目标节点
     if (phase === 'conn' && t) {
       const hit = hitTest(t.clientX, t.clientY);
-      console.log('[touch conn end] hit:', hit);
       if (hit?.nodeId && hit.nodeId !== stateRef.current.srcNodeId) {
         handlePortUp(fakeEv(t.clientX, t.clientY), hit.nodeId, hit.portDir || 'left');
       } else {
@@ -1558,7 +1556,6 @@ function useMobileCanvasGesture({
     if (phase === 'pending' && t) {
       clearTimer();
       const hit = hitTest(t.clientX, t.clientY);
-      console.log('[touch tap] hit:', hit);
       if (hit?.type === 'node') {
         setSel({ type: 'node', id: hit.nodeId });
       } else if (hit?.type === 'edge') {
