@@ -43,6 +43,28 @@ const conflictBtnStyle: CSSProperties = {
 /** Peer packages this plugin needs injected. */
 export const inject: string[] = ['slots', 'conversationEvents', 'sessions', 'workspaces']
 
+// ── 视角跳转的标签页跟手（2026-08-24）─────────────────────────────────────
+// 需求：切视角后落在哪个标签页（对话/Fem 编辑器）跟随「切换前」所在的标签
+// 页，而不是恢复目标窗口自己上次停留的位置。实现：跳转前读当前激活 tab，
+// 记入下面的一次性内存标记；目标窗口的 FemViewButton 挂载后消费标记，把激
+// 活 tab 对齐过去（走官方 tab 点击链路 actions.setView，持久化行为与手点一
+// 致）。不新增任何持久化存储。
+
+/** 「Fem 编辑器」标签页固定文案（本插件 conversation.view 注册的 label）。 */
+const FEM_EDITOR_TAB_LABEL = 'Fem 编辑器'
+/** 对话标签页文案（ui-conversation locales view.chat：中文产品文案为主，英文兜底）。 */
+const CHAT_TAB_LABELS = ['对话', 'Chat']
+
+/** 一次性转移标记：kind=切换前所在的一侧；expiresAt 防 openSession 失败后
+ *  残留污染下一次任意会话切换。 */
+let pendingTabTransfer: { kind: 'editor' | 'chat'; expiresAt: number } | null = null
+
+/** 读当前激活标签页属于哪一侧：编辑器 tab 文本唯一，其余（对话）一律归 chat。 */
+function readActiveTabKind(): 'editor' | 'chat' {
+  const selected = document.querySelector('[role="tab"][aria-selected="true"]')
+  return selected !== null && selected.textContent === FEM_EDITOR_TAB_LABEL ? 'editor' : 'chat'
+}
+
 // ── Fem script view (conversation.view tab: "Fem 剧本") ───────────────────
 
 interface ScriptViewInjected {
@@ -1003,23 +1025,30 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
   // 点击视角项：打开对应窗（戏外=主会话 / 上帝=上帝窗 / 角色=角色窗）。
   // 投影窗不可用时（未运行剧本）降级为旧 CSS 过滤视图。视角状态记在
   // mainSid 名下（投影窗上操作也归属到主会话，保证跨窗状态一致）。
+  // 标签页跟手（2026-08-24）：每个真正 openSession 的分支在跳转「前」读当
+  // 前激活 tab 记入一次性标记，目标窗口挂载后对齐（见文件头说明）。
   const pickView = (id: string): void => {
     setOpen(false)
     if (id === 'offstage') {
       // 戏外 = 主会话本体；view 状态标记 offstage，CSS 过滤隐藏角色内容
       // （待主模型恢复后主会话表面回归干净）。投影窗上点戏外 = 跳回主会话。
       setView(mainSid, 'offstage')
-      if (mainSid !== sessionId) openSession(mainSid)
+      if (mainSid !== sessionId) {
+        pendingTabTransfer = { kind: readActiveTabKind(), expiresAt: Date.now() + 5000 }
+        openSession(mainSid)
+      }
       return
     }
     if (id === 'god' && proj.god !== undefined) {
       setView(mainSid, 'god')
+      pendingTabTransfer = { kind: readActiveTabKind(), expiresAt: Date.now() + 5000 }
       openSession(proj.god)
       return
     }
     const actorId = proj.actors[id]
     if (actorId !== undefined) {
       setView(mainSid, id)
+      pendingTabTransfer = { kind: readActiveTabKind(), expiresAt: Date.now() + 5000 }
       openSession(actorId)
       return
     }
@@ -1122,6 +1151,48 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
       ? '.c-Z2Na_crumbs .c-Z2Na_crumbSeg:first-child .c-Z2Na_crumb { color: var(--dsw-alias-label-primary); pointer-events: none; }'
       : ''
     return () => { style.textContent = '' }
+  }, [sessionId])
+
+  // 标签页跟手·消费端（2026-08-24）：本组件挂在每个 fem 家族窗口的头部，
+  // 视角跳转的目标窗口挂载时从这里消费一次性标记——把激活 tab 对齐到「切
+  // 换前」所在的一侧。轮询至多 ~2s 等 tab 环渲染；已一致则不点击（不多写
+  // 一次持久化 view）。过期/超时一律清标记自愈。
+  useEffect(() => {
+    // 非 fem 家族窗口不消费（mainSid undefined = 普通会话/子代理）：防止
+    // openSession 失败后 5s 内手动切到普通会话时误触发转移。
+    if (pendingTabTransfer === null || mainSid === undefined) return
+    const { kind, expiresAt } = pendingTabTransfer
+    if (Date.now() > expiresAt) {
+      pendingTabTransfer = null
+      return
+    }
+    const wanted = kind === 'editor' ? [FEM_EDITOR_TAB_LABEL] : CHAT_TAB_LABELS
+    let tries = 0
+    const timer = window.setInterval(() => {
+      tries += 1
+      // 只认可见 tab（offsetParent null = display:none，如普通会话上被隐藏
+      // 的「Fem 编辑器」按钮——不可见就不算候选，避免点中隐藏按钮）。
+      const tabs = [...document.querySelectorAll<HTMLElement>('[role="tab"]')]
+        .filter(el => el.offsetParent !== null)
+      const selected = tabs.find(el => el.getAttribute('aria-selected') === 'true')
+      if (selected !== undefined && wanted.includes(selected.textContent ?? '')) {
+        window.clearInterval(timer)
+        pendingTabTransfer = null
+        return
+      }
+      const target = tabs.find(el => wanted.includes(el.textContent ?? ''))
+      if (target !== undefined) {
+        target.click()
+        window.clearInterval(timer)
+        pendingTabTransfer = null
+        return
+      }
+      if (tries >= 20) {
+        window.clearInterval(timer)
+        pendingTabTransfer = null
+      }
+    }, 100)
+    return () => { window.clearInterval(timer) }
   }, [sessionId])
 
   const { chatActors, hidden } = useMemo(() => {

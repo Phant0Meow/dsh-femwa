@@ -1530,3 +1530,15 @@ femCompiler/save_dialog.py wait_empty() 塞 None 哨兵后，_worker_loop 消费
 - shutdown 命令在 run 线程未清完 state[runner] 时会再调一次 runner.stop() → 双 flow_stopped（test_stop_cancels_fork_branch 偶发 flaky，12 次采样出现 1 次；与本修复无关的既有竞态）
 - handleCreateSession 带 fems 时绕过 running 守卫直接覆盖 runState（跨会话事件串窗风险）
 - 首跑竞态：broadcast dropped (no projection window) 仍在（todo 0mt6kvlfh）
+
+## 2026-08-24 视角跳转的标签页跟手：切换后落哪由「切换前」所在标签页决定
+### 需求（用户原话）
+「切换视角后所在的标签页，取决于切换视角前所在的标签页。比如如果切换前在对话，那么切换后就在对话。如果切换前在fem编辑器，那么切换后就在fem编辑器。所以不需要存这个视角之前停在哪里了。只需要知道切换前是在哪里——这个可以直接知道。」
+### 机制调研
+每窗口激活 tab 存于 ui-conversation per-session chat store（view 字段，persist dsh.conversation.chat；点 tab = actions.setView(id)），不对外暴露且红线禁跨包 import → 走 client.tsx 已有先例的 DOM 契约（[role=tab]/aria-selected/文本匹配）。rc.2 tab 环仅两成员：chat(label 对话/Chat, id chat) + femwa(Fem 编辑器)。
+### 修改明细（纯 src/client.tsx，刷新生效）
+1. 模块级：FEM_EDITOR_TAB_LABEL/CHAT_TAB_LABELS 常量 + pendingTabTransfer 一次性标记（5s 过期）+ readActiveTabKind()（读 [role=tab][aria-selected=true] 文本判侧）
+2. pickView 三个 openSession 分支跳转前设标记；offstage 同会话分支与降级分支不设
+3. FemViewButton 挂载 effect 消费：非 fem 家族窗口（mainSid undefined）不消费防误触发；轮询 ~2s 等 tab 环；只认可见 tab（offsetParent 过滤，防点中普通会话上 display:none 的编辑器按钮）；已一致不点击（不多写持久化）；点击走官方链路=与手点行为完全一致
+### 影响面
+不经视角菜单的开窗（侧边栏/面包屑）完全不受影响，保留各窗自然记忆；无新增存储。
