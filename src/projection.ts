@@ -100,6 +100,28 @@ export function appendChatMain(ctx: Context, session: Session, text: string): vo
   appendChat(ctx, session, text, 'sys')
 }
 
+/** 运行状态通知全窗广播：主会话表面（sys）+ 上帝窗 + 全部角色窗各一条。
+ * femwa-run 动作回执与引擎结局事件（跑完/报错/暂停/停止）统一走这里，
+ * 保证用户在任何视角都能看到同一条状态信息。kind 固定 sys（前端全视角
+ * 可见、不计入隐藏数、居中灰字渲染）；targetActors 传空数组 = 广播全部
+ * 角色窗（运行状态是全局信息，不做 scope 过滤）。投影窗未建时丢弃窗侧
+ * 部分并打日志（与 appendChatProjected 同款行为；运行/结局场景窗必然已建，
+ * 仅首跑瞬间的 fresh_start 回执可能早于 flow_start 建窗）。 */
+export function appendChatBroadcast(
+  ctx: Context,
+  session: Session,
+  projections: ProjectionRegistry,
+  text: string,
+): void {
+  appendChatMain(ctx, session, text)
+  const windows = projections.get(String(session.id))
+  if (windows === undefined) {
+    console.log(`[dsh-femwa] broadcast dropped (no projection window): ${text.slice(0, 30)}`)
+    return
+  }
+  projectionAppend(windows, 'dsh-femwa/chat', { text, kind: 'sys', seq: Date.now() }, undefined, [])
+}
+
 // ── 2) 投影窗生命周期 ─────────────────────────────────────────────────────
 
 /** 投影窗 actor 消毒：非 [A-Za-z0-9_-] 字符替换为 _+码点十六进制（如 @ → _40、

@@ -9,7 +9,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
-import { appendChatMain } from './projection'
+import { appendChatBroadcast, type ProjectionRegistry } from './projection'
 
 /** index.ts 注入给工具的执行依赖。 */
 export interface FemwaToolDeps {
@@ -151,10 +151,12 @@ const soulTool: FemwaToolSchema = {
   },
 }
 
-/** 注册 femwa 主模型工具（幂等：重复调用先注销再注册）。 */
+/** 注册 femwa 主模型工具（幂等：重复调用先注销再注册）。
+ * projections 用于把动作回执广播进投影窗（主会话+god+全部角色窗统一通知）。 */
 export function registerFemwaTools(
   ctx: Context,
   deps: FemwaToolDeps,
+  projections: ProjectionRegistry,
 ): () => void {
   // cordis 服务注入后直接挂 ctx 属性（dsh-tool-todo 等插件同样用法）。
   const tools = (ctx as unknown as { tools?: {
@@ -232,21 +234,21 @@ export function registerFemwaTools(
       case 'fresh_start': {
         await deps.runScript(sid)
         const editorErrors = deps.takeEditorErrors?.(sid) ?? []
-        // 成功回执写主会话表面给用户看（纯 UI 显示，不进模型上下文）。
-        appendChatMain(ctx, agent.session, '🎬 剧本已开始（在上帝视角窗口查看）')
+        // 成功回执广播全部窗口给用户看（主会话+god+角色窗；纯 UI，不进模型上下文）。
+        appendChatBroadcast(ctx, agent.session, projections, '🎬 剧本已开始（在上帝视角窗口查看）')
         return { ok: true, action, note: '已从头开始运行剧本', ...(editorErrors.length > 0 ? { editor_errors: editorErrors } : {}) }
       }
       case 'stop':
+        // 停止/暂停的用户通知由引擎 flow_stopped 统一广播（前端按钮触发也走
+        // 同一事件），工具侧不再重复写——避免同窗双份通知。
         await deps.stopScript(sid)
-        appendChatMain(ctx, agent.session, '⏹ 剧本已停止')
         return { ok: true, action, note: '已停止运行（断点保留，可 resume 续跑）' }
       case 'pause':
         await deps.pauseScript(sid)
-        appendChatMain(ctx, agent.session, '⏸ 剧本已暂停')
         return { ok: true, action, note: '已暂停运行（断点保留）' }
       case 'resume':
         await deps.resumeScript(sid)
-        appendChatMain(ctx, agent.session, '▶️ 剧本已继续（在上帝视角窗口查看）')
+        appendChatBroadcast(ctx, agent.session, projections, '▶️ 剧本已继续（在上帝视角窗口查看）')
         return { ok: true, action, note: '已从断点继续运行' }
     }
   })

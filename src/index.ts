@@ -308,5 +308,5 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
       return { path: record.path, text: record.text, finalText }
     },
   }
-  ctx.effect(() => registerFemwaTools(ctx, toolDeps), 'dsh-femwa: main-model tools')
+  ctx.effect(() => registerFemwaTools(ctx, toolDeps, projections), 'dsh-femwa: main-model tools')
 }

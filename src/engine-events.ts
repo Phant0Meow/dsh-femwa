@@ -20,7 +20,7 @@ import type { FemwaBridge } from './bridge'
 import type { ResolvedConfig } from './config'
 import { broadcastSse } from './http'
 import { FEM_PRESET, presetOf, isFemAgent } from './persona'
-import { appendChatProjected, type GodMirror, type ProjectionRegistry } from './projection'
+import { appendChatProjected, appendChatBroadcast, type GodMirror, type ProjectionRegistry } from './projection'
 import { runAiSubagent } from './subagent'
 import { writeCheckpoint, clearCheckpoint } from './state-files'
 
@@ -295,7 +295,8 @@ export function registerEngineEventHandlers(ctx: Context, deps: EngineEventsDeps
         // 完整跑完：清掉 checkpoint，下次 run 从头开始
         void clearCheckpoint(resolved.femwaRoot, String(sessionId))
           .catch((error: unknown) => console.log(`[dsh-femwa] checkpoint clear failed: ${String(error)}`))
-        appendChatProjected(ctx, session, projections, '✅ 剧本已跑完', 'notice')
+        // 结局通知全窗广播（主会话+god+角色窗统一可见，2026-08-23 通知统一改造）。
+        appendChatBroadcast(ctx, session, projections, '✅ 剧本已跑完')
         // 通知主模型（对话流直达，必达）：跑完、断点已清。
         steerMainAgent(ctx, sessionId, '[dsh-femwa] 剧本运行结果：✅ 已完整跑完。checkpoint 已清除——若要重跑请用 fresh_start（不能 resume 续跑）。')
         break
@@ -306,7 +307,8 @@ export function registerEngineEventHandlers(ctx: Context, deps: EngineEventsDeps
         runState.running = false
         const text = `剧本出错：${String(d.error ?? 'unknown error')}`
         recordError(session.id, text)
-        appendChatProjected(ctx, session, projections, text, 'error')
+        // 报错通知全窗广播（含主会话；❌ 前缀补足原 error 红行的警示性）。
+        appendChatBroadcast(ctx, session, projections, `❌ ${text}`)
         // 通知主模型（对话流直达，必达）：报错详情供据此迭代修剧本。
         steerMainAgent(ctx, sessionId, `[dsh-femwa] 剧本运行结果：❌ 运行出错。错误信息：${String(d.error ?? 'unknown error')}——可修复剧本后再 fresh_start。`)
         break
@@ -314,7 +316,9 @@ export function registerEngineEventHandlers(ctx: Context, deps: EngineEventsDeps
       case 'flow_stopped': {
         runState.running = false
         // 暂停（引擎侧为 stop 半实现）与停止共用 flow_stopped：按发起方区分文案。
-        appendChatProjected(ctx, session, projections, runState.pausedByUser ? '⏸ 剧本已暂停' : '⏹ 剧本已停止', 'notice')
+        // 全窗广播：工具与前端按钮触发的停止/暂停都由此统一通知所有窗口
+        // （femwa-run 工具侧已不再重复写）。
+        appendChatBroadcast(ctx, session, projections, runState.pausedByUser ? '⏸ 剧本已暂停' : '⏹ 剧本已停止')
         // 停止/暂停由发起方经 femwa-run 工具返回值或前端按钮已知悉，不再重复通知主模型。
         runState.pausedByUser = false
         break
