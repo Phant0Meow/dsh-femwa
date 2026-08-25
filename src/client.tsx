@@ -478,8 +478,10 @@ function useView(sessionId: string | undefined): string {
 // run 结束（end）整桶清空兜底。全部内存态，不写任何会话日志。
 
 interface FemStreamBlock {
-  kind: 'text' | 'reasoning'
+  kind: 'text' | 'reasoning' | 'toolcall'
   text: string
+  /** toolcall 块：工具名（首帧带 name 的 delta 合并进来）。 */
+  name?: string
 }
 
 interface FemStreamMsg {
@@ -488,6 +490,7 @@ interface FemStreamMsg {
   actor?: unknown
   blockKind?: unknown
   text?: unknown
+  name?: unknown
 }
 
 const EMPTY_FEM_BLOCKS: readonly FemStreamBlock[] = []
@@ -524,7 +527,7 @@ function femStreamSet(sid: string, actorKey: string, entry: { blocks: readonly F
   femStreamNotify()
 }
 
-function findLastFemBlock(blocks: readonly FemStreamBlock[], kind: 'text' | 'reasoning'): number {
+function findLastFemBlock(blocks: readonly FemStreamBlock[], kind: 'text' | 'reasoning' | 'toolcall'): number {
   for (let i = blocks.length - 1; i >= 0; i--) {
     if (blocks[i]?.kind === kind) return i
   }
@@ -541,7 +544,9 @@ function femStreamApply(msg: FemStreamMsg): void {
   const sid = typeof msg.sid === 'string' ? msg.sid : ''
   const actor = typeof msg.actor === 'string' ? msg.actor : ''
   if (sid.length === 0 || actor.length === 0) return
-  const blockKind = msg.blockKind === 'reasoning' ? 'reasoning' as const : 'text' as const
+  const blockKind = msg.blockKind === 'reasoning'
+    ? 'reasoning' as const
+    : msg.blockKind === 'toolcall' ? 'toolcall' as const : 'text' as const
   const actorKey = femProjectionActorKey(actor)
   if (msg.kind === 'end') {
     if (femStreams.get(sid)?.delete(actorKey) === true) femStreamNotify()
@@ -554,6 +559,24 @@ function femStreamApply(msg: FemStreamMsg): void {
   }
   if (msg.kind === 'delta') {
     const text = typeof msg.text === 'string' ? msg.text : ''
+    const name = typeof msg.name === 'string' && msg.name.length > 0 ? msg.name : undefined
+    if (blockKind === 'toolcall') {
+      // 工具调用：聚合到「最后一个 toolcall 块」；无则新建（宿主不发 start）。
+      const lastIdx = findLastFemBlock(prev, 'toolcall')
+      if (lastIdx >= 0) {
+        const target = prev[lastIdx] as FemStreamBlock
+        const next = prev.slice()
+        next[lastIdx] = {
+          ...target,
+          text: target.text + text,
+          ...name !== undefined && !target.name ? { name } : {},
+        }
+        femStreamSet(sid, actorKey, { blocks: next })
+      } else {
+        femStreamSet(sid, actorKey, { blocks: [...prev, { kind: 'toolcall', text, ...name !== undefined ? { name } : {} }] })
+      }
+      return
+    }
     if (text.length === 0) return
     const lastIdx = findLastFemBlock(prev, blockKind)
     if (lastIdx >= 0) {
@@ -751,7 +774,13 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
                   runningLabel={t('row.running')}
                 />
               )
-              : <MarkdownText key={i} text={block.text} streaming codeLabels={codeLabels} />)}
+              : block.kind === 'toolcall'
+                ? (
+                  <div key={i} className="fem-stream-toolline">
+                    ⚙ {block.name ?? 'tool'}（{block.text.length > 140 ? `${block.text.slice(0, 140)}…` : block.text}）
+                  </div>
+                )
+                : <MarkdownText key={i} text={block.text} streaming codeLabels={codeLabels} />)}
             <span className="fem-stream-caret" aria-hidden />
           </div>
         )}
@@ -1559,6 +1588,7 @@ function FemSubagentCount({ useSession, useSessions, openChild, refresh, setCata
 // （构建链不注入插件侧 css），沿用母名黑化的 style 元素路线。
 const FEM_STREAM_CSS = `
 .fem-stream-root{display:flex;flex-direction:column;margin:2px 0 10px}
+.fem-stream-toolline{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:2px 0}
 .fem-stream-caret{display:inline-block;width:8px;height:15px;margin-top:2px;background:var(--dsw-alias-label-secondary,#888);animation:fem-caret-blink 1s steps(2,start) infinite}
 @keyframes fem-caret-blink{50%{opacity:0}}
 .fem-rr-root{display:flex;flex-direction:column}

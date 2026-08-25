@@ -2718,6 +2718,13 @@ class FEMRunner:
             if match:
                 ai_name = match.group(1)
         if not ai_name:
+            # dsh 后端模式兜底（2026-08-24）：无 soul 的 actor 用执行者名本身，
+            # 别落到裸 "AI"——宿主投影窗的 speaker 行/角色窗 id/流式直播门控全以
+            # 此名为键，"AI" 会让角色窗永远对不上号（actor_info 空老 bug 的收尾）。
+            resolved_actor = self._resolve_actor_name(eparam)
+            if resolved_actor:
+                ai_name = resolved_actor if str(resolved_actor).startswith('@') else f'@{resolved_actor}'
+        if not ai_name:
             ai_name = "AI"
 
         showprompt_for_frontend = None

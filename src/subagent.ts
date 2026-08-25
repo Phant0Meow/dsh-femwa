@@ -386,7 +386,7 @@ export async function runAiSubagent(
     // 留：femGen 画布节点流式文本（nodeStates.streamingText）仍消费它。
     if (watchedEvent.type === 'assistant/chunk') {
       const chunk = (watchedEvent.data as {
-        chunk?: { type?: string; blockType?: string; text?: unknown; block?: { kind?: string } }
+        chunk?: { type?: string; blockType?: string; text?: unknown; name?: unknown; argumentsDelta?: unknown; block?: { kind?: string } }
       }).chunk
       const sid0 = String(session.id)
       if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
@@ -394,10 +394,26 @@ export async function runAiSubagent(
         broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'text', text: chunk.text })
       } else if (chunk?.type === 'reasoning-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
         broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'reasoning', text: chunk.text })
+      } else if (chunk?.type === 'tool-call-delta') {
+        // 工具调用参数流式（2026-08-24 用户点名全程流式）：首帧带 name，之后
+        // 只发参数增量；客户端聚合到「最后一个 toolcall 块」（同 step 内工具
+        // 串行，并发工具属于不同演员流，无歧义）。
+        const name = typeof chunk.name === 'string' && chunk.name.length > 0 ? chunk.name : undefined
+        const argsDelta = typeof chunk.argumentsDelta === 'string' ? chunk.argumentsDelta : ''
+        if (name !== undefined || argsDelta.length > 0) {
+          broadcastSse('fem_stream', {
+            kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'toolcall',
+            ...name !== undefined ? { name } : {},
+            text: argsDelta,
+          })
+        }
       } else if (chunk?.type === 'block-start' && (chunk.blockType === 'text' || chunk.blockType === 'reasoning')) {
         broadcastSse('fem_stream', { kind: 'start', sid: sid0, node_name: nodeName, actor, blockKind: chunk.blockType })
-      } else if (chunk?.type === 'block-end' && (chunk.block?.kind === 'text' || chunk.block?.kind === 'reasoning')) {
-        broadcastSse('fem_stream', { kind: 'block_end', sid: sid0, node_name: nodeName, actor, blockKind: chunk.block?.kind })
+      } else if (chunk?.type === 'block-end' && (chunk.block?.kind === 'text' || chunk.block?.kind === 'reasoning' || chunk.block?.kind === 'tool-call')) {
+        broadcastSse('fem_stream', {
+          kind: 'block_end', sid: sid0, node_name: nodeName, actor,
+          blockKind: chunk.block?.kind === 'tool-call' ? 'toolcall' : chunk.block?.kind,
+        })
       }
     }
     // 镜像到投影窗：dsh 原生 assistant 节点渲染完整 turn（思考折叠/工具卡片/
