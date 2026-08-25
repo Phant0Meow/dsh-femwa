@@ -534,6 +534,7 @@ function femProjectionActorKey(actor: string): string {
 }
 
 /** 应用一条宿主广播；未知形态静默忽略（通道宽松前向兼容）。 */
+let femStreamApplied = 0
 function femStreamApply(msg: FemStreamMsg): void {
   const sid = typeof msg.sid === 'string' ? msg.sid : ''
   const actor = typeof msg.actor === 'string' ? msg.actor : ''
@@ -542,6 +543,11 @@ function femStreamApply(msg: FemStreamMsg): void {
     ? 'reasoning' as const
     : msg.blockKind === 'toolcall' ? 'toolcall' as const : 'text' as const
   const actorKey = femProjectionActorKey(actor)
+  // 诊断采样：首 5 帧 + 每第 100 帧——证明帧到达且键值形态正确。
+  femStreamApplied += 1
+  if (femStreamApplied <= 5 || femStreamApplied % 100 === 0) {
+    console.info(`[dsh-femwa][stream] apply #${femStreamApplied} ${msg.kind}/${blockKind} …${sid.slice(-10)}/${actor}`)
+  }
   if (msg.kind === 'end') {
     if (femStreams.get(sid)?.delete(actorKey) === true) femStreamNotify()
     return
@@ -634,10 +640,19 @@ function femStreamAcquire(): () => void {
 /** React hook：读某主会话某演员的直播块；挂载期间维持 SSE 连接并随帧刷新。 */
 function useFemStream(mainSid: string | undefined, actorKey: string | undefined): readonly FemStreamBlock[] {
   const [blocks, setBlocks] = useState<readonly FemStreamBlock[]>(EMPTY_FEM_BLOCKS)
+  const blocksRef = useRef<readonly FemStreamBlock[]>(EMPTY_FEM_BLOCKS)
   useEffect(() => {
     if (mainSid === undefined || actorKey === undefined) return
-    console.info(`[dsh-femwa][stream] anchor subscribe ${mainSid}/${actorKey}`)
-    const read = (): void => { setBlocks(femStreams.get(mainSid)?.get(actorKey)?.blocks ?? EMPTY_FEM_BLOCKS) }
+    console.info(`[dsh-femwa][stream] anchor subscribe ${mainSid.slice(-12)}/${actorKey}`)
+    const read = (): void => {
+      const next = femStreams.get(mainSid)?.get(actorKey)?.blocks ?? EMPTY_FEM_BLOCKS
+      // 诊断：空→非空跃迁（直播数据第一次真正抵达这个锚点）
+      if (next.length > 0 && blocksRef.current.length === 0) {
+        console.info(`[dsh-femwa][stream] blocks LIVE ${mainSid.slice(-12)}/${actorKey} n=${next.length} kinds=[${next.map(b => b.kind).join(',')}]`)
+      }
+      blocksRef.current = next
+      setBlocks(next)
+    }
     read()
     const release = femStreamAcquire()
     femStreamListeners.add(read)
@@ -793,7 +808,13 @@ export function FemDirectorNodeView({ node, useSession, t }: ChatNodeViewProps<'
     }
     return lastKey === node.key
   }, [chat, node.key])
+  // 诊断：首次真正渲染直播区（ref 必须在早退前声明——hooks 顺序铁律）
+  const renderLoggedRef = useRef(false)
   if (!eligible || !isLastDirectorAnchor || blocks.length === 0) return null
+  if (!renderLoggedRef.current) {
+    renderLoggedRef.current = true
+    console.info(`[dsh-femwa][stream] RENDER stream area (director) n=${blocks.length}`)
+  }
   return <FemStreamLive blocks={blocks} t={t} />
 }
 
@@ -844,6 +865,11 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
   const liveBlocks = streamEligible && lastSpeakerKeys.get(actor ?? '') === node.key
     ? liveBlocksRaw
     : EMPTY_FEM_BLOCKS
+  const renderLoggedRef = useRef(false)
+  if (liveBlocks.length > 0 && !renderLoggedRef.current) {
+    renderLoggedRef.current = true
+    console.info(`[dsh-femwa][stream] RENDER stream area (speaker) n=${liveBlocks.length}`)
+  }
   // View-perspective filter: in a role view, meta lines (notice/error/
   // thinking) are god-only, and dialogue lines show only when the actor's
   // scope includes this viewer. Absent `visible` = visible to everyone.
