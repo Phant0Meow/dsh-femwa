@@ -1767,6 +1767,16 @@ def parse_script(text: str, base_dir: str = ".", models: Optional[Dict[str, Any]
         elif t == 'flow':
             script.flow = eval_flow(block, script.actions, script.modules)
 
+    # 编译期检测（2026-08-24，待议缝隙①转正）：声明了 action 却解析出空流程
+    # 图——几乎必然是流程区被静默吞掉或语法没接上，绝不允许空图秒跑完假报
+    # ✅（实测 notify-theater 裸名 mainflow 被 normalizer 吞成空图的实锤形态）。
+    # 无 action 的纯数据/工具剧本不在此列。
+    if script.actions and not script.flow.nodes:
+        raise SyntaxError(
+            'mainflow 是空的：剧本声明了 action，但流程图没有任何节点。'
+            '请检查 mainflow 区是否漏了 [START] 标记或连线（如 [START] -> 动作 -> [END]）。'
+        )
+
     # 模块 flow 引用校验（模块内 action/嵌套 module/全局 module）
     for mod in script.modules.values():
         validate_module_flows(mod, script)

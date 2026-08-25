@@ -75,6 +75,27 @@ class FEMNormalizer:
             else:
                 flow_part.append(dline)
 
+        # ★ 兜底（2026-08-24）：没有 [START]/[IN] 标记、且声明区里连一条节点
+        # 定义（[X]: 绑定）都没有时，整块内容其实是流程——原逻辑会把它们全部
+        # 当声明区静默吞掉（实测 notify-theater 裸名 mainflow 被吃成空图，引
+        # 擎空流程秒跑完还报 ✅）。
+        # 只兜「全部行都是纯裸名 action/&module 引用」这一种可证明形态：按顺
+        # 序合成规范单链 [START] -> a -> b -> [END]（与最小模板同形）。混入控
+        # 制块/箭头等复杂形态时维持原状，由 parse_script 的空流程图保险丝响
+        # 亮报错，提示作者补 [START]——宁可报错不可静默。
+        if not flow_started and decl_lines:
+            has_def = any(re.search(r'\[\w+\]\s*:', ln) for ln in decl_lines)
+            if not has_def:
+                steps = [ln.strip() for ln in decl_lines if ln.strip()]
+                simple = bool(steps) and all(
+                    re.fullmatch(r'[\w\u4e00-\u9fff&]+', s) is not None
+                    and re.fullmatch(r'(?:for|par|fork|join|to)', s) is None
+                    for s in steps
+                )
+                if simple:
+                    flow_part = ['[START] -> ' + ' -> '.join(steps) + ' -> [END]']
+                    decl_lines = []
+
         # 4. 从声明区提取定义
         local_defs = {}
         for line in decl_lines:

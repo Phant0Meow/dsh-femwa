@@ -320,6 +320,16 @@ export async function handleCreateSession(
   }
   const body = await readBody(req)
   const cwd = typeof body.cwd === 'string' && body.cwd.trim().length > 0 ? body.cwd : process.cwd()
+  // 模型来源（2026-08-24 用户拍板「不要写provider」）：不写配置默认（deepseek
+  // 系在 meow 等部署无 adapter → NO_ADAPTER），跟随用户保存的默认模型选择
+  // （与 dsh web 建会话的 selectionFor 语义一致）。未保存过默认 → 不传，
+  // 首个导演轮次会响亮报错提示去选模型，绝不静默落到部署隐式默认。
+  const defaultModel = ctx.get('agentDefaultModel') as { currentSelection?(): unknown } | undefined
+  const sel = defaultModel?.currentSelection?.() as { provider?: unknown; model?: unknown } | undefined
+  const agentOptions = typeof sel?.provider === 'string' && sel.provider.length > 0
+    && typeof sel.model === 'string' && sel.model.length > 0
+    ? { provider: sel.provider, model: sel.model }
+    : undefined
   const id = SessionId(`fem-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`)
   try {
     const handle = await ctx.agents.create({
@@ -328,10 +338,7 @@ export async function handleCreateSession(
         cwd,
         agentPreset: FEM_PRESET,
       },
-      agentOptions: {
-        provider: resolved.provider,
-        model: resolved.model,
-      },
+      ...agentOptions !== undefined ? { agentOptions } : {},
       // Mount the preset composition (persona + tools) so subagents spawned
       // under this session join it — without this the child sees no preset
       // tools and no persona (the RPC create path does this in its setup).

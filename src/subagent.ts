@@ -152,21 +152,23 @@ function resolveMainModel(
   return undefined
 }
 
-/** 剧本 source → 子代理 agentOptions（provider/model）。
- * 空 source 跟随主模型（mainModel 缺失时才回退配置默认）；裸 id 走默认
- * provider（dshProvider）；provider/model 双写完全指定。
- * 编译期已校验白名单（引擎 validate_actor_sources），这里只做格式解析。 */
+/** 剧本 source → 子代理 agentOptions。
+ * 空 source 跟随主模型（最近请求头 → 保存默认）；裸 id 走 dshProvider
+ * （部署按需配置，编译期白名单已校验）；provider/model 双写完全指定。
+ * 均不可得时返回空对象——不写死 provider（2026-08-24 用户拍板「不要写
+ * provider」）：交给 dsh 默认模型链，杜绝部署上不存在的 adapter 名导致
+ * 整场戏 NO_ADAPTER。 */
 function resolveSourceModel(
   resolved: ResolvedConfig,
   source: unknown,
   mainModel?: { provider: string; model: string },
-): { agentOptions: { provider: string; model: string } } {
+): { agentOptions?: { provider: string; model: string } } {
   const raw = typeof source === 'string' ? source.trim() : ''
   if (raw.length === 0) {
     if (mainModel !== undefined) {
       return { agentOptions: { provider: mainModel.provider, model: mainModel.model } }
     }
-    return { agentOptions: { provider: resolved.dshProvider, model: resolved.model } }
+    return {}
   }
   const slash = raw.indexOf('/')
   if (slash >= 0) {
@@ -377,12 +379,25 @@ export async function runAiSubagent(
   const onChildEvent = (watched: Session, watchedEvent: SessionEvent): void => {
     if (String(watched.id) !== String(run.id)) return
     armIdle()
-    // 流式 token → 打字机通道（对话窗口 SSE 预览行 + 画布）：只转发正文
-    // 增量，不转发思考/用量；actor 供前端预览行显示角色名。
+    // 流式直播（2026-08-24 方案B）：chunk 经插件 SSE 通道旁路广播给前端，
+    // 零落盘——前端在投影窗 speaker 锚点行下自绘官方同款打字机，块完成时
+    // 该块从缓冲移除、原生镜像接管。sid=主会话 id（各投影窗前端自行推导比
+    // 对）；block_end 与原生块落地几乎同时，重叠窗口极小。ai_token 原样保
+    // 留：femGen 画布节点流式文本（nodeStates.streamingText）仍消费它。
     if (watchedEvent.type === 'assistant/chunk') {
-      const chunk = (watchedEvent.data as { chunk?: { type?: string; text?: unknown } }).chunk
+      const chunk = (watchedEvent.data as {
+        chunk?: { type?: string; blockType?: string; text?: unknown; block?: { kind?: string } }
+      }).chunk
+      const sid0 = String(session.id)
       if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
         broadcastSse('ai_token', { node_name: nodeName, actor, token: chunk.text })
+        broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'text', text: chunk.text })
+      } else if (chunk?.type === 'reasoning-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
+        broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'reasoning', text: chunk.text })
+      } else if (chunk?.type === 'block-start' && (chunk.blockType === 'text' || chunk.blockType === 'reasoning')) {
+        broadcastSse('fem_stream', { kind: 'start', sid: sid0, node_name: nodeName, actor, blockKind: chunk.blockType })
+      } else if (chunk?.type === 'block-end' && (chunk.block?.kind === 'text' || chunk.block?.kind === 'reasoning')) {
+        broadcastSse('fem_stream', { kind: 'block_end', sid: sid0, node_name: nodeName, actor, blockKind: chunk.block?.kind })
       }
     }
     // 镜像到投影窗：dsh 原生 assistant 节点渲染完整 turn（思考折叠/工具卡片/
@@ -470,6 +485,10 @@ export async function runAiSubagent(
       console.log(`[dsh-femwa] timeout回传失败: ${String(sendError)}`)
     })
   } finally {
+    // 直播兜底收尾（2026-08-24 方案B）：无论正常完成/中断/超时，都清掉该
+    // 演员的流式缓冲——前端防残影的最后防线（block_end 已逐块移除，这里
+    // 覆盖"块没闭合就结束"的异常路径）。
+    broadcastSse('fem_stream', { kind: 'end', sid: String(session.id), node_name: nodeName, actor })
     if (idleTimer !== undefined) clearTimeout(idleTimer)
     disposeListener()
     await run.dispose()
