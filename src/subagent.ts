@@ -43,14 +43,27 @@ const SURFACE_OP_EVENTS = new Set(['assistant/message', 'tool/result'])
 
 // ── prompt / trajectory 组装 ─────────────────────────────────────────────
 
+/** 剧场应急提示（2026-08-25《宵夜大辩论》裁决事件）：断档续跑等场景下引擎
+ * 可能给不出 scope 共享历史，角色上下文缺前情。与其让角色自己翻源码取证
+ * 20 分钟，不如直接告知一键自救命令（fem-chat.mjs 自动定位最近一场的上帝
+ * 视角投影日志并倒出全场发言）。 */
+function theaterHintOf(femwaRoot: string): string {
+  return [
+    '【剧场应急】你的上下文应包含同房间（同 scope）角色的历史发言；若发现缺失（典型场景：运行中途断档后续跑），不要凭空编造剧情：',
+    `有工具时先运行 node "${join(femwaRoot, 'fem-chat.mjs')}" 一键取回本场全部发言再继续；`,
+    '无工具可用时，在回复开头声明「未收到历史发言」，再基于已有信息尽力而为。',
+  ].join('\n')
+}
+
 /** Assemble the subagent's initial prompt from the engine's blocks. */
-function buildSubagentPrompt(blocks: Record<string, unknown>): string {
+function buildSubagentPrompt(blocks: Record<string, unknown>, theaterHint = ''): string {
   const str = (key: string): string => (typeof blocks[key] === 'string' ? String(blocks[key]) : '')
   const system = [
     str('basic_safety'),
     str('basic_output'),
     str('soul'),
     str('user_info'),
+    theaterHint,
   ].filter(Boolean).join('\n\n')
   const parts = [str('context'), str('prompt')]
   const memory = str('memory')
@@ -251,7 +264,7 @@ export async function runAiSubagent(
     throw new Error(`parent agent for ${session.id} is not live`)
   }
   const blocks = (request.blocks ?? {}) as Record<string, unknown>
-  const prompt = buildSubagentPrompt(blocks)
+  const prompt = buildSubagentPrompt(blocks, theaterHintOf(resolved.femwaRoot))
   // Debug voice: what one AI node feeds its subagent (context length answers
   // "did the scope filter leak / go empty" for this very node).
   const blk = (key: string): string => typeof blocks[key] === 'string' ? String(blocks[key]) : ''
