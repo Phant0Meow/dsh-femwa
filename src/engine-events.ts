@@ -148,6 +148,44 @@ export function registerEngineEventHandlers(ctx: Context, deps: EngineEventsDeps
   //    保持注册顺序不变）。
   godMirror.registerRealtimeListener(ctx)
 
+  // 3.5) 导演直播（2026-08-25 方案B Step2）：主模型在上帝窗的发言此前要等
+  //      assistant/message 整块落地（MIRROR 白名单不含 chunk）。这里把主会话
+  //      chunk 旁路广播成 fem_stream（actor='导演'），前端在上帝窗最新一条用
+  //      户消息节点下自绘打字机。只对存在投影窗的 Fem 会话生效；纯 SSE 零落
+  //      盘，不写事件、不动 MIRROR 白名单与水位。
+  ctx.on('session/event', (session: Session, event: SessionEvent) => {
+    if (session.header.parentSession !== undefined) return
+    if (event.type !== 'assistant/chunk') return
+    const sid0 = String(session.id)
+    if (projections.get(sid0)?.god === undefined) return
+    const chunk = (event.data as {
+      chunk?: { type?: string; blockType?: string; text?: unknown; name?: unknown; argumentsDelta?: unknown; block?: { kind?: string } }
+    }).chunk
+    const actor = '导演'
+    if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
+      broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: '', actor, blockKind: 'text', text: chunk.text })
+    } else if (chunk?.type === 'reasoning-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
+      broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: '', actor, blockKind: 'reasoning', text: chunk.text })
+    } else if (chunk?.type === 'tool-call-delta') {
+      const name = typeof chunk.name === 'string' && chunk.name.length > 0 ? chunk.name : undefined
+      const argsDelta = typeof chunk.argumentsDelta === 'string' ? chunk.argumentsDelta : ''
+      if (name !== undefined || argsDelta.length > 0) {
+        broadcastSse('fem_stream', {
+          kind: 'delta', sid: sid0, node_name: '', actor, blockKind: 'toolcall',
+          ...name !== undefined ? { name } : {},
+          text: argsDelta,
+        })
+      }
+    } else if (chunk?.type === 'block-start' && (chunk.blockType === 'text' || chunk.blockType === 'reasoning')) {
+      broadcastSse('fem_stream', { kind: 'start', sid: sid0, node_name: '', actor, blockKind: chunk.blockType })
+    } else if (chunk?.type === 'block-end' && (chunk.block?.kind === 'text' || chunk.block?.kind === 'reasoning' || chunk.block?.kind === 'tool-call')) {
+      broadcastSse('fem_stream', {
+        kind: 'block_end', sid: sid0, node_name: '', actor,
+        blockKind: chunk.block?.kind === 'tool-call' ? 'toolcall' : chunk.block?.kind,
+      })
+    }
+  })
+
   // 4) Event bridge: engine events -> chat messages on the run's session.
   ctx.on('dsh-femwa/event', (eventType: string, data: unknown) => {
     const sessionId = runState.sessionId

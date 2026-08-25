@@ -709,9 +709,102 @@ const femwaChatDefinition: ConversationNodeDefinition<FemwaChatData> = {
   },
 }
 
+// ── 导演直播锚点（2026-08-25 方案B Step2）────────────────────────────────
+// 上帝窗里主模型的发言此前要等 assistant/message 落地才整块出现（MIRROR 白
+// 名单无 chunk）。宿主把主模型 chunk 旁路广播成 fem_stream（actor='导演'，
+// 零落盘）；这里给每条 user/message 挂一个锚点节点，只有「最新一条」且存
+// 在活跃导演缓冲时，在其下渲染打字机——主模型回复永远紧跟用户消息落位。
+
+/** One user/message anchor node's data（仅 seq，直播内容走 SSE store）。 */
+interface FemDirectorData {
+  readonly seq: number
+}
+
+declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
+  interface ChatNodeDataMap {
+    'femwa-director': FemDirectorData
+  }
+}
+
+const FEM_DIRECTOR_KEY = '__director__'
+
+const femDirectorDefinition: ConversationNodeDefinition<FemDirectorData> = {
+  kind: 'femwa-director',
+  target: 'chat',
+  match: (event) => {
+    if (event.type === 'user/message') return { id: String(event.seq), role: 'start' }
+    return null
+  },
+  start: (_context, match) => ({ seq: match.event.seq }),
+  update: (context) => context.state,
+  buildViewNode: (context) => {
+    if (context.state === undefined) return null
+    return {
+      key: context.key,
+      kind: 'femwa-director',
+      id: context.id,
+      target: 'chat',
+      anchorSeq: context.start?.event.seq ?? context.matches[0]?.event.seq ?? 0,
+      location: { kind: 'unresolved' },
+      visibility: 'visible',
+      data: context.state,
+    }
+  },
+}
+
+/** 直播块渲染（speaker 锚点与导演锚点共用同一套视觉）。 */
+function FemStreamLive({ blocks, t }: { blocks: readonly FemStreamBlock[]; t: unknown }) {
+  const safeT = typeof t === 'function' ? (t as (key: string) => string) : (key: string): string => key
+  const codeLabels = useMemo(() => ({ copyLabel: safeT('copy'), copiedLabel: safeT('copied') }), [safeT])
+  return (
+    <div className="fem-stream-root">
+      {blocks.map((block, i) => block.kind === 'reasoning'
+        ? (
+          <FemReasoningRow
+            key={i}
+            text={block.text}
+            running={i === blocks.length - 1}
+            runningLabel={safeT('row.running')}
+          />
+        )
+        : block.kind === 'toolcall'
+          ? (
+            <div key={i} className="fem-stream-toolline">
+              ⚙ {block.name ?? 'tool'}（{block.text.length > 140 ? `${block.text.slice(0, 140)}…` : block.text}）
+            </div>
+          )
+          : <MarkdownText key={i} text={block.text} streaming codeLabels={codeLabels} />)}
+      <span className="fem-stream-caret" aria-hidden />
+    </div>
+  )
+}
+
+/** Render one user/message anchor node in god windows（导演流式）。 */
+export function FemDirectorNodeView({ node, useSession, t }: ChatNodeViewProps<'femwa-director'>) {
+  const sessionId = useSession(snapshot => snapshot.sessionId)
+  const view = useView(sessionId)
+  const projSuffix = sessionId !== undefined && sessionId.startsWith('fem-proj-')
+    ? sessionId.slice('fem-proj-'.length)
+    : undefined
+  const mainSid = projSuffix !== undefined ? projSuffix.replace(/-[^-]*$/, '') : undefined
+  // 导演是戏外视角：只在上帝窗渲染；角色窗不显示戏外发言。
+  const eligible = view === 'god' && projSuffix !== undefined && mainSid !== undefined
+  const blocks = useFemStream(eligible ? mainSid : undefined, eligible ? FEM_DIRECTOR_KEY : undefined)
+  const chat = useSession(s => s.chat)
+  const isLastDirectorAnchor = useMemo(() => {
+    let lastKey: string | undefined
+    for (const key of chat.order) {
+      const nd = chat.nodes.get(key)
+      if (nd !== undefined && nd.kind === 'femwa-director') lastKey = nd.key
+    }
+    return lastKey === node.key
+  }, [chat, node.key])
+  if (!eligible || !isLastDirectorAnchor || blocks.length === 0) return null
+  return <FemStreamLive blocks={blocks} t={t} />
+}
+
 /** Render one dsh-femwa/chat line. */
-export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'femwa-role'>) {
-  const { actor, text, kind, visible } = node.data
+export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'femwa-role'>) {  const { actor, text, kind, visible } = node.data
   const sessionId = useSession(snapshot => snapshot.sessionId)
   const view = useView(sessionId)
   // ── 流式直播订阅（2026-08-24 方案B）───────────────────────────────────
@@ -1670,6 +1763,8 @@ export function apply(ctx: any): void {
 
   if (conversationEvents !== undefined && typeof conversationEvents.register === 'function') {
     conversationEvents.register(femwaChatDefinition)
+    // 导演直播锚点（Step2）：user/message → 上帝窗主模型打字机落位锚。
+    conversationEvents.register(femDirectorDefinition)
   } else {
     console.warn('[dsh-femwa] conversationEvents unavailable; femwa-role node not registered')
   }
@@ -1764,6 +1859,14 @@ export function apply(ctx: any): void {
       locale: 'conversation',
     },
     FemwaChatNodeView,
+  ))
+  slots.inject('conversation.chat.node', () => slots.register(
+    {
+      name: 'conversation.chat.node',
+      key: 'femwa-director',
+      locale: 'conversation',
+    },
+    FemDirectorNodeView,
   ))
   // FemViewButton：order -20 = preset 徽章(-10)之前、紧贴面包屑区——主窗口
   // 「name / 👁视角  Fem剧本模式 …」；投影窗「母名 / 👁@演员」（fork 让位后
