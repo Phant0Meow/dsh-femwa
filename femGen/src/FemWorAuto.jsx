@@ -142,7 +142,12 @@ export default function FEMEditor({ plugin = false, onRun, onStop, initialScript
   nodesRef.current = nodes;
   const [edges, setEdges] = useState([]);
   const edgesRef = useRef(edges);
-  useEffect(() => { edgesRef.current = edges; }, [edges]);
+  // 渲染期同步（2026-08-24 连接线丢失 bug 根因修复）：原 useEffect 异步同步使
+  // edgesRef 落后一帧——恢复画布后 SSE flow_done 立即触发 saveAndNavigate 时，
+  // nodesRef 已是新值而 edgesRef 还是 []，flowStore 被写入 {nodes:7, edges:[]}
+  // 撕裂条目，E915 重载即丢全部连线。与上方 nodesRef 对称后，所有「保存当前
+  // 画布」读点恒拿到同一渲染帧的一致快照。
+  edgesRef.current = edges;
 
   // ---- 统一存储 ----
   const [actionStore, setActionStore] = useState([]); // { id, path, name, executorType, ... }
@@ -394,7 +399,15 @@ const [userApiModel, setUserApiModel] = useState(() => {
       }
       return [...prev, entry];
     });
-    setLocationPath(targetPath);
+    // 同值短路（2026-08-24 连接线丢失 bug 放大器修复）：flow_done/done/flow_stopped
+    // 在主流程时 targetPath 与当前同值，但原写法每次传新数组实例 → locationPath
+    // 引用必变 → E915 无谓重载画布（竞态窗口内会加载到坏条目）。同值时保持引用，
+    // React bail out；路径真变时行为逐字节不变。
+    setLocationPath((prev) =>
+      prev.length === targetPath.length && prev.every((s, i) => s === targetPath[i])
+        ? prev
+        : targetPath
+    );
     setCanvasOpacity(0);
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {

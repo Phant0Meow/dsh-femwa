@@ -21,6 +21,8 @@ import {
 import { handleCreateSession, handleRunOnSession, handleSaveScript, handleReadScript, collectLlmModels } from './run-control'
 import { appendEvent, appendChatProjected, type GodMirror, type ProjectionRegistry } from './projection'
 import { randomUUID } from 'node:crypto'
+import { appendFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 export interface RoutesDeps {
   resolved: ResolvedConfig
@@ -511,14 +513,25 @@ export function registerRoutes(ctx: Context, deps: RoutesDeps): void {
       path: '/dsh-femwa/projection-input',
       handler: (req: IncomingMessage, res: ServerResponse): void => {
         void (async () => {
+          // 诊断轨迹（2026-08-25）：host stdout 不可见，路由全程写文件日志——
+          // 每次调用的入参/分支/自调用结果全部落 user_data/debug-projection-input.log，
+          // 排查「投影窗发言无反应」时直接读该文件即可分辨端内/端外问题。
+          const debugLog = (line: string): void => {
+            try {
+              appendFileSync(join(resolved.femwaRoot, 'user_data', 'debug-projection-input.log'),
+                `[${new Date().toISOString()}] ${line}\n`, 'utf8')
+            } catch { /* 日志失败不影响主路 */ }
+          }
+          debugLog(`=== invoke ===`)
           // 投影窗输入路由（2026-08-24 用户定稿语义）：
-          // ①剧本未跑/暂停/已停止 → 走主窗口前门 session.prompt（queue），消息以
+          // ①剧本未跑/暂停/已停止 → 走主窗口前门 session.prompt（steer），消息以
           //   真实用户身份进入主会话对话流；上帝窗镜像自然映射，本窗不留痕；
           // ②跑本中且人类节点等待 → bridge human_input 喂引擎（wait_key），并广播 role 行进各投影窗；
           // ③跑本中其他时候 → 人类插话（编译器规划中的打断语义，暂不实现）：仅本窗留痕。
           const raw = await readBody(req) as Record<string, unknown>
           const sessionId = typeof raw.sessionId === 'string' && raw.sessionId.trim().length > 0 ? raw.sessionId : ''
           const text = typeof raw.text === 'string' && raw.text.trim().length > 0 ? raw.text.trim() : ''
+          debugLog(`payload: sessionId=${sessionId} textLen=${text.length}`)
           if (sessionId.length === 0 || text.length === 0) {
             writeJson(res, 400, { ok: false, error: 'sessionId and text are required' })
             return
@@ -526,6 +539,7 @@ export function registerRoutes(ctx: Context, deps: RoutesDeps): void {
           const sessions = ctx.get('sessions') as { get(id: SessionId): Session | undefined } | undefined
           const win = sessions?.get(SessionId(sessionId))
           if (win === undefined) {
+            debugLog(`result: 404 window not found in store`)
             writeJson(res, 404, { ok: false, error: `session ${sessionId} not found` })
             return
           }
@@ -541,42 +555,43 @@ export function registerRoutes(ctx: Context, deps: RoutesDeps): void {
             && runState.humanWait !== undefined
           const idle = runState.running !== true || runState.pausedByUser === true
           if (idle) {
-            // ①直达主模型（2026-08-24 用户定稿，反转 steer 注入方案）：走主窗口
-            // 同一条前门 session.prompt（queue 模式）——消息以真实用户身份进入主
-            // 会话对话流并触发回合；上帝窗镜像本就映射主会话全部对话，双方发言
-            // 自然出现在投影窗，本地不再重复留痕。空闲=立即开新回合；忙碌=进队
-            // 列下一步边界消费——与主窗口打字行为完全一致。
-            const base = (process.env.DSH_WEB_URL ?? 'http://127.0.0.1:3081').replace(/\/+$/, '')
-            const promptRes = await fetch(`${base}/api/session.prompt`, {
-              method: 'POST',
-              headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({
-                type: 'client-request',
-                rpcId: randomUUID(),
-                method: 'session.prompt',
-                payload: {
-                  sessionId: mainSid,
-                  mode: 'queue',
-                  content: [{ type: 'text', text }],
-                },
-              }),
-            })
-            const promptBody = await promptRes.json().catch(() => undefined) as
-              | { result?: { value?: { accepted?: boolean } }; error?: { code?: string; message?: string } }
-              | undefined
-            if (!promptRes.ok || promptBody?.error !== undefined) {
-              // 失败必须可见：落日志 + 回传前端（composer 保留草稿）
-              console.log(`[dsh-femwa] projection-input -> session.prompt failed: http=${promptRes.status}`
-                + ` error=${JSON.stringify(promptBody?.error ?? null)}`)
-              writeJson(res, 200, {
-                ok: false,
-                routed: 'main',
-                error: promptBody?.error?.message ?? `session.prompt http ${promptRes.status}`,
-              })
+            // ①直达主模型（2026-08-24 用户定稿，反转 steer 注入方案）：进程内直调宿主
+            // 自己的 ctx.apiProxy.sessions.prompt——与主窗口输入框完全同一入口，
+            // 消息以真实用户身份进入主会话对话流并触发回合；上帝窗镜像自然映射双方。
+            // 不做 HTTP 自调用：两次实败已证明不可靠——host 内 DSH_WEB_URL 可能指向
+            // 另一实例（实测 :3080 session-not-found）；浏览器 Host 头可能是 Tailscale
+            // https 隧道域（实测 :8443 http 自调 400）。
+            // steer 模式：空闲=立即开新回合；忙碌=下一步边界送达（queue 空闲时进
+            // 隐形收件箱永不消费，2026-08-25 弃）。
+            type PromptResult = { ok?: boolean; value?: { accepted?: boolean }; error?: { code?: string; message?: string } }
+            const bag = ctx as unknown as { get(name: string): unknown }
+            const apiProxy = bag.get('apiProxy') as
+              | { sessions: { prompt(request: { rpcId: string; payload: { sessionId: SessionId; mode: 'queue' | 'steer'; content: Array<{ type: 'text'; text: string }> } }): Promise<{ result?: PromptResult }> } }
+            | undefined
+            debugLog(`branch① idle -> apiProxy.sessions.prompt steer mainSid=${mainSid}`)
+            if (apiProxy?.sessions?.prompt === undefined) {
+              debugLog('branch① FAILED: apiProxy service unavailable')
+              writeJson(res, 200, { ok: false, routed: 'main', error: 'apiProxy service unavailable' })
               return
             }
+            const rpcRes = await apiProxy.sessions.prompt({
+              rpcId: randomUUID(),
+              payload: { sessionId: SessionId(mainSid), mode: 'steer', content: [{ type: 'text', text }] },
+            }).catch((error: unknown) => {
+              debugLog(`branch① prompt threw: ${String(error)}`)
+              return undefined
+            })
+            const r = rpcRes?.result as PromptResult | undefined
+            if (r?.error !== undefined || r?.ok === false) {
+              debugLog(`branch① FAILED: ${JSON.stringify(r?.error ?? null)}`)
+              console.log(`[dsh-femwa] projection-input -> session.prompt failed: ${JSON.stringify(r?.error ?? null)}`)
+              writeJson(res, 200, { ok: false, routed: 'main', error: r?.error?.message ?? 'session.prompt rejected' })
+              return
+            }
+            const accepted = r?.value?.accepted === true
+            debugLog(`branch① accepted=${accepted} len=${text.length}`)
             console.log(`[dsh-femwa] projection input -> main session.prompt accepted: sid=${mainSid} len=${text.length}`)
-            writeJson(res, 200, { ok: true, routed: 'main' })
+            writeJson(res, 200, { ok: true, routed: 'main', accepted })
             return
           }
           // ②③跑本中：投影窗本地留痕（用户自己说的话要看得见；①不需要——镜像已覆盖）

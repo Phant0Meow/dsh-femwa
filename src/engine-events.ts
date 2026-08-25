@@ -155,13 +155,27 @@ export function registerEngineEventHandlers(ctx: Context, deps: EngineEventsDeps
   //      盘，不写事件、不动 MIRROR 白名单与水位。
   ctx.on('session/event', (session: Session, event: SessionEvent) => {
     if (session.header.parentSession !== undefined) return
-    if (event.type !== 'assistant/chunk') return
     const sid0 = String(session.id)
     if (projections.get(sid0)?.god === undefined) return
+    const actor = '导演'
+    // ── 清屏权威信号（2026-08-25 实测修正）：主模型流的块结束 chunk 不可靠
+    //    （缺失/形态不定），靠它移除缓冲会残留上一轮内容=原生落地后双份。
+    //    改用两个必然发生的权威节点清屏：
+    //    ①assistant/message 落地=该轮已由原生接管 → 清空整个导演缓冲；
+    //    ②tool/call 落地=原生工具卡出现 → ⚙ 行立即移交（移除最后一个
+    //      toolcall 块）。
+    if (event.type === 'assistant/message') {
+      broadcastSse('fem_stream', { kind: 'end', sid: sid0, node_name: '', actor })
+      return
+    }
+    if (event.type === 'tool/call') {
+      broadcastSse('fem_stream', { kind: 'block_end', sid: sid0, node_name: '', actor, blockKind: 'toolcall' })
+      return
+    }
+    if (event.type !== 'assistant/chunk') return
     const chunk = (event.data as {
       chunk?: { type?: string; blockType?: string; text?: unknown; name?: unknown; argumentsDelta?: unknown; block?: { kind?: string } }
     }).chunk
-    const actor = '导演'
     if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
       broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: '', actor, blockKind: 'text', text: chunk.text })
     } else if (chunk?.type === 'reasoning-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
