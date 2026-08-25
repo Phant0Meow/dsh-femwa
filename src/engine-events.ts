@@ -22,7 +22,7 @@ import { broadcastSse } from './http'
 import { FEM_PRESET, presetOf, isFemAgent } from './persona'
 import { appendChatProjected, appendChatBroadcast, type GodMirror, type ProjectionRegistry } from './projection'
 import { runAiSubagent } from './subagent'
-import { writeCheckpoint, clearCheckpoint } from './state-files'
+import { updatePlayResume, writePlayResume, appendFemSession } from './state-files'
 
 /** 运行结局直达主模型对话流：以 plugin 来源构造 user 消息并 agent.steer()。
  * dsh 官方语义（dsh-agent）：空闲的主模型立即开新回合收到通知；忙碌时在
@@ -226,6 +226,11 @@ export function registerEngineEventHandlers(ctx: Context, deps: EngineEventsDeps
           ? d.actors.filter((x): x is string => typeof x === 'string')
           : []
         runState.sessionActors.set(String(sessionId), actors)
+        // 引擎场次身份入账本：dsh 会话 ↔ fem 场次一对多（末位=当前场次）。
+        if (typeof d.session_id === 'number') {
+          void appendFemSession(resolved.femwaRoot, String(sessionId), d.session_id)
+            .catch((error: unknown) => console.log(`[dsh-femwa] femSessions append failed: ${String(error)}`))
+        }
         // 上帝窗无条件创建（actors 为空的剧本也要有引擎通知的落点）；
         // 角色窗按剧本角色。幂等创建/复用/冷唤醒；异步，失败仅打日志。
         const header = session.header as { cwd?: string } | undefined
@@ -299,11 +304,17 @@ export function registerEngineEventHandlers(ctx: Context, deps: EngineEventsDeps
         break
       }
       case 'checkpoint': {
-        // 每个分支当前执行到的节点位置：持久化到
-        // <femwaRoot>/user_data/checkpoints/<sessionId>.json，供断点续跑。
+        // 断点增量到达：位置整包 + 场次身份 + 变量合并视图（引擎去重后仅在
+        // 变化时携带）。按键合并进会话记录的 resume 块（指纹由开跑时盖章，
+        // 这里绝不覆盖）。
         const cp = (d.checkpoints ?? {}) as Record<string, string>
-        void writeCheckpoint(resolved.femwaRoot, String(sessionId), cp)
-          .catch((error: unknown) => console.log(`[dsh-femwa] checkpoint write failed: ${String(error)}`))
+        void updatePlayResume(resolved.femwaRoot, String(sessionId), {
+          checkpoints: cp,
+          ...(typeof d.session_id === 'number' ? { femSessionId: d.session_id } : {}),
+          ...(d.vars !== undefined && typeof d.vars === 'object'
+            ? { vars: d.vars as Record<string, Record<string, unknown>> }
+            : {}),
+        }).catch((error: unknown) => console.log(`[dsh-femwa] resume update failed: ${String(error)}`))
         break
       }
       case 'ai_done': {
@@ -345,9 +356,9 @@ export function registerEngineEventHandlers(ctx: Context, deps: EngineEventsDeps
       case 'flow_done': {
         runState.running = false
         runState.pausedByUser = false
-        // 完整跑完：清掉 checkpoint，下次 run 从头开始
-        void clearCheckpoint(resolved.femwaRoot, String(sessionId))
-          .catch((error: unknown) => console.log(`[dsh-femwa] checkpoint clear failed: ${String(error)}`))
+        // 完整跑完：断点块整体作废（下次 run 从头开始）
+        void writePlayResume(resolved.femwaRoot, String(sessionId), null)
+          .catch((error: unknown) => console.log(`[dsh-femwa] resume clear failed: ${String(error)}`))
         // 结局通知全窗广播（主会话+god+角色窗统一可见，2026-08-23 通知统一改造）。
         appendChatBroadcast(ctx, session, projections, '✅ 剧本已跑完')
         // 通知主模型（对话流直达，必达）：跑完、断点已清。
