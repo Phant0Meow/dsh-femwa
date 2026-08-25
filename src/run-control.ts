@@ -17,7 +17,8 @@ import type { ResolvedConfig } from './config'
 import { readBody, writeJson, broadcastSse, type SaveScriptBody } from './http'
 import { FEM_PRESET, presetOf, injectFemwaDocs, femwaDocsSections } from './persona'
 import {
-  readCheckpoint, writeCheckpoint, clearCheckpoint,
+  loadValidPlayResume, updatePlayResume, writePlayResume, scriptFingerprint,
+  type PlayResume,
   readSessionScript, writeSessionScript, readSessionScriptText,
 } from './state-files'
 
@@ -121,18 +122,28 @@ export async function startRunOnSession(
   // 记录随运行版本更新（rev 已变）：广播各端静默同步 rev/内容，
   // 避免各页面下次快照写因 rev 滞后而误触 409 冲突弹窗。
   broadcastSse('script_changed', { sessionId })
+  // ── 断点裁决与盖章 ──
+  // 「运行」（reset）= 作废旧断点，从头跑，不沾任何断点逻辑；
+  // 「继续」= 剧本指纹一致才允许续跑（变了就不是断点，是新戏）。
+  let resumeRec: PlayResume | undefined
   if (reset) {
-    // 手动「运行」：作废旧 checkpoint，从头跑。
-    await clearCheckpoint(resolved.femwaRoot, String(sessionId)).catch(() => undefined)
-    console.log(`[dsh-femwa] reset ${sessionId}: checkpoint cleared, running from start`)
+    await writePlayResume(resolved.femwaRoot, String(sessionId), null).catch(() => undefined)
+    console.log(`[dsh-femwa] reset ${sessionId}: resume cleared, running from start`)
+  } else {
+    resumeRec = await loadValidPlayResume(resolved.femwaRoot, String(sessionId), scriptText)
   }
-  const checkpoints = await readCheckpoint(resolved.femwaRoot, String(sessionId))
-  // 双保险：终点点（[END]/[BREAK]）永远不作续跑位置（老引擎可能已写入）。
-  for (const [key, value] of Object.entries(checkpoints)) {
-    if (value === '[END]' || value === '[BREAK]') delete checkpoints[key]
+  // 开演盖章：本轮产生的断点只认当前版本的剧本。
+  await updatePlayResume(resolved.femwaRoot, sid, { fingerprint: scriptFingerprint(scriptText) })
+    .catch((error: unknown) => console.log(`[dsh-femwa] resume stamp failed: ${String(error)}`))
+  // 双保险：终点点（[END]/[BREAK]）永远不作续跑位置。
+  const resumedCheckpoints: Record<string, string> = {}
+  for (const [key, value] of Object.entries(resumeRec?.checkpoints ?? {})) {
+    if (value !== '[END]' && value !== '[BREAK]') resumedCheckpoints[key] = value
   }
-  if (Object.keys(checkpoints).length > 0) {
-    console.log(`[dsh-femwa] resuming ${sessionId} from checkpoint: ${JSON.stringify(checkpoints)}`)
+  const canResume = resumeRec?.femSessionId !== undefined
+    && Object.keys(resumedCheckpoints).length > 0
+  if (canResume) {
+    console.log(`[dsh-femwa] resuming ${sessionId}: femSession=${resumeRec!.femSessionId} from ${JSON.stringify(resumedCheckpoints)}`)
   }
   runState.sessionId = sessionId
   runState.running = true
@@ -153,7 +164,13 @@ export async function startRunOnSession(
       dsh_ai_backend: resolved.dshAiBackend,
       // source 编译期校验白名单：引擎 parse_script 时校验 actors 的 source 字段
       models: await collectLlmModels(ctx, resolved),
-      ...Object.keys(checkpoints).length > 0 ? { checkpoints } : {},
+      ...(canResume ? {
+        resume_state: {
+          checkpoints: resumedCheckpoints,
+          session_id: resumeRec!.femSessionId,
+          ...(resumeRec!.vars !== undefined ? { vars: resumeRec!.vars } : {}),
+        },
+      } : {}),
     }, 30_000)
   } catch (error: unknown) {
     runState.running = false

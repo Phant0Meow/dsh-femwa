@@ -150,7 +150,7 @@ def main():
 
     def start_run(fems_text, base_dir, user_api_key, user_api_provider,
                   user_api_url, user_api_model, dsh_ai_backend=False,
-                  checkpoints=None):
+                  resume_state=None):
         def worker():
             runner = None
             try:
@@ -165,11 +165,10 @@ def main():
                     user_api_provider=user_api_provider,
                     user_api_url=user_api_url,
                     user_api_model=user_api_model,
+                    resume_state=resume_state,
                 )
-                # 断点续跑：注入上次记录的节点位置（分支 key → 节点 id）
-                if checkpoints:
-                    runner.resume_checkpoints = dict(checkpoints)
-                    print(f"[bridge] resume checkpoints: {checkpoints}")
+                if resume_state:
+                    print(f"[bridge] resume state keys: {sorted(resume_state.keys())}")
                 runner._human_input_event = threading.Event()
                 runner._human_input_data = None
                 if dsh_ai_backend:
@@ -265,7 +264,7 @@ def main():
                 args_obj.get("user_api_url"),
                 args_obj.get("user_api_model"),
                 bool(args_obj.get("dsh_ai_backend", False)),
-                checkpoints=args_obj.get("checkpoints") or None,
+                resume_state=args_obj.get("resume_state") or None,
             )
             send_response(req_id, True, {"started": True})
         elif cmd == "get_checkpoint":

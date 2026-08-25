@@ -16,7 +16,7 @@ import type { RunState } from './engine-events'
 import { turnScopesBySession } from './subagent'
 import {
   readTurnScopeFile, readSessionScript, writeSessionScript,
-  readSessionScriptText, readCheckpoint, writeCheckpoint, clearCheckpoint,
+  readSessionScriptText, readPlayResume,
 } from './state-files'
 import { handleCreateSession, handleRunOnSession, handleSaveScript, handleReadScript, collectLlmModels } from './run-control'
 import { appendEvent, appendChatProjected, type GodMirror, type ProjectionRegistry } from './projection'
@@ -363,21 +363,9 @@ export function registerRoutes(ctx: Context, deps: RoutesDeps): void {
           }
           const record = await readSessionScript(resolved.femwaRoot, sessionId)
           const script = await readSessionScriptText(resolved.femwaRoot, sessionId)
-          let checkpoint = await readCheckpoint(resolved.femwaRoot, sessionId)
-          let dirty = false
-          for (const [key, value] of Object.entries(checkpoint)) {
-            if (value === '[END]' || value === '[BREAK]') {
-              delete checkpoint[key]
-              dirty = true
-            }
-          }
-          if (dirty) {
-            if (Object.keys(checkpoint).length === 0) {
-              await clearCheckpoint(resolved.femwaRoot, sessionId)
-            } else {
-              await writeCheckpoint(resolved.femwaRoot, sessionId, checkpoint)
-            }
-          }
+          // 断点位置来自会话记录的 resume 块（引擎从不记录 [END]/[BREAK]，无需清理）。
+          const resumeRec = await readPlayResume(resolved.femwaRoot, sessionId)
+          const checkpoint = resumeRec?.checkpoints ?? {}
           writeJson(res, 200, {
             ok: true,
             hasScript: script !== undefined,

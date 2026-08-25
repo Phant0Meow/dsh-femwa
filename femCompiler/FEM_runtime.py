@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple, Set
 import threading
 import asyncio
 from .femAsync import AsyncEngine, CancelledError
-from femCompiler.task_pause import TaskPauseManager, save_snapshot, restore_snapshot
+from femCompiler.task_pause import TaskPauseManager, save_snapshot, restore_snapshot, _serialize_var
 from dataclasses import dataclass
 from femBridges.getDir.get_dir import get_FEMroot_dir
 from femCompiler.FEM_CLIrenderer import CLIRenderer, emit_step, emit_context_ready, emit_memory_ready
@@ -646,7 +646,8 @@ class FEMRunner:
 
     def __init__(self, script, base_dir: str = ".", verbose: bool = True, event_callback=None,
                  user_api_key: str = None, user_api_provider: str = None,
-                 user_api_url: str = None, user_api_model: str = None):
+                 user_api_url: str = None, user_api_model: str = None,
+                 resume_state: dict = None):
         print("[runtime] FEMRunner.__init__ 开始")
         self.script = script
         self.verbose = verbose
@@ -677,11 +678,18 @@ class FEMRunner:
         self.engine.llm_delay = delay
 
         self.pause_manager = TaskPauseManager()
-        # ── 节点位置检查点：每个分支当前执行到哪个节点 ──
+        # ── 断点状态：位置 + 变量合并视图，经 checkpoint 事件交宿主持久化 ──
         # 记录的是"位置"（node id），不是 action：续跑/改剧本后从该节点重放。
         self.checkpoints: Dict[str, str] = {}
-        # 外部注入的恢复点（断点续跑）：分支 key → 节点 id，节点须在新剧本中存在
-        self.resume_checkpoints: Dict[str, str] = {}
+        # 各分支的变量合并视图（globals ∪ 当前上下文 locals，locals 优先）：
+        # 流程执行期写入会被提升进 ExecutionContext.locals（见 VarManager.set），
+        # 只拍 globals 会拿到过期值——必须逐分支合并快照才反映真实世界。
+        self.checkpoint_vars: Dict[str, Dict[str, Any]] = {}
+        self._last_vars_dump: str = ""   # vars 去重基线：没变化不随事件上行（事件体积）
+        # 外部注入的恢复态（断点续跑）：{checkpoints, session_id, vars}。
+        # session_id 优先级最高——续跑=回到同一个世界（同一场次房间）接着演。
+        self.resume_checkpoints: Dict[str, str] = dict((resume_state or {}).get('checkpoints') or {})
+        self.resume_state: dict = resume_state or {}
         # ── 人类输入等待机制（FastAPI 模式） ──
         self._human_input_event = None
         self._human_input_data = None
@@ -702,8 +710,27 @@ class FEMRunner:
         from femCompiler.db_utils import init_database, get_max_session_id, get_or_create_session, get_next_turn_id, session_exists
         init_database()
 
+        # ── 断点续跑：注入的场次身份优先级最高（宿主已校验剧本指纹未变）。
+        # 场次不存在（台账被清）→ 拒绝失忆续跑：宁可 fresh_start，不演失忆剧。
+        resume_sid = self.resume_state.get('session_id')
+        resumed_session = False
+        if resume_sid not in (None, '', 0):
+            try:
+                sid = int(resume_sid)
+            except (TypeError, ValueError):
+                raise ValueError(f"断点的 session_id 无效: {resume_sid!r}")
+            if not session_exists(sid):
+                raise ValueError(
+                    f"断点指向的场次 {sid} 不存在（运行台账可能已被清空），拒绝失忆续跑；请 fresh_start 重新开演。")
+            self._current_session_id = sid
+            self._current_turn_id = get_next_turn_id(sid)
+            resumed_session = True
+            print(f"[runtime]🔁 断点续跑：复用场次 {sid}（turn {self._current_turn_id}），前情对话照常可见")
+
         session_meta = script.meta.get('session', None)
-        if session_meta is None or str(session_meta).strip().lower() == 'new':
+        if resumed_session:
+            pass  # 场次已由断点注入决定，跳过 meta.session 判定
+        elif session_meta is None or str(session_meta).strip().lower() == 'new':
             # 纯 new 或无声明：无脑新建
             self._current_session_id = get_max_session_id() + 1
             get_or_create_session(session_id=self._current_session_id, title=script.meta.get('name', ''))
@@ -788,6 +815,23 @@ class FEMRunner:
                     self.vm.globals[k] = evaled
                 except (ValueError, SyntaxError):
                     pass
+
+        # 断点续跑：恢复变量快照。__main__ 视图最后应用（分支视图是 fork 时点的
+        # 母上下文快照，主流程视图更新）。随后重申内建变量，防旧值回填覆盖。
+        rs_vars = self.resume_state.get('vars')
+        if isinstance(rs_vars, dict) and rs_vars:
+            merged: Dict[str, Any] = {}
+            ordered_keys = [k for k in rs_vars.keys() if k != '__main__']
+            if '__main__' in rs_vars:
+                ordered_keys.append('__main__')
+            for bk in ordered_keys:
+                bv = rs_vars.get(bk)
+                if isinstance(bv, dict):
+                    merged.update(bv)
+            self.vm.globals.update(merged)
+            print(f"[runtime]🔁 断点续跑：恢复变量 {len(merged)} 项")
+        self.vm.globals['session_id'] = self._current_session_id
+        self.vm.globals['turn_count'] = self._current_turn_id
                     
         # 步数控制（保留）
         self.global_step = 0
@@ -829,19 +873,39 @@ class FEMRunner:
             self._event_callback(event_type, data or {})
 
     def _record_checkpoint(self, branch_key: str, node_id: str) -> None:
-        """记录一个分支当前执行到的节点位置（进入节点前调用）。
+        """记录一个分支当前执行到的节点位置与变量合并视图（进入节点前调用）。
 
         存的是"位置"（node id），续跑时从该节点重放；节点不存在于新剧本
-        时从头跑。每次变化都上行 checkpoint 事件，由宿主持久化。
-        [END]/[BREAK] 是终点/跳出点，永不作为续跑位置记录——否则残留的
-        checkpoint 会让后续每次 run 都从终点"续跑"而整体跳过剧本。
+        时从头跑。[END]/[BREAK] 是终点/跳出点，永不作为续跑位置记录——否则
+        残留的 checkpoint 会让后续每次 run 都从终点"续跑"而整体跳过剧本。
+
+        载荷 {checkpoints, session_id, vars?}：vars 为按 branch_key 累积的
+        合并视图整包，仅内容变化时携带（去重省流量）；宿主按键合并持久化。
         """
         if node_id in ('[END]', '[BREAK]'):
             return
-        if self.checkpoints.get(branch_key) == node_id:
+        position_changed = self.checkpoints.get(branch_key) != node_id
+        # 变量合并视图：globals ∪ 本分支 locals（locals 优先）。
+        ctx = _current_context.get()
+        view = dict(self.vm.globals)
+        if ctx is not None:
+            view.update(ctx.locals)
+        self.checkpoint_vars[branch_key] = {
+            k: _serialize_var(v) for k, v in view.items()
+        }
+        vars_dump = json.dumps(self.checkpoint_vars, ensure_ascii=False, default=str, sort_keys=True)
+        vars_changed = vars_dump != self._last_vars_dump
+        if not position_changed and not vars_changed:
             return
-        self.checkpoints[branch_key] = node_id
-        self._emit_event('checkpoint', {'checkpoints': dict(self.checkpoints)})
+        if position_changed:
+            self.checkpoints[branch_key] = node_id
+        self._last_vars_dump = vars_dump
+        payload: Dict[str, Any] = {'checkpoints': dict(self.checkpoints)}
+        if self._current_session_id:
+            payload['session_id'] = self._current_session_id
+        if vars_changed:
+            payload['vars'] = self.checkpoint_vars
+        self._emit_event('checkpoint', payload)
 
     def _resume_start_for(self, branch_key: str, fallback: str, flow) -> str:
         """续跑起点：该分支上次记录的节点若仍在新剧本中则用之，否则从头。"""
@@ -3505,6 +3569,8 @@ class FEMRunner:
             {
                 'entry': flow.entry,
                 'max_steps': self.global_max_steps,
+                # 引擎场次身份：宿主据此维护 dsh 会话 ↔ fem 场次的一对多账本
+                'session_id': self._current_session_id,
                 # 剧本全部角色（视角切换菜单用）
                 'actors': list(self.script.actors.keys()),
             }
