@@ -14,7 +14,7 @@
  * dependency is react (shell singleton, external in the bundle).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 // Font Awesome Free solid 图标内联组件（currentColor 随文字色）：视角按钮与菜单用。
 import { FaEye, FaPodcast, FaRobot, FaUserSecret } from './fa-icons'
@@ -534,7 +534,6 @@ function femProjectionActorKey(actor: string): string {
 }
 
 /** 应用一条宿主广播；未知形态静默忽略（通道宽松前向兼容）。 */
-let femStreamApplied = 0
 function femStreamApply(msg: FemStreamMsg): void {
   const sid = typeof msg.sid === 'string' ? msg.sid : ''
   const actor = typeof msg.actor === 'string' ? msg.actor : ''
@@ -543,11 +542,6 @@ function femStreamApply(msg: FemStreamMsg): void {
     ? 'reasoning' as const
     : msg.blockKind === 'toolcall' ? 'toolcall' as const : 'text' as const
   const actorKey = femProjectionActorKey(actor)
-  // 诊断采样：首 5 帧 + 每第 100 帧——证明帧到达且键值形态正确。
-  femStreamApplied += 1
-  if (femStreamApplied <= 5 || femStreamApplied % 100 === 0) {
-    console.info(`[dsh-femwa][stream] apply #${femStreamApplied} ${msg.kind}/${blockKind} …${sid.slice(-10)}/${actor}`)
-  }
   if (msg.kind === 'end') {
     if (femStreams.get(sid)?.delete(actorKey) === true) femStreamNotify()
     return
@@ -598,30 +592,19 @@ function femStreamApply(msg: FemStreamMsg): void {
   }
 }
 
-// SSE 单例（引用计数）：首个订阅者开连接，最后一个释放时关闭。
-// 2026-08-25 加固+诊断：apply() 时页面级预开一条（不随锚点卸载关闭——
-// store 常年喂帧，锚点晚挂载也能 read() 到全量缓冲）；onopen/onerror/
-// 首帧打 [dsh-femwa][stream] 低噪日志，直播层缺席时一眼分辨断在哪环。
+// SSE 单例（引用计数）：apply() 时页面级预开一条常驻连接——store 不依赖
+// 锚点挂载才喂帧，锚点晚挂载 read() 也能拿到全量缓冲。
 let femStreamEs: EventSource | undefined
 let femStreamEsRefs = 0
-let femStreamFirstFrameLogged = false
 
 function femStreamAcquire(): () => void {
   femStreamEsRefs += 1
   if (femStreamEs === undefined) {
     femStreamEs = new EventSource('/dsh-femwa/events')
-    femStreamEs.onopen = (): void => { console.info('[dsh-femwa][stream] sse open') }
-    femStreamEs.onerror = (): void => { console.info(`[dsh-femwa][stream] sse error (readyState=${femStreamEs?.readyState})`) }
     femStreamEs.onmessage = (ev: MessageEvent<string>) => {
       try {
         const msg = JSON.parse(ev.data) as { type?: string; data?: Record<string, unknown> }
-        if (msg.type === 'fem_stream') {
-          if (!femStreamFirstFrameLogged) {
-            femStreamFirstFrameLogged = true
-            console.info('[dsh-femwa][stream] first frame received')
-          }
-          femStreamApply((msg.data ?? {}) as FemStreamMsg)
-        }
+        if (msg.type === 'fem_stream') femStreamApply((msg.data ?? {}) as FemStreamMsg)
       } catch {
         // 非 JSON SSE 行忽略
       }
@@ -632,7 +615,6 @@ function femStreamAcquire(): () => void {
     if (femStreamEsRefs <= 0 && femStreamEs !== undefined) {
       femStreamEs.close()
       femStreamEs = undefined
-      femStreamFirstFrameLogged = false
     }
   }
 }
@@ -640,19 +622,9 @@ function femStreamAcquire(): () => void {
 /** React hook：读某主会话某演员的直播块；挂载期间维持 SSE 连接并随帧刷新。 */
 function useFemStream(mainSid: string | undefined, actorKey: string | undefined): readonly FemStreamBlock[] {
   const [blocks, setBlocks] = useState<readonly FemStreamBlock[]>(EMPTY_FEM_BLOCKS)
-  const blocksRef = useRef<readonly FemStreamBlock[]>(EMPTY_FEM_BLOCKS)
   useEffect(() => {
     if (mainSid === undefined || actorKey === undefined) return
-    console.info(`[dsh-femwa][stream] anchor subscribe ${mainSid.slice(-12)}/${actorKey}`)
-    const read = (): void => {
-      const next = femStreams.get(mainSid)?.get(actorKey)?.blocks ?? EMPTY_FEM_BLOCKS
-      // 诊断：空→非空跃迁（直播数据第一次真正抵达这个锚点）
-      if (next.length > 0 && blocksRef.current.length === 0) {
-        console.info(`[dsh-femwa][stream] blocks LIVE ${mainSid.slice(-12)}/${actorKey} n=${next.length} kinds=[${next.map(b => b.kind).join(',')}]`)
-      }
-      blocksRef.current = next
-      setBlocks(next)
-    }
+    const read = (): void => { setBlocks(femStreams.get(mainSid)?.get(actorKey)?.blocks ?? EMPTY_FEM_BLOCKS) }
     read()
     const release = femStreamAcquire()
     femStreamListeners.add(read)
@@ -813,18 +785,13 @@ export function FemDirectorNodeView({ node, useSession, t }: ChatNodeViewProps<'
     }
     return lastKey === node.key
   }, [chat, node.key])
-  // 诊断：首次真正渲染直播区（ref 必须在早退前声明——hooks 顺序铁律）
-  const renderLoggedRef = useRef(false)
   if (!eligible || !isLastDirectorAnchor || blocks.length === 0) return null
-  if (!renderLoggedRef.current) {
-    renderLoggedRef.current = true
-    console.info(`[dsh-femwa][stream] RENDER stream area (director) n=${blocks.length}`)
-  }
   return <FemStreamLive blocks={blocks} t={t} />
 }
 
 /** Render one dsh-femwa/chat line. */
-export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'femwa-role'>) {  const { actor, text, kind, visible } = node.data
+export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'femwa-role'>) {
+  const { actor, text, kind, visible } = node.data
   const sessionId = useSession(snapshot => snapshot.sessionId)
   const view = useView(sessionId)
   // ── 流式直播订阅（2026-08-24 方案B）───────────────────────────────────
@@ -842,13 +809,6 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
   const streamEligible = view !== 'offstage' && kind === 'speaker'
     && winActorKey !== undefined && myActorKey !== undefined
     && (winActorKey === 'god' || winActorKey === myActorKey)
-  // 诊断（2026-08-25）：每个 speaker 行实例只打一次门控取值——直播层缺席时
-  // 一眼分辨「没资格订阅」还是「订阅了没帧」。
-  const gateLoggedRef = useRef(false)
-  if (!gateLoggedRef.current && kind === 'speaker' && sessionId !== undefined && sessionId.startsWith('fem-proj-')) {
-    gateLoggedRef.current = true
-    console.info(`[dsh-femwa][stream] anchor gate sid=${sessionId} win=${winActorKey} actor=${myActorKey} eligible=${streamEligible}`)
-  }
   const liveBlocksRaw = useFemStream(streamEligible ? mainSid : undefined, streamEligible ? myActorKey : undefined)
   const chat = useSession(s => s.chat)
   // 最新行门控：同一演员历史上有多条 speaker 行，只有最新一条允许渲染直播
@@ -863,18 +823,9 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
     }
     return m
   }, [chat])
-  // 防御性 locale：席位缺失/未来回归时退化为 key 本身，绝不因 t 崩掉节点
-  // （2026-08-25 实锤：t 不是函数会让 SlotErrorBoundary 吞掉全部 femwa 行）。
-  const safeT = typeof t === 'function' ? t : (key: string): string => key
-  const codeLabels = useMemo(() => ({ copyLabel: safeT('copy'), copiedLabel: safeT('copied') }), [safeT])
   const liveBlocks = streamEligible && lastSpeakerKeys.get(actor ?? '') === node.key
     ? liveBlocksRaw
     : EMPTY_FEM_BLOCKS
-  const renderLoggedRef = useRef(false)
-  if (liveBlocks.length > 0 && !renderLoggedRef.current) {
-    renderLoggedRef.current = true
-    console.info(`[dsh-femwa][stream] RENDER stream area (speaker) n=${liveBlocks.length}`)
-  }
   // View-perspective filter: in a role view, meta lines (notice/error/
   // thinking) are god-only, and dialogue lines show only when the actor's
   // scope includes this viewer. Absent `visible` = visible to everyone.
@@ -905,27 +856,8 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
         }}>
           {actor ?? 'AI'}
         </div>
-        {liveBlocks.length > 0 && (
-          <div className="fem-stream-root">
-            {liveBlocks.map((block, i) => block.kind === 'reasoning'
-              ? (
-                <FemReasoningRow
-                  key={i}
-                  text={block.text}
-                  running={i === liveBlocks.length - 1}
-                  runningLabel={safeT('row.running')}
-                />
-              )
-              : block.kind === 'toolcall'
-                ? (
-                  <div key={i} className="fem-stream-toolline">
-                    ⚙ {block.name ?? 'tool'}（{block.text.length > 140 ? `${block.text.slice(0, 140)}…` : block.text}）
-                  </div>
-                )
-                : <MarkdownText key={i} text={block.text} streaming codeLabels={codeLabels} />)}
-            <span className="fem-stream-caret" aria-hidden />
-          </div>
-        )}      </div>
+        {liveBlocks.length > 0 && <FemStreamLive blocks={liveBlocks} t={t} />}
+      </div>
     )
   }
   // (kind === 'thinking' 的自绘折叠思考链已按用户要求删除：思考链统一用 dsh 原生 assistant-step 折叠渲染，不再自绘。)
