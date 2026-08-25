@@ -735,7 +735,12 @@ declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
   }
 }
 
-const FEM_DIRECTOR_KEY = '__director__'
+// 导演在帧里的 actor 名（与宿主 engine-events 同款语义）；存储键必须走同
+// 一个消毒函数推导——2026-08-25 实锤教训：曾写死 '__director__' 而宿主发
+// 的是 '导演'（消毒后 _5bfc_6f14），两边暗号对不上，几千帧全部写进无人读
+// 取的格子，零报错零渲染。
+const FEM_DIRECTOR_ACTOR = '导演'
+const FEM_DIRECTOR_KEY = femProjectionActorKey(FEM_DIRECTOR_ACTOR)
 
 const femDirectorDefinition: ConversationNodeDefinition<FemDirectorData> = {
   kind: 'femwa-director',
