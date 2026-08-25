@@ -599,17 +599,29 @@ function femStreamApply(msg: FemStreamMsg): void {
 }
 
 // SSE 单例（引用计数）：首个订阅者开连接，最后一个释放时关闭。
+// 2026-08-25 加固+诊断：apply() 时页面级预开一条（不随锚点卸载关闭——
+// store 常年喂帧，锚点晚挂载也能 read() 到全量缓冲）；onopen/onerror/
+// 首帧打 [dsh-femwa][stream] 低噪日志，直播层缺席时一眼分辨断在哪环。
 let femStreamEs: EventSource | undefined
 let femStreamEsRefs = 0
+let femStreamFirstFrameLogged = false
 
 function femStreamAcquire(): () => void {
   femStreamEsRefs += 1
   if (femStreamEs === undefined) {
     femStreamEs = new EventSource('/dsh-femwa/events')
+    femStreamEs.onopen = (): void => { console.info('[dsh-femwa][stream] sse open') }
+    femStreamEs.onerror = (): void => { console.info(`[dsh-femwa][stream] sse error (readyState=${femStreamEs?.readyState})`) }
     femStreamEs.onmessage = (ev: MessageEvent<string>) => {
       try {
         const msg = JSON.parse(ev.data) as { type?: string; data?: Record<string, unknown> }
-        if (msg.type === 'fem_stream') femStreamApply((msg.data ?? {}) as FemStreamMsg)
+        if (msg.type === 'fem_stream') {
+          if (!femStreamFirstFrameLogged) {
+            femStreamFirstFrameLogged = true
+            console.info('[dsh-femwa][stream] first frame received')
+          }
+          femStreamApply((msg.data ?? {}) as FemStreamMsg)
+        }
       } catch {
         // 非 JSON SSE 行忽略
       }
@@ -620,6 +632,7 @@ function femStreamAcquire(): () => void {
     if (femStreamEsRefs <= 0 && femStreamEs !== undefined) {
       femStreamEs.close()
       femStreamEs = undefined
+      femStreamFirstFrameLogged = false
     }
   }
 }
@@ -629,6 +642,7 @@ function useFemStream(mainSid: string | undefined, actorKey: string | undefined)
   const [blocks, setBlocks] = useState<readonly FemStreamBlock[]>(EMPTY_FEM_BLOCKS)
   useEffect(() => {
     if (mainSid === undefined || actorKey === undefined) return
+    console.info(`[dsh-femwa][stream] anchor subscribe ${mainSid}/${actorKey}`)
     const read = (): void => { setBlocks(femStreams.get(mainSid)?.get(actorKey)?.blocks ?? EMPTY_FEM_BLOCKS) }
     read()
     const release = femStreamAcquire()
@@ -715,6 +729,13 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
   const streamEligible = view !== 'offstage' && kind === 'speaker'
     && winActorKey !== undefined && myActorKey !== undefined
     && (winActorKey === 'god' || winActorKey === myActorKey)
+  // 诊断（2026-08-25）：每个 speaker 行实例只打一次门控取值——直播层缺席时
+  // 一眼分辨「没资格订阅」还是「订阅了没帧」。
+  const gateLoggedRef = useRef(false)
+  if (!gateLoggedRef.current && kind === 'speaker' && sessionId !== undefined && sessionId.startsWith('fem-proj-')) {
+    gateLoggedRef.current = true
+    console.info(`[dsh-femwa][stream] anchor gate sid=${sessionId} win=${winActorKey} actor=${myActorKey} eligible=${streamEligible}`)
+  }
   const liveBlocksRaw = useFemStream(streamEligible ? mainSid : undefined, streamEligible ? myActorKey : undefined)
   const chat = useSession(s => s.chat)
   // 最新行门控：同一演员历史上有多条 speaker 行，只有最新一条允许渲染直播
@@ -1625,6 +1646,9 @@ function ensureFemStreamStyles(): void {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function apply(ctx: any): void {
   ensureFemStreamStyles()
+  // 页面级预开 SSE（引用计数 +1 常驻）：store 不依赖锚点挂载才喂帧，
+  // 锚点晚挂载 read() 也能拿到全量缓冲。
+  femStreamAcquire()
   const slots = ctx?.get?.('slots') ?? ctx?.slots
   if (slots === undefined || typeof slots.inject !== 'function') {
     console.warn('[dsh-femwa] slots service unavailable; UI not registered')
