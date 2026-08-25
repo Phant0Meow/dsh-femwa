@@ -508,22 +508,16 @@ function femStreamNotify(): void {
   })
 }
 
-function femStreamEntry(sid: string, actorKey: string): { blocks: readonly FemStreamBlock[] } {
+function femStreamSet(sid: string, actorKey: string, entry: { blocks: readonly FemStreamBlock[] }): void {
+  // ★ 自建缺失的 sid Map（2026-08-25 崩溃级修复）：此前用可选链
+  //   femStreams.get(sid)?.set(...)，Map 不存在时写入被【静默跳过】且无人
+  //   创建它——所有 fem_stream 帧进黑洞，直播层永远空白、零报错。
   let byActor = femStreams.get(sid)
   if (byActor === undefined) {
     byActor = new Map()
     femStreams.set(sid, byActor)
   }
-  let entry = byActor.get(actorKey)
-  if (entry === undefined) {
-    entry = { blocks: EMPTY_FEM_BLOCKS }
-    byActor.set(actorKey, entry)
-  }
-  return entry
-}
-
-function femStreamSet(sid: string, actorKey: string, entry: { blocks: readonly FemStreamBlock[] }): void {
-  femStreams.get(sid)?.set(actorKey, entry)
+  byActor.set(actorKey, entry)
   femStreamNotify()
 }
 
