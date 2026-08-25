@@ -729,7 +729,10 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
     }
     return m
   }, [chat])
-  const codeLabels = useMemo(() => ({ copyLabel: t('copy'), copiedLabel: t('copied') }), [t])
+  // 防御性 locale：席位缺失/未来回归时退化为 key 本身，绝不因 t 崩掉节点
+  // （2026-08-25 实锤：t 不是函数会让 SlotErrorBoundary 吞掉全部 femwa 行）。
+  const safeT = typeof t === 'function' ? t : (key: string): string => key
+  const codeLabels = useMemo(() => ({ copyLabel: safeT('copy'), copiedLabel: safeT('copied') }), [safeT])
   const liveBlocks = streamEligible && lastSpeakerKeys.get(actor ?? '') === node.key
     ? liveBlocksRaw
     : EMPTY_FEM_BLOCKS
@@ -771,7 +774,7 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
                   key={i}
                   text={block.text}
                   running={i === liveBlocks.length - 1}
-                  runningLabel={t('row.running')}
+                  runningLabel={safeT('row.running')}
                 />
               )
               : block.kind === 'toolcall'
@@ -783,8 +786,7 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
                 : <MarkdownText key={i} text={block.text} streaming codeLabels={codeLabels} />)}
             <span className="fem-stream-caret" aria-hidden />
           </div>
-        )}
-      </div>
+        )}      </div>
     )
   }
   // (kind === 'thinking' 的自绘折叠思考链已按用户要求删除：思考链统一用 dsh 原生 assistant-step 折叠渲染，不再自绘。)
@@ -1732,6 +1734,10 @@ export function apply(ctx: any): void {
     {
       name: 'conversation.chat.node',
       key: 'femwa-role',
+      // locale 席位（2026-08-25 崩溃修复）：不声明则 t 不注入，组件内
+      // t('copy') 直接 TypeError → SlotErrorBoundary 吞掉全部 femwa 节点
+      // （流式锚点也随之消失=「说完才上屏」的真凶）。
+      locale: 'conversation',
     },
     FemwaChatNodeView,
   ))
