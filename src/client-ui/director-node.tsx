@@ -3,9 +3,14 @@
  *
  * 上帝窗里主模型的发言此前要等 assistant/message 落地才整块出现（MIRROR 白
  * 名单无 chunk）。宿主把主模型 chunk 旁路广播成 fem_stream（actor='导演'，
- * 零落盘）；这里给每条 user/message 挂一个锚点节点，只有「最新一条」且存
- * 在活跃导演缓冲时，在其下渲染打字机——主模型回复永远紧跟用户消息落位。
- * （2026-08-26 结构整理自 client.tsx 原样迁出，行为零变化。）
+ * 零落盘）；锚点节点只在「最新一个」且有活跃导演缓冲时，在其下渲染打字机。
+ *
+ * 锚点事件 = step/start（2026-08-26 修正，此前为 user/message）：主模型 React
+ * 多轮（工具调用循环）中间没有新 user/message，第二轮流式会被画在「第一轮
+ * 用户消息」的旧锚点上——视觉上第二轮跑到第一轮发言前面。改随 step/start
+ * 走（每步一个锚点），直播永远落在最新 step 处=已落地内容之后；与演员机制
+ * 同构（speaker 名字行随演员自己的 turn 发）。
+ * （2026-08-26 结构整理自 client.tsx 原样迁出。）
  */
 
 import { useMemo } from 'react'
@@ -15,7 +20,7 @@ import { femProjectionActorKey, useFemStream } from './stream-store'
 import { FemStreamLive } from './fem-stream-live'
 import { useView } from './view-state'
 
-/** One user/message anchor node's data（仅 seq，直播内容走 SSE store）。 */
+/** One step/start anchor node's data（仅 seq，直播内容走 SSE store）。 */
 interface FemDirectorData {
   readonly seq: number
 }
@@ -37,7 +42,8 @@ export const femDirectorDefinition: ConversationNodeDefinition<FemDirectorData> 
   kind: 'femwa-director',
   target: 'chat',
   match: (event) => {
-    if (event.type === 'user/message') return { id: String(event.seq), role: 'start' }
+    // 锚点=step/start：React 多轮每步一个锚点，直播跟随最新步落位（见头注释）。
+    if (event.type === 'step/start') return { id: String(event.seq), role: 'start' }
     return null
   },
   start: (_context, match) => ({ seq: match.event.seq }),
@@ -57,7 +63,7 @@ export const femDirectorDefinition: ConversationNodeDefinition<FemDirectorData> 
   },
 }
 
-/** Render one user/message anchor node in god windows（导演流式）。 */
+/** Render one step/start anchor node in god windows（导演流式）。 */
 export function FemDirectorNodeView({ node, useSession, t }: ChatNodeViewProps<'femwa-director'>) {
   const sessionId = useSession(snapshot => snapshot.sessionId)
   const view = useView(sessionId)
