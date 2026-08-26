@@ -126,6 +126,13 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
   // 前置（早退过滤之前），与文件既有纪律一致。
   const timeline = chat.timeline
   const { hasOpen: hasOpenTurn, startTime: openTurnStart } = useMemo(() => openTurnInfo(timeline), [timeline])
+  // 流尾判定（与 director-node 同款修复）：锚点被后续内容节点（正文气泡/
+  // 工具卡片）越过时状态行不再挂在半中间；直播块仍在时豁免（打字机正画在
+  // 名字行下，状态行与它同生同灭）。
+  const isFlowTail = useMemo(
+    () => chat.order[chat.order.length - 1] === node.key,
+    [chat, node.key],
+  )
   // View-perspective filter: in a role view, meta lines (notice/error/
   // thinking) are god-only, and dialogue lines show only when the actor's
   // scope includes this viewer. Absent `visible` = visible to everyone.
@@ -159,7 +166,8 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
           {actor ?? 'AI'}
         </div>
         {liveBlocks.length > 0 && <FemStreamLive blocks={liveBlocks} t={t} />}
-        {streamEligible && isLatestSpeaker && hasOpenTurn && <FemTurnStatus startTime={openTurnStart} />}
+        {streamEligible && isLatestSpeaker && hasOpenTurn && (isFlowTail || liveBlocks.length > 0)
+          && <FemTurnStatus startTime={openTurnStart} />}
       </div>
     )
   }

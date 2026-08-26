@@ -93,13 +93,22 @@ export function FemDirectorNodeView({ node, useSession, t }: ChatNodeViewProps<'
     }
     return lastKey === node.key
   }, [chat, node.key])
+  // 流尾判定（2026-08-26 间距 bug 修复）：「最新锚点」≠「流末尾」——锚点之后
+  // 落地的内容节点（assistant 气泡/工具卡片）会把状态行甩在流中间，视觉上
+  // 就是"两条工具之间凭空多出一大截"（前后各 16px 列 gap + 26px 行高）。
+  // 状态行只在锚点本身就是消息流最后一个节点时承载；直播块仍在时豁免
+  // （打字机正画在本锚点下，状态行与它同生同灭，流式间隙不闪断）。
+  const isFlowTail = useMemo(
+    () => chat.order[chat.order.length - 1] === node.key,
+    [chat, node.key],
+  )
   // open turn 推导（官方 running 的镜像会话替身）：存在即演出中，全程显示
   // 不闪烁；turn/end 落地即消失。
   const timeline = chat.timeline
   const { hasOpen, startTime } = useMemo(() => openTurnInfo(timeline), [timeline])
   if (!eligible || !isLastDirectorAnchor) return null
   const showStream = blocks.length > 0
-  const showStatus = hasOpen
+  const showStatus = hasOpen && (isFlowTail || showStream)
   if (!showStream && !showStatus) return null
   return (
     <>
