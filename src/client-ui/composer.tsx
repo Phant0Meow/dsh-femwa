@@ -28,7 +28,9 @@
  * guard、Enter 发送/Shift+Enter 原生换行、e.repeat 防连发、按钮 mousedown
  * 保焦点、autofocus(preventScroll)、失败 toast 条（4s 自愈）、busy 只读态、
  * primaryStops——主会话 running 时发送钮变方块 Stop，点击中断主模型当前
- * 回合（mainFace.cancel()，官方 ISession 公开动词；剧本运行控制不在本框）。
+ * 回合（mainFace.cancel()，官方 ISession 公开动词；剧本运行控制不在本框）、
+ * 草稿持久化——官方 chat store persist 同构复刻：单 key JSON 进 localStorage，
+ * 切窗保留、刷新恢复、提交成功清除（mount-seed + 实时 mirror 同官方两段式）。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
@@ -100,6 +102,34 @@ interface SessionStatsProjection {
 }
 
 // ── 工具 ──────────────────────────────────────────────────────────────────
+
+// ── 草稿持久层 ──
+// 官方 chat store persist（'dsh.conversation.chat' 整值 JSON 进 localStorage）
+// 的轻量同构复刻：单 key 按 sessionId 存对象。切窗回来草稿还在、页面刷新也
+// 在；提交成功即清除（官方 submit 后 machine adopt('') 镜像写空的同语义）。
+const DRAFT_STORE_KEY = 'dsh-femwa.composer.drafts'
+
+function readDrafts(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(DRAFT_STORE_KEY)
+    if (raw === null) return {}
+    const parsed = JSON.parse(raw) as unknown
+    return typeof parsed === 'object' && parsed !== null ? parsed as Record<string, string> : {}
+  } catch {
+    return {} // 损坏数据当无草稿；localStorage 缺席（隐私模式）同样降级
+  }
+}
+
+function writeDraft(sid: string, text: string): void {
+  try {
+    const drafts = readDrafts()
+    if (text === '') delete drafts[sid]
+    else drafts[sid] = text
+    localStorage.setItem(DRAFT_STORE_KEY, JSON.stringify(drafts))
+  } catch {
+    // localStorage 不可用：退化为纯内存态（本次挂载内仍有效），不提示
+  }
+}
 
 /**
  * 投影窗 id → 主会话 id。与 host projection-input.ts 兜底剥法同语义：
@@ -458,6 +488,19 @@ export function ProjectionComposer({ useSession, useSessions, getSessionFace }: 
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
   const errorSeqRef = useRef(0)
 
+  // 草稿装载（官方 ConversationSession mount-seed 同款：机器空 && 存储有 →
+  // 回填）。切换投影窗时装载该窗自己的草稿；之后每次输入实时镜像落盘。
+  useEffect(() => {
+    if (sessionId === undefined) return
+    setText(readDrafts()[sessionId] ?? '')
+  }, [sessionId])
+
+  /** 输入变更：state 与持久层同步写（官方 machine mirror 同语义）。 */
+  const changeText = (next: string): void => {
+    setText(next)
+    if (sessionId !== undefined) writeDraft(sessionId, next)
+  }
+
   // 主会话 id：优先 sessions 列表 summary.parentId（host 建窗元数据，与
   // view-button 同款权威来源）；列表尚未载入（手机冷启动直达投影窗）时回退
   // 字符串剥法。selector 返回原始字符串（引用稳定），列表变化自动重算。
@@ -493,7 +536,8 @@ export function ProjectionComposer({ useSession, useSessions, getSessionFace }: 
       .then(async (response) => {
         const data = await response.json().catch(() => ({}) as { ok?: boolean; error?: string }) as { ok?: boolean; error?: string }
         if (data.ok === true) {
-          setText('')
+          // 官方同语义：提交成功清空草稿（state + 持久层一起）。
+          changeText('')
           return
         }
         errorSeqRef.current += 1
@@ -559,7 +603,7 @@ export function ProjectionComposer({ useSession, useSessions, getSessionFace }: 
               rows={2}
               spellCheck={false}
               data-phase={busy ? 'submitting' : 'idle'}
-              onChange={(e) => { setText(e.currentTarget.value) }}
+              onChange={(e) => { changeText(e.currentTarget.value) }}
               onKeyDown={onKeyDown}
               onCompositionStart={() => { composingRef.current = true }}
               onCompositionEnd={() => {
