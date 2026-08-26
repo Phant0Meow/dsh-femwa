@@ -1,0 +1,453 @@
+/**
+ * client-ui/view-button.tsx — 视角菜单按钮（session header actions）。
+ *
+ * 戏外=主会话本体 / 上帝=上帝投影窗 / 角色=角色投影窗；含视角过滤 CSS 注入、
+ * proj 窗母名黑化样式切换、「Fem 编辑器」标签页显示范围控制、视角跳转的
+ * 标签页跟手、子代理计数座位。
+ * （2026-08-26 结构整理自 client.tsx 原样迁出，行为零变化。）
+ */
+
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
+import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
+import { FaEye, FaPodcast, FaRobot, FaUserSecret } from '../fa-icons'
+// 官方下箭头（dsh 子代理计数下拉同款）：视角按钮右侧的展开指示。
+import { CatalogDropdown } from '../lineage-fork.jsx'
+import { type FemwaChatData } from './chat-node'
+import { getView, setView, useView } from './view-state'
+
+// ── 视角跳转的标签页跟手（2026-08-24）─────────────────────────────────────
+// 需求：切视角后落在哪个标签页（对话/Fem 编辑器）跟随「切换前」所在的标签
+// 页，而不是恢复目标窗口自己上次停留的位置。实现：跳转前读当前激活 tab，
+// 记入下面的一次性内存标记；目标窗口的 FemViewButton 挂载后消费标记，把激
+// 活 tab 对齐过去（走官方 tab 点击链路 actions.setView，持久化行为与手点一
+// 致）。不新增任何持久化存储。
+
+/** 「Fem 编辑器」标签页固定文案（本插件 conversation.view 注册的 label）。 */
+const FEM_EDITOR_TAB_LABEL = 'Fem 编辑器'
+/** 对话标签页文案（ui-conversation locales view.chat：中文产品文案为主，英文兜底）。 */
+const CHAT_TAB_LABELS = ['对话', 'Chat']
+
+/** 一次性转移标记：kind=切换前所在的一侧；expiresAt 防 openSession 失败后
+ *  残留污染下一次任意会话切换。 */
+let pendingTabTransfer: { kind: 'editor' | 'chat'; expiresAt: number } | null = null
+
+/** 读当前激活标签页属于哪一侧：编辑器 tab 文本唯一，其余（对话）一律归 chat。 */
+function readActiveTabKind(): 'editor' | 'chat' {
+  const selected = document.querySelector('[role="tab"][aria-selected="true"]')
+  return selected !== null && selected.textContent === FEM_EDITOR_TAB_LABEL ? 'editor' : 'chat'
+}
+
+// ── view-perspective button (session header) ──────────────────────────────
+
+/** FemViewButton 注入能力。 */
+export interface FemViewInjected {
+  /** 打开任意会话（视角菜单跳转投影窗/主会话）。 */
+  openSession(id: string): void
+  /** 查询主会话的投影窗 id 列表（上帝窗 + 角色窗）。 */
+  listProjectionWindows(sid: string): Promise<{ god?: string; actors: Record<string, string> }>
+}
+
+/** Session-header action: switch between god view and per-actor views.
+ *  视角菜单：戏外=主会话本体 / 上帝=上帝投影窗 / 角色=角色投影窗。
+ *  dsh 原生切换显示（主会话与子代理窗同一 UI 位置）。
+ *  2026-08-23：order -10→-20（排到 preset 徽章之前，紧贴 session name）；
+ *  菜单支持点外部收起。 */
+export function FemViewButton({ useSession, useSessions, openSession, listProjectionWindows }: PropsRuntime<'conversation.session.header.actions'> & FemViewInjected) {
+  const sessionId = useSession(snapshot => snapshot.sessionId)
+  const view = useView(sessionId)
+  const [open, setOpen] = useState(false)
+  // 投影窗 id 缓存：{ god?: string, actors: {name: id} }（host 侧幂等创建）。
+  const [proj, setProj] = useState<{ god?: string; actors: Record<string, string> }>({ actors: {} })
+  // The button lives on Fem sessions only: the sessions list records the
+  // preset each session's agent was composed from (agent-preset/selected
+  // keeps it current after a runtime switch), so the menu is ready from boot
+  // for existing Fem sessions and never appears on other modes.
+  //
+  // 归属主会话（2026-08-23 扩展）：视角菜单同时服务两类窗口——
+  //   Fem 主会话（agentPreset=dsh-femwa 且无父）→ mainSid=自身；
+  //   Fem 投影窗（id 前缀 fem-proj-，parentSession 指向主会话）→ mainSid=父会话。
+  // 其余会话（普通子代理/非 fem）mainSid=undefined → 菜单不渲染，不受影响。
+  // 视角状态（viewBySession）与 actors/turn-scopes/projection-windows 三张
+  // 查询一律挂在 mainSid 名下——视角是「剧」的属性，不是「窗」的属性。
+  const mainSid = useSessions((state): string | undefined => {
+    if (typeof sessionId !== 'string') return undefined
+    const summary = state.byId[sessionId]
+    if (summary?.agentPreset === 'dsh-femwa' && summary?.parentId === undefined) return sessionId
+    if (sessionId.startsWith('fem-proj-')) {
+      const pid = summary?.parentId
+      return typeof pid === 'string' ? pid : undefined
+    }
+    return undefined
+  })
+
+  // 「Fem 编辑器」标签页显示范围（2026-08-23 扩展）：Fem 主会话 + proj 窗都
+  // 显示（proj 窗内编辑器数据经 useSessions 解析回主会话，见 FemEditorView）；
+  // 其余会话照旧 DOM 隐藏。tab 列表 = conversation.view 的全部注册条目（无按
+  // 会话过滤的钩子），纯插件方案在 header 挂载时 DOM 隐藏该按钮；本组件随
+  // 会话切换重挂载，fem 家族窗口恢复显示。
+  useEffect(() => {
+    const tab = [...document.querySelectorAll<HTMLElement>('[role="tab"]')]
+      .find(el => el.textContent === 'Fem 编辑器')
+    if (tab === undefined) return
+    tab.style.display = mainSid !== undefined ? '' : 'none'
+    return () => { tab.style.display = '' }
+  }, [mainSid])
+  // Script actors from the host (complete after a run) — the menu's source of
+  // truth; chat-line actors below only backfill before the first run.
+  const [scriptActors, setScriptActors] = useState<string[]>([])
+  useEffect(() => {
+    if (mainSid === undefined) return
+    let cancelled = false
+    void fetch(`/dsh-femwa/actors?sessionId=${encodeURIComponent(mainSid)}`)
+      .then(response => response.json())
+      .then((data: { ok?: boolean; actors?: string[] }) => {
+        if (!cancelled && data.ok === true && data.actors !== undefined && data.actors.length > 0) {
+          setScriptActors(data.actors)
+        }
+      })
+      .catch(() => { /* menu falls back to actors seen in chat */ })
+    return () => { cancelled = true }
+  }, [mainSid])
+
+  // 投影窗 id 列表（host 幂等创建；视角菜单跳转目标）。
+  useEffect(() => {
+    if (mainSid === undefined) return
+    let cancelled = false
+    void listProjectionWindows(mainSid)
+      .then(w => {
+        if (!cancelled) {
+          setProj(w)
+        }
+      })
+      .catch(() => { /* 投影窗未建（未运行过剧本）：菜单降级为旧 CSS 过滤 */ })
+    return () => { cancelled = true }
+  }, [mainSid, listProjectionWindows, scriptActors.length])
+
+  // 点击视角项：打开对应窗（戏外=主会话 / 上帝=上帝窗 / 角色=角色窗）。
+  // 投影窗不可用时（未运行剧本）降级为旧 CSS 过滤视图。视角状态记在
+  // mainSid 名下（投影窗上操作也归属到主会话，保证跨窗状态一致）。
+  // 标签页跟手（2026-08-24）：每个真正 openSession 的分支在跳转「前」读当
+  // 前激活 tab 记入一次性标记，目标窗口挂载后对齐（见文件头说明）。
+  const pickView = (id: string): void => {
+    setOpen(false)
+    if (id === 'offstage') {
+      // 戏外 = 主会话本体；view 状态标记 offstage，CSS 过滤隐藏角色内容
+      // （待主模型恢复后主会话表面回归干净）。投影窗上点戏外 = 跳回主会话。
+      setView(mainSid, 'offstage')
+      if (mainSid !== sessionId) {
+        pendingTabTransfer = { kind: readActiveTabKind(), expiresAt: Date.now() + 5000 }
+        openSession(mainSid)
+      }
+      return
+    }
+    if (id === 'god' && proj.god !== undefined) {
+      setView(mainSid, 'god')
+      pendingTabTransfer = { kind: readActiveTabKind(), expiresAt: Date.now() + 5000 }
+      openSession(proj.god)
+      return
+    }
+    const actorId = proj.actors[id]
+    if (actorId !== undefined) {
+      setView(mainSid, id)
+      pendingTabTransfer = { kind: readActiveTabKind(), expiresAt: Date.now() + 5000 }
+      openSession(actorId)
+      return
+    }
+    // 降级：无投影窗时保持旧行为（CSS 过滤显示）。
+    setView(mainSid, id)
+  }
+
+  const snapshot = useSession(s => s)
+
+  // ── 视角过滤（显示层 CSS）：host 记录镜像 turn → scope 映射，god 全显示；
+  // 角色视角 CSS 隐藏 scope 不含该角色的原生 turn。镜像始终全量（信息完整
+  // 落盘），过滤只影响显示，切换视角不丢任何内容。
+  const [turnScopes, setTurnScopes] = useState<Record<string, string[]>>({})
+  const turnCount = snapshot.turnTimings.size
+  useEffect(() => {
+    if (mainSid === undefined) return
+    let cancelled = false
+    void fetch(`/dsh-femwa/turn-scopes?sessionId=${encodeURIComponent(mainSid)}`)
+      .then(response => response.json())
+      .then((data: { ok?: boolean; scopes?: Record<string, string[]> }) => {
+        if (!cancelled && data.ok === true && data.scopes !== undefined) setTurnScopes(data.scopes)
+      })
+      .catch(() => { /* 视角过滤降级为全显示（信息不丢） */ })
+    return () => { cancelled = true }
+  }, [mainSid, turnCount])
+
+  useEffect(() => {
+    // 原生 assistant turn 的 DOM 锚点：data-chat-flow-key =
+    // "13:assistant-step{turn}:{step}"（dsh 渲染器的稳定契约）。注入 CSS
+    // 隐藏不可见 turn；CSS 属性选择器对流式新增 DOM 自动生效。
+    const STYLE_ID = 'dsh-femwa-view-filter'
+    let style = document.getElementById(STYLE_ID) as HTMLStyleElement | null
+    if (style === null) {
+      style = document.createElement('style')
+      style.id = STYLE_ID
+      document.head.appendChild(style)
+    }
+    if (view === 'god') {
+      style.textContent = ''
+      return
+    }
+    if (view === 'offstage') {
+      // 戏外视角：隐藏全部角色 turn（主会话表面只留用户/系统行）。
+      const hiddenSelectors: string[] = []
+      for (const turn of Object.keys(turnScopes)) {
+        hiddenSelectors.push(`[data-chat-flow-key^="13:assistant-step${turn}:"]`)
+      }
+      style.textContent = hiddenSelectors.length > 0
+        ? `${hiddenSelectors.join(',\n')} { display: none !important }`
+        : ''
+      return
+    }
+    const hiddenSelectors: string[] = []
+    for (const [turn, scope] of Object.entries(turnScopes)) {
+      if (scope.length > 0 && !scope.includes(view)) {
+        hiddenSelectors.push(`[data-chat-flow-key^="13:assistant-step${turn}:"]`)
+      }
+    }
+    style.textContent = hiddenSelectors.length > 0
+      ? `${hiddenSelectors.join(',\n')} { display: none !important }`
+      : ''
+    return () => { style.textContent = '' }
+  }, [view, turnScopes])
+
+  // 点外部收起：菜单打开期间监听 document 的 pointerdown，点容器外任意空白处
+  // 自动收起（与 lineage-fork 官方子代理目录同款交互：pointerdown 即响应，
+  // 鼠标/触摸通用）。点击容器内不经此路径：按钮=toggle 关闭、菜单项=pickView
+  // 关闭，行为不变。注意：必须在 mainSid 早退 return 之前注册（hooks 不能
+  // 条件执行）。
+  const rootRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    if (!open) return
+    const closeOutside = (event: PointerEvent): void => {
+      if (event.target instanceof Node && !rootRef.current?.contains(event.target)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('pointerdown', closeOutside)
+    return () => { document.removeEventListener('pointerdown', closeOutside) }
+  }, [open])
+
+  // fem-proj 母名颜色（2026-08-23 需求1）：投影窗的母 session 名由骨架直接渲染
+  // （非末段非 subagent 的段不经过任何插件槽位），官方样式是 .crumb 的三级灰
+  // （--dsw-alias-label-tertiary）；主会话名的黑来自 .crumbCurrent 的
+  // --dsw-alias-label-primary。用户要求两者一致——把 fem-proj 下第一段面包屑
+  // 覆盖成同一 token（自动跟随深浅主题）。插件侧安全注入点=按当前会话切换全局
+  // 样式文本：本组件在每个打开的会话头都挂载，sessionId 带 fem-proj- 前缀时
+  // 启用规则，切走/卸载即清空。零 DOM 结构改动（MutationObserver 路线弃用，
+  // 上次事故根源）。哈希类名取自 rc.2 构建产物 ui-conversation/lib/client.js
+  // （升级快照时需对照重放）。
+  useEffect(() => {
+    const STYLE_ID = 'dsh-femwa-proj-mother-name'
+    let style = document.getElementById(STYLE_ID) as HTMLStyleElement | null
+    if (style === null) {
+      style = document.createElement('style')
+      style.id = STYLE_ID
+      document.head.appendChild(style)
+    }
+    style.textContent = typeof sessionId === 'string' && sessionId.startsWith('fem-proj-')
+      ? '.c-Z2Na_crumbs .c-Z2Na_crumbSeg:first-child .c-Z2Na_crumb { color: var(--dsw-alias-label-primary); pointer-events: none; }'
+      : ''
+    return () => { style.textContent = '' }
+  }, [sessionId])
+
+  // 标签页跟手·消费端（2026-08-24）：本组件挂在每个 fem 家族窗口的头部，
+  // 视角跳转的目标窗口挂载时从这里消费一次性标记——把激活 tab 对齐到「切
+  // 换前」所在的一侧。轮询至多 ~2s 等 tab 环渲染；已一致则不点击（不多写
+  // 一次持久化 view）。过期/超时一律清标记自愈。
+  useEffect(() => {
+    // 非 fem 家族窗口不消费（mainSid undefined = 普通会话/子代理）：防止
+    // openSession 失败后 5s 内手动切到普通会话时误触发转移。
+    if (pendingTabTransfer === null || mainSid === undefined) return
+    const { kind, expiresAt } = pendingTabTransfer
+    if (Date.now() > expiresAt) {
+      pendingTabTransfer = null
+      return
+    }
+    const wanted = kind === 'editor' ? [FEM_EDITOR_TAB_LABEL] : CHAT_TAB_LABELS
+    let tries = 0
+    const timer = window.setInterval(() => {
+      tries += 1
+      // 只认可见 tab（offsetParent null = display:none，如普通会话上被隐藏
+      // 的「Fem 编辑器」按钮——不可见就不算候选，避免点中隐藏按钮）。
+      const tabs = [...document.querySelectorAll<HTMLElement>('[role="tab"]')]
+        .filter(el => el.offsetParent !== null)
+      const selected = tabs.find(el => el.getAttribute('aria-selected') === 'true')
+      if (selected !== undefined && wanted.includes(selected.textContent ?? '')) {
+        window.clearInterval(timer)
+        pendingTabTransfer = null
+        return
+      }
+      const target = tabs.find(el => wanted.includes(el.textContent ?? ''))
+      if (target !== undefined) {
+        target.click()
+        window.clearInterval(timer)
+        pendingTabTransfer = null
+        return
+      }
+      if (tries >= 20) {
+        window.clearInterval(timer)
+        pendingTabTransfer = null
+      }
+    }, 100)
+    return () => { window.clearInterval(timer) }
+  }, [sessionId])
+
+  const { chatActors, hidden } = useMemo(() => {
+    const actors = new Set<string>()
+    let hiddenCount = 0
+    for (const node of (snapshot.chat?.nodes?.values() ?? [])) {
+      if (node.kind !== 'femwa-role') continue
+      const data = node.data as FemwaChatData | undefined
+      if (data === undefined) continue
+      if (data.actor !== undefined && data.actor.length > 0) actors.add(data.actor)
+      if (view === 'god') continue
+      // sys 运行回执：所有视角都显示（offstage 也放行），不计入隐藏数。
+      if (data.kind === 'sys') continue
+      // offstage：femwa 行全隐藏，计数=全部。
+      if (view === 'offstage' || data.kind === 'notice' || data.kind === 'error' || data.kind === 'thinking') {
+        hiddenCount += 1
+        continue
+      }
+      if (data.visible !== undefined && !data.visible.includes(view)) hiddenCount += 1
+    }
+    return { chatActors: [...actors], hidden: hiddenCount }
+  }, [snapshot, view])
+
+  const actors = scriptActors.length > 0 ? scriptActors : chatActors
+  // Fem 主会话与 Fem 投影窗都显示视角菜单（投影窗上=同一份剧的视角切换）；
+  // 普通子代理/非 fem 会话 mainSid 为空 → 不渲染，完全不受影响。
+  if (mainSid === undefined) return null
+  // 视角栏显示「当前所处视角」：从当前窗口直接推导，而非查 viewBySession
+  // 记录——投影窗自身没有记录（pickView 写在 mainSid 名下），查记录会永远
+  // 落到默认值（2026-08-23 bug：诗人窗上仍显示"上帝视角"）。
+  //   主会话 → 已存储的视角（无记录=offstage，与 currentView 默认一致）；
+  //   god 投影窗 → 'god'；角色投影窗 → 反查 proj.actors 得角色名；
+  //   映射未就绪的 fem-proj-* 窗 → 兜底 'god'。
+  const activeViewId = ((): string | undefined => {
+    if (mainSid === sessionId) {
+      const stored = sessionId === undefined ? undefined : getView(sessionId)
+      return stored ?? 'offstage'
+    }
+    if (sessionId === proj.god) return 'god'
+    for (const [name, winId] of Object.entries(proj.actors)) {
+      if (winId === sessionId) return name
+    }
+    return typeof sessionId === 'string' && sessionId.startsWith('fem-proj-') ? 'god' : undefined
+  })()
+  const label = activeViewId === 'god' ? '上帝视角'
+    : activeViewId === 'offstage' ? '戏外 · 主模型'
+    : activeViewId ?? '上帝视角'
+  const menu = open
+    ? (
+        <div style={{
+          position: 'absolute',
+          top: '100%',
+          left: '0',
+          minWidth: '160px',
+          maxHeight: '300px',
+          overflowY: 'auto',
+          background: 'var(--dsw-surface-1, #fff)',
+          border: '1px solid var(--dsw-border, #ddd)',
+          borderRadius: '8px',
+          boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+          padding: '4px',
+          zIndex: 100,
+          fontSize: '13px',
+        }}>
+          {[
+            { id: 'offstage', label: '戏外 · 主模型', Icon: FaRobot },
+            { id: 'god', label: '上帝视角', Icon: FaPodcast },
+            ...actors.map(actor => ({ id: actor, label: actor, Icon: FaUserSecret })),
+          ].map(item => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => { pickView(item.id) }}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '7px',
+                width: '100%',
+                padding: '6px 10px',
+                border: 'none',
+                borderRadius: '6px',
+                background: item.id === activeViewId ? 'var(--dsw-accent, #4a9eff)' : 'transparent',
+                color: item.id === activeViewId ? '#fff' : 'var(--dsw-text-primary, #222)',
+                cursor: 'pointer',
+                textAlign: 'left',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              <item.Icon size={14} />
+              <span>{item.label}</span>
+            </button>
+          ))}
+        </div>
+      )
+    : null
+  return (
+    <div ref={rootRef} style={{ position: 'relative' }}>
+      <button
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        title={activeViewId === 'god' ? '上帝视角：显示全部消息' : activeViewId === 'offstage' ? '戏外 · 主模型' : `角色视角：仅显示 ${activeViewId} 可见的消息`}
+        onClick={() => { setOpen(value => !value) }}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: '4px',
+          border: 'none',
+          background: 'transparent',
+          padding: 0,
+          color: 'var(--dsw-alias-label-primary, #222)',
+          cursor: 'pointer',
+          fontSize: '12px',
+          whiteSpace: 'nowrap',
+        }}
+      >
+        <FaEye size={12} />
+        <span>{label}</span>
+        {view !== 'god' && hidden > 0 && <span style={{ opacity: 0.75 }}>· 隐藏{hidden}</span>}
+        <span style={{ display: 'inline-flex', alignItems: 'center', transform: open ? 'rotate(180deg)' : undefined, transition: 'transform 150ms ease' }}>
+          <IconChevronDownOutline14 />
+        </span>
+      </button>
+      {menu}
+    </div>
+  )
+}
+
+/** Fem 主会话的子代理计数菜单（actions 尾部座位）：复用 fork 的 CatalogDropdown
+ *  count 变体 + showRunning 运行数文本。归属判定与 FemViewButton 的 mainSid
+ *  同源——只有站在 Fem 主会话本体时渲染；投影窗（子会话的 count 属于其母窗口）
+ *  与普通会话返回 null，不受影响。 */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function FemSubagentCount({ useSession, useSessions, openChild, refresh, setCatalogOpen, t }: any) {
+  const sessionId = useSession((s: { sessionId?: string }) => s.sessionId) as string | undefined
+  const mainSid = useSessions((state): string | undefined => {
+    if (typeof sessionId !== 'string') return undefined
+    const summary = state.byId[sessionId]
+    if (summary?.agentPreset === 'dsh-femwa' && summary?.parentId === undefined) return sessionId
+    return undefined
+  })
+  if (mainSid === undefined) return null
+  return (
+    <CatalogDropdown
+      rootSessionId={mainSid}
+      variant="count"
+      showRunning
+      hideWhenZero
+      useSessions={useSessions}
+      openChild={openChild}
+      refresh={refresh}
+      setCatalogOpen={setCatalogOpen}
+      t={t}
+    />
+  )
+}
