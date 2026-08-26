@@ -61,6 +61,15 @@ const FEM_COMPOSER_CSS = `
 .fem-comp-primary{display:grid;place-items:center;flex:none;width:34px;height:34px;border:none;border-radius:999px;background:var(--dsw-alias-button-info-fill,#3964FE);color:#fff;cursor:pointer;transition:background-color 100ms ease;transform:translateY(-2px)}
 .fem-comp-primary:hover:not(:disabled){background:var(--dsw-alias-button-info-hover)}
 .fem-comp-primary:disabled{opacity:.4;cursor:default}
+/* 空座位幽灵 gap 反制（2026-08-26）：官方 ChatView 用 .flowItem:empty 兜底
+   "decline 的座位不吃列 gap"，但 SlotOutlet 恒输出 <div data-slot
+   style="display:contents"> 包装（ui-renderer 锚点契约）——decline 组件的
+   座位永远有子节点，:empty 永不命中，零高座位照吃 column 的 16px gap。
+   femwa 锚点密度高（user/message+step/start 每步双锚点），工具序列中间叠出
+   N×16px 幽灵间距（实测"两条工具间隔时宽时窄"）。反制=零元素后代的自有
+   座位直接 display:none（:has 全现代浏览器可用）；有内容的座位不受影响。 */
+[data-chat-flow-kind='femwa-director']:not(:has(*)){display:none}
+[data-chat-flow-kind='femwa-role']:not(:has(*)){display:none}
 /* 权限菜单 trigger：官方 PermissionSelect.module.css .trigger 家族逐属性转写
    （fem-comp-perm-*）；菜单体与风险确认弹窗用 ui-primitives 的 Menu /
    RiskConfirmation 官方组件，无需自绘。 */
