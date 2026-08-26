@@ -26,10 +26,12 @@
  *
  * 官方行为对齐清单：mirror 双层自增高（14 行封顶滚动）、IME composition
  * guard、Enter 发送/Shift+Enter 原生换行、e.repeat 防连发、按钮 mousedown
- * 保焦点、autofocus(preventScroll)、失败 toast 条（4s 自愈）、busy 只读态。
+ * 保焦点、autofocus(preventScroll)、失败 toast 条（4s 自愈）、busy 只读态、
+ * primaryStops——主会话 running 时发送钮变方块 Stop，点击中断主模型当前
+ * 回合（mainFace.cancel()，官方 ISession 公开动词；剧本运行控制不在本框）。
  */
 
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from 'react'
 import { IconChevronDownOutline14, Menu, RiskConfirmation } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
@@ -52,6 +54,12 @@ interface ProjectionValueFace {
 interface MainSessionFace {
   readonly projections?: { faceOf(key: string): ProjectionValueFace }
   command?(line: string): Promise<{ ok?: boolean; value?: { matched?: boolean } }>
+  /** 中断主会话当前回合（官方 primaryStops 的 Stop 语义；one-shot 才会被拒，
+   * 主会话是普通会话不受影响）。 */
+  cancel?(): Promise<unknown>
+  /** ObservableSnapshot 半边：对话快照订阅（running 等会话级事实的来源）。 */
+  subscribe?(fn: () => void): () => void
+  getSnapshot?(): unknown
 }
 
 /** client.tsx 注入 face：按会话 id 解析主会话 outward face（sessions.binding）。 */
@@ -120,6 +128,23 @@ function useProjectionValue(face: MainSessionFace | undefined, key: string): unk
   const getSnapshot = useCallback((): unknown => {
     return face?.projections?.faceOf(key).getSnapshot() ?? undefined
   }, [face, key])
+  return useSyncExternalStore(subscribe, getSnapshot)
+}
+
+/**
+ * 订阅主会话 conversation 快照（ObservableSnapshot<ConversationSnapshot> 半边，
+ * useSession 绑定的同一数据源），读 running 等会话级事实。face 引用按会话
+ * identity-stable，deps 稳定不重订阅。
+ * @param face - 主会话 face。
+ * @returns 快照对象（无 face 为 undefined）。
+ */
+function useMainSnapshot(face: MainSessionFace | undefined): { running?: boolean } | undefined {
+  const subscribe = useCallback((onChanged: () => void): (() => void) => {
+    return face?.subscribe?.(onChanged) ?? (() => { /* 无 face：空订阅 */ })
+  }, [face])
+  const getSnapshot = useCallback((): { running?: boolean } | undefined => {
+    return face?.getSnapshot?.() as { running?: boolean } | undefined
+  }, [face])
   return useSyncExternalStore(subscribe, getSnapshot)
 }
 
@@ -442,9 +467,19 @@ export function ProjectionComposer({ useSession, useSessions, getSessionFace }: 
     if (typeof pid === 'string' && pid.length > 0) return pid
     return resolveMainSid(sessionId)
   })
-  // 主会话 face：binding() 是官方注释明示的 render-safe 纯解析（无副作用），
-  // 渲染体直调即可；列表异步就绪后 selector 重算驱动重渲染，届时解析成功。
-  const mainFace = mainSid === undefined ? undefined : getSessionFace?.(mainSid)
+  // 主会话 face（投影窗是主会话的遥控器：权限菜单/统计行/停止钮都读它）。
+  // binding() 官方注释明示 render-safe 纯解析且 per-session identity-stable；
+  // useMemo 按 mainSid 缓存即引用稳定（mainSid 有值 = 会话已在列表 = 必解析
+  // 成功），uSES 订阅不会每渲染重挂。
+  const mainFace = useMemo(
+    () => mainSid === undefined ? undefined : getSessionFace?.(mainSid),
+    [mainSid, getSessionFace],
+  )
+  const mainSnapshot = useMainSnapshot(mainFace)
+  // 官方 primaryStops 同语义：主模型回合进行中 → 主按钮变 Stop。
+  // （剧本运行中主会话 agent 通常空闲——引擎主导，此时保持发送态属正确行为：
+  // 剧本的停止入口在 femGen 运行控制，不在本输入框。）
+  const mainRunning = mainSnapshot?.running === true
 
   const submit = (): void => {
     const value = text.trim()
@@ -542,15 +577,24 @@ export function ProjectionComposer({ useSession, useSessions, getSessionFace }: 
             <button
               type="button"
               className="fem-comp-primary"
-              aria-label={busy ? '发送中' : '发送'}
-              disabled={busy || text.trim().length === 0}
+              aria-label={mainRunning ? '停止' : busy ? '发送中' : '发送'}
+              disabled={mainRunning ? mainFace?.cancel === undefined : busy || text.trim().length === 0}
               onMouseDown={keepFocus}
-              onClick={submit}
+              onClick={mainRunning
+                ? () => { void mainFace?.cancel?.()?.catch(() => { /* 失败经主会话快照 promptError 呈现（官方 stop 同语义） */ }) }
+                : submit}
             >
-              {/* 官方 InputBar 同款箭头 glyph（figma IconButton 34:10465）。 */}
-              <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
-                <path d="M8.3125 0.980183C8.66767 1.0531 8.97902 1.20418 9.2627 1.43233C9.48724 1.61297 9.73029 1.85793 9.97949 2.10714L14.707 6.83468L13.293 8.24874L9 3.95577V15.0417H7V3.95577L2.70703 8.24874L1.29297 6.83468L6.02051 2.10714C6.26971 1.85793 6.51277 1.61297 6.7373 1.43233C6.97662 1.23986 7.28445 1.04402 7.6875 0.980183C7.8973 0.947006 8.1031 0.95516 8.3125 0.980183Z" fill="currentColor" />
-              </svg>
+              {/* 官方 InputBar 同款 glyph：running=方块 Stop（primaryStops），
+                  空闲=箭头 Send（figma IconButton 34:10465）。 */}
+              {mainRunning ? (
+                <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
+                  <rect x="3" y="3" width="10" height="10" rx="3" fill="currentColor" />
+                </svg>
+              ) : (
+                <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
+                  <path d="M8.3125 0.980183C8.66767 1.0531 8.97902 1.20418 9.2627 1.43233C9.48724 1.61297 9.73029 1.85793 9.97949 2.10714L14.707 6.83468L13.293 8.24874L9 3.95577V15.0417H7V3.95577L2.70703 8.24874L1.29297 6.83468L6.02051 2.10714C6.26971 1.85793 6.51277 1.61297 6.7373 1.43233C6.97662 1.23986 7.28445 1.04402 7.6875 0.980183C7.8973 0.947006 8.1031 0.95516 8.3125 0.980183Z" fill="currentColor" />
+                </svg>
+              )}
             </button>
           </div>
         </div>
