@@ -7,7 +7,7 @@
  * （2026-08-26 结构整理自 client.tsx 原样迁出，行为零变化。）
  */
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { FaEye, FaPodcast, FaRobot, FaUserSecret } from '../fa-icons'
@@ -96,19 +96,45 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
   // Script actors from the host (complete after a run) — the menu's source of
   // truth; chat-line actors below only backfill before the first run.
   const [scriptActors, setScriptActors] = useState<string[]>([])
-  useEffect(() => {
-    if (mainSid === undefined) return
-    let cancelled = false
-    void fetch(`/dsh-femwa/actors?sessionId=${encodeURIComponent(mainSid)}`)
+  // 拉取本会话角色列表（host 内存 sessionActors 优先，miss 时 turn_scopes 文件
+  // 回退）。seq 序号防竞态：旧响应晚到不得覆盖新值；切会话时 effect cleanup
+  // 递增 seq 作废全部在途请求（原实现 cancelled 标志同语义）。
+  const actorsFetchSeq = useRef(0)
+  const refreshActors = useCallback((sid: string): void => {
+    const seq = ++actorsFetchSeq.current
+    void fetch(`/dsh-femwa/actors?sessionId=${encodeURIComponent(sid)}`)
       .then(response => response.json())
       .then((data: { ok?: boolean; actors?: string[] }) => {
-        if (!cancelled && data.ok === true && data.actors !== undefined && data.actors.length > 0) {
+        if (seq !== actorsFetchSeq.current) return
+        if (data.ok === true && data.actors !== undefined && data.actors.length > 0) {
           setScriptActors(data.actors)
         }
       })
       .catch(() => { /* menu falls back to actors seen in chat */ })
-    return () => { cancelled = true }
-  }, [mainSid])
+  }, [])
+  useEffect(() => {
+    if (mainSid === undefined) return
+    refreshActors(mainSid)
+    return () => { actorsFetchSeq.current += 1 }
+  }, [mainSid, refreshActors])
+  // 每次 run 即刷新菜单角色（2026-08-26 用户拍板「每次 run 工具被调用的时候，
+  // 同时更新视角选择菜单」）：此前 scriptActors 只在 mainSid 变化时拉取一次，
+  // 同会话换跑新剧本后菜单仍是上次的角色。引擎 flow_start 无论由前端按钮还是
+  // femwa-run 工具发起都会经全局 SSE 广播，且广播前 host 已把新角色写入
+  // sessionActors——这里收到 flow_start 即重新 fetch，由 host 按 sessionId
+  // 权威裁决（别家会话开演误触发也无害）。scriptActors 更新后，下方投影窗
+  // 列表 effect（deps 含 scriptActors.length）自动重拉，菜单项与跳转目标同步。
+  useEffect(() => {
+    if (mainSid === undefined) return
+    const es = new EventSource('/dsh-femwa/events')
+    es.onmessage = (ev: MessageEvent<string>): void => {
+      try {
+        const msg = JSON.parse(ev.data) as { type?: string }
+        if (msg.type === 'flow_start') refreshActors(mainSid)
+      } catch { /* 非 JSON SSE 行忽略 */ }
+    }
+    return () => es.close()
+  }, [mainSid, refreshActors])
 
   // 投影窗 id 列表（host 幂等创建；视角菜单跳转目标）。
   useEffect(() => {
