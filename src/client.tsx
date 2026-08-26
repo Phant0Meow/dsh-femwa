@@ -30,7 +30,7 @@ import { FemDirectorNodeView, femDirectorDefinition } from './client-ui/director
 import { FemEditorView, type ScriptViewInjected } from './client-ui/editor-view'
 import { FemButton, type FemButtonInjected } from './client-ui/fem-button'
 import { FemSubagentCount, FemViewButton, type FemViewInjected } from './client-ui/view-button'
-import { ProjectionComposer } from './client-ui/composer'
+import { ProjectionComposer, type ProjectionComposerInjected } from './client-ui/composer'
 
 /** Peer packages this plugin needs injected. */
 export const inject: string[] = ['slots', 'conversationEvents', 'sessions', 'workspaces']
@@ -60,6 +60,8 @@ export function apply(ctx: any): void {
     openSubagent?(address: { parentSessionId: string; childSessionId: string; mode: string }): void
     refreshSubagents?(parentSessionId: string): void
     setSubagentCatalogOpen?(parentSessionId: string, open: boolean): void
+    /** 官方公开解析面（service.ts binding()）：按 id 取会话 outward face。 */
+    binding?(id: string): { session?: unknown } | undefined
   } | undefined
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const workspaces = ctx?.get?.('workspaces') as {
@@ -316,7 +318,20 @@ export function apply(ctx: any): void {
 
   // 投影窗 composer：selector 匹配 fem-proj-* 会话 → 可输入 composer
   // （替代 dsh 默认的 SubagentReadOnlyComposer 只读链）。priority -20
-  // < subagent 的 -10：先匹配我们，未命中才落到只读链。
+  // < subagent 的 -10：先匹配我们，未命中才落到只读链。inject 提供主会话
+  // face 解析（权限菜单/统计行读主会话数据用）。
+  const composerInjected = (): ProjectionComposerInjected => ({
+    getSessionFace: (sid: string) => {
+      try {
+        const binding = sessions?.binding?.(sid)
+        // SessionFace 鸭子类型由消费端（composer.tsx MainSessionFace）声明。
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        return binding?.session as any
+      } catch {
+        return undefined
+      }
+    },
+  })
   slots.inject('conversation.composer', () => slots.register(
     {
       name: 'conversation.composer',
@@ -326,6 +341,7 @@ export function apply(ctx: any): void {
         if (typeof sid === 'string' && sid.startsWith('fem-proj-')) return { isProjection: true }
         return null
       },
+      inject: composerInjected,
     },
     ProjectionComposer,
   ))
