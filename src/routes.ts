@@ -19,7 +19,8 @@ import {
   readSessionScriptText, readPlayResume,
 } from './state-files'
 import { handleCreateSession, handleRunOnSession, handleSaveScript, handleReadScript, collectLlmModels } from './run-control'
-import { appendEvent, appendChatProjected, type GodMirror, type ProjectionRegistry } from './projection'
+import { appendEvent, appendChatProjected, type ProjectionRegistry } from './projection'
+import { type GodMirror } from './god-mirror'
 import { randomUUID } from 'node:crypto'
 import { appendFileSync } from 'node:fs'
 import { join } from 'node:path'

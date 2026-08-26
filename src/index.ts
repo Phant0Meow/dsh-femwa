@@ -9,7 +9,8 @@
  *   persona.ts       Fem 会话身份证 + 导演手册/运行通知注入
  *   http.ts          HTTP 小工具箱（readBody/writeJson/SSE 广播）
  *   state-files.ts   存档管理员（checkpoint/turn_scopes/session_script 文件族)
- *   projection.ts    投影窗管家（建窗/唤醒/投影 + 上帝窗镜像）
+ *   projection.ts    投影窗管家（建窗/唤醒/投影 + chat 行写入）
+ *   god-mirror.ts    主会话→上帝窗镜像（实时监听 + 水位补齐，2026-08-26 自 projection 迁出）
  *   subagent.ts      AI 演员经纪人（引擎 AI 节点 → dsh 子代理执行与事件镜像）
  *   engine-events.ts 演出中的总调度（pre-step 门卫 + 输入桥 + 引擎事件 switch）
  *   run-control.ts   开演流程（startRunOnSession + 剧本读写 handler）
@@ -53,7 +54,8 @@ import { FemwaBridge } from './bridge'
 import { FEM_PRESET, presetOf, isFemAgent, registerPersonaHooks } from './persona'
 import { broadcastSse } from './http'
 import { readSessionScript, readSessionScriptText, writeSessionScript } from './state-files'
-import { createProjectionRegistry, createGodMirror, awakenedDisposers } from './projection'
+import { createProjectionRegistry, awakenedDisposers } from './projection'
+import { createGodMirror } from './god-mirror'
 import { type RunState, registerEngineEventHandlers } from './engine-events'
 import { startRunOnSession } from './run-control'
 import { registerRoutes } from './routes'
