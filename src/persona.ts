@@ -74,7 +74,10 @@ export function injectFemwaDocs(agentCtx: Context): (() => void) | undefined {
       text: `fems 剧本语言完整语法文档在：${packageRoot}语法文档.md（速查表和最小模板已在你的 persona 里；memory/context/module/file: 地址规则等冷门语法查这里）。`
         + `示例剧本在：${packageRoot}examples/（goal-loop.fems 循环+变量退出 / group-chat.fems par+@func 随机间隔 / discussion.fems for+if+par+人类拍板 / town.fems 动态 scope+add/remove 移动）。`
         + '写剧本前先读一个最接近需求的示例照着改；写复杂剧本前建议把 examples/ 整体读一遍，学习 scope/vars/flow 的常见套路。'
-        + 'file: 地址规则：相对路径=相对剧本文件所在目录解析；剧本未保存（纯文本直接运行）时只支持绝对路径。',
+        + 'file: 地址规则：相对路径=相对剧本文件所在目录解析；剧本未保存（纯文本直接运行）时只支持绝对路径。'
+        + `运行记录查询：每场演出的台账在 user_data/memory/Chronica.wor（SQLite/WAL，mode=ro 只读连接即可，不影响运行中的引擎，无需停演再查）；`
+        + `插件根目录有现成查询器 ${packageRoot}chronica.py——「python chronica.py」看最新场次的发言流，「python chronica.py 场次号」看指定场次，「--list N」列最近 N 场一览，「--scope」让每行附带可见用户/可见角色信息（排查视野类问题用）。`
+        + '输出分两幕：【对话流】=showprompt 旁白+AI 发言+人类输入（这是戏本身）；【幕后指令】=节点 prompt（教 AI 怎么说话用的，不属于对话流）。',
     })
   } catch (error: unknown) {
     console.log(`[dsh-femwa] femwa:docs section inject failed: ${String(error)}`)

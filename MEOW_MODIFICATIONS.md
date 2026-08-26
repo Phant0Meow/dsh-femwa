@@ -1564,3 +1564,24 @@ FEMEditor 手机端插件模式 mobileFs useState(true) 每次挂载默认全屏
 2. src/client.tsx：删除 arrivedViaViewJumpRef 快照与 initialMobileFs 传参（7b90594 管道整体撤除）；pendingTabTransfer 标签页跟手保留
 ### 行为
 任何挂载（视角跳转/手动开窗/切 tab 重挂载）一律 header 在上；全屏键进沉浸、返回键退出；独立模式与桌面端不读 mobileFs 零影响。
+
+## 2026-08-25 引擎修复：for 循环出口边被吞，循环后首个动作节点被静默跳过
+### 缘起
+随手写《深夜食堂新品企划》（工作区 femwa/深夜食堂企划.fems）实测发现：`for ... -> [judge]:评审` 的评审动作从未发起 LLM 调用（Chronica react_steps 8 条而非 10 条；子代理会话目录只有 8 个），定稿同样被跳过；流程却因「顺藤摸瓜」兜底直达颁奖/END，戏看似演完——违反「不许静默吞错」红线。
+### 根因
+FEM_runtime.py `_run_for_loop`：网关只有无条件出边时（解析器保证注册顺序=体内链先、块后出口行后），旧代码把全部出边塞进 loop_entries，exit_edge=None；循环结束走「从入口顺藤摸瓜」兜底，返回了出口节点的下一个节点（如 [judge]→[颁奖]），夹在中间的动作节点整个被绕过。discussion.fems 同款写法同受影响。
+### 修改明细
+1. femCompiler/FEM_runtime.py `_run_for_loop` else 分支：无条件出边第一条=循环体入口，第二条（若有）=出口 exit_edge；>2 条无条件出边直接 raise ValueError（响亮报错，不静默）。
+2. 回归测试：tests/repro_for_exit.py + python/for-exit-verify.fems（零 LLM，@assign 复刻「for→[judge]→if→颁奖 / for→[final]→END」骨架，断言 10 个动作全按序执行且 good_hits==1）。
+### 验证
+- pytest 全量 Python 测试 69 passed（test_parser/flow_events/par_nested_for/par_if_dispatch/mind/flow_ref_validation/out_whitelist/town_structure/stop 等）
+- 静态扫描 examples/+python/+tests/ 全部 .fems：无任何 for 网关 >2 条无条件出边（werewolf-mind.fems 编译失败系既有问题，与本改动无关）
+- 全新 bridge 子进程跑 repro_for_exit.py：✅ PASS（序列 开场→构思×2→提案×2→judge→颁奖→感言×2→final）
+### 生效条件
+femCompiler 是常驻 bridge 子进程启动时一次性 import——GUI 内运行需重启 3081 才用上新代码（与待办中既有的 3081 重启项合并为同一次）；直接 python 调引擎的路径即时生效。
+## 2026-08-26 新增台账查询器 chronica.py + femwa:docs 指路
+### 内容
+1. 插件根目录新增 chronica.py（与 fem-chat.mjs 同族的剧场应急工具）：直连活体 user_data/memory/Chronica.wor（WAL mode=ro 只读，引擎运行中可查），无参=最新场次发言流 / 场次号=指定场次 / --list N=最近N场 / --scope=逐行附带可见用户与可见角色。输出按设计理念分两幕：【对话流】=showprompt 旁白+AI 发言+人类输入；【幕后指令】=节点 prompt（不属对话流）。判别依据 dialog.user_id：femshow-*=旁白 / fems-*=指令 / 其余=真人。
+2. src/persona.ts injectFemwaDocs 的 femwa:docs section 追加「运行记录查询」段：指路 chronica.py（${packageRoot} 运行时插值，跨机器正确）+ 四个用法 + 对话流/幕后指令两幕说明。
+### 生效条件
+host 改动——需重启 3081 后新注入文本才出现（注意与 3080 侧重构窗口协调，后构建者胜）。

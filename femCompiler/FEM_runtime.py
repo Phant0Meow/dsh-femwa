@@ -1464,9 +1464,20 @@ class FEMRunner:
                         )
                     exit_edge = e
         else:
-            # 没有条件边：第一条是无条件入口边，如果只有一条出边就既是入口也是出口
-            for e in all_out_edges:
-                loop_entries.append(e)
+            # 没有条件边：第一条是循环体入口；若还有其余出边，最后一条是
+            # 循环出口（解析器保证注册顺序：for 块体内链先、块后出口行后）。
+            # 此前把全部出边都当入口，出口边被吞进 loop_entries，导致
+            # exit_edge=None，循环结束后「顺藤摸瓜」直接跳到出口节点的
+            # 下一个节点——夹在 for 与后续节点之间的动作（如评审/定稿）
+            # 被静默跳过不执行。
+            if len(all_out_edges) > 2:
+                raise ValueError(
+                    f"For 循环节点 {gateway_id} 存在多条无条件出边 "
+                    f"({[e.target for e in all_out_edges]})：至多一条循环体入口 + 一条出口。"
+                )
+            loop_entries.append(all_out_edges[0])
+            if len(all_out_edges) == 2:
+                exit_edge = all_out_edges[1]
         # ── 诊断日志 ──
         print(f"[runtime]   loop_entries = {[(e.target, e.condition) for e in loop_entries]}")
         print(f"[runtime]   exit_edge = {exit_edge.target if exit_edge else None}")
