@@ -19,15 +19,19 @@ import { createPortal } from 'react-dom'
 // Font Awesome Free solid 图标内联组件（currentColor 随文字色）：视角按钮与菜单用。
 import { FaEye, FaPodcast, FaRobot, FaUserSecret } from './fa-icons'
 // 官方下箭头（dsh 子代理计数下拉同款）：视角按钮右侧的展开指示。
-// MarkdownText：官方正文渲染器（基线件，shell 同一实例）——投影窗流式方案B
-// 的打字机正文与原生消息像素同款的关键。
-import { IconChevronDownOutline14, MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
+// （MarkdownText 已随 FemStreamLive 迁至 client-ui/fem-stream-live.tsx 使用。）
+import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { ConversationNodeDefinition } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import FEMEditor from '../femGen/src/FemWorAuto'
 import { SubagentHeaderLineage as FemLineage, CatalogDropdown } from './lineage-fork.jsx'
-import { FemReasoningRow } from './fem-reasoning-row'
+// （FemReasoningRow 已随 FemStreamLive 迁至 client-ui/fem-stream-live.tsx 使用。）
+// client-ui 拆出件（2026-08-26 结构整理）：store/样式/直播渲染件原样迁出。
+import { ensureFemStreamStyles } from './client-ui/styles'
+import { EMPTY_FEM_BLOCKS, femProjectionActorKey, femStreamAcquire, useFemStream } from './client-ui/stream-store'
+import { FemStreamLive } from './client-ui/fem-stream-live'
+import { getView, setView, useView } from './client-ui/view-state'
 
 /** 本页面实例 id：快照写带上它，host 广播时原样带回；前端跳过自己的
  * script_changed 广播（否则自己写完→自己重拉→白转一圈还压住后续输入）。 */
@@ -422,219 +426,7 @@ interface FemwaChatData {
   readonly seq: number
 }
 
-// ── view perspective state (per session) ───────────────────────────────────
-// 'god' shows everything; `@actor` filters chat lines to what that actor's
-// scope can see. Module-level per-session store + tiny subscribe, so both the
-// header button and the chat-line renderer share one source of truth.
-
-const viewBySession = new Map<string, string>()
-const viewListeners = new Map<string, Set<() => void>>()
-
-function currentView(sessionId: string | undefined): string {
-  if (sessionId === undefined) return 'god'
-  const stored = viewBySession.get(sessionId)
-  if (stored !== undefined) return stored
-  // 默认视图：投影窗=fem-proj- 前缀）=上帝视角全显；主会话=戏外（纯 DSH
-  // 原生 user+主模型页面，femwa 行全隐藏——含旧版本写进主会话的历史残留行）。
-  return sessionId.startsWith('fem-proj-') ? 'god' : 'offstage'
-}
-
-function setView(sessionId: string, view: string): void {
-  viewBySession.set(sessionId, view)
-  const listeners = viewListeners.get(sessionId)
-  if (listeners === undefined) return
-  for (const listener of listeners) listener()
-}
-
-function subscribeView(sessionId: string | undefined, listener: () => void): () => void {
-  if (sessionId === undefined) return () => {}
-  let listeners = viewListeners.get(sessionId)
-  if (listeners === undefined) {
-    listeners = new Set()
-    viewListeners.set(sessionId, listeners)
-  }
-  listeners.add(listener)
-  return () => {
-    listeners.delete(listener)
-    if (listeners.size === 0) viewListeners.delete(sessionId)
-  }
-}
-
-/** React hook: the session's current view, re-rendering on switches. */
-function useView(sessionId: string | undefined): string {
-  const [view, setLocal] = useState(currentView(sessionId))
-  useEffect(() => {
-    if (sessionId === undefined) return
-    setLocal(currentView(sessionId))
-    return subscribeView(sessionId, () => setLocal(currentView(sessionId)))
-  }, [sessionId])
-  return view
-}
-
-// ── fem_stream 直播缓冲（2026-08-24 方案B：SSE 旁路零落盘）────────────────
-// host 的 runAiSubagent 把演员 chunk 旁路广播到 /dsh-femwa/events；这里按
-// 「主会话 id + actorKey」分桶缓冲，speaker 锚点行在名字正下方渲染官方同
-// 款打字机。块完成（block_end）即从缓冲移除——原生镜像几乎同时落地接管；
-// run 结束（end）整桶清空兜底。全部内存态，不写任何会话日志。
-
-interface FemStreamBlock {
-  kind: 'text' | 'reasoning' | 'toolcall'
-  text: string
-  /** toolcall 块：工具名（首帧带 name 的 delta 合并进来）。 */
-  name?: string
-}
-
-interface FemStreamMsg {
-  kind: 'start' | 'delta' | 'block_end' | 'end'
-  sid?: unknown
-  actor?: unknown
-  blockKind?: unknown
-  text?: unknown
-  name?: unknown
-}
-
-const EMPTY_FEM_BLOCKS: readonly FemStreamBlock[] = []
-
-/** 主会话id+actorKey → 该演员当前未落地的直播块序列（copy-on-write）。 */
-const femStreams = new Map<string, Map<string, { blocks: readonly FemStreamBlock[] }>>()
-const femStreamListeners = new Set<() => void>()
-let femStreamRaf = 0
-
-function femStreamNotify(): void {
-  if (femStreamRaf !== 0) return
-  femStreamRaf = requestAnimationFrame(() => {
-    femStreamRaf = 0
-    for (const listener of [...femStreamListeners]) listener()
-  })
-}
-
-function femStreamSet(sid: string, actorKey: string, entry: { blocks: readonly FemStreamBlock[] }): void {
-  // ★ 自建缺失的 sid Map（2026-08-25 崩溃级修复）：此前用可选链
-  //   femStreams.get(sid)?.set(...)，Map 不存在时写入被【静默跳过】且无人
-  //   创建它——所有 fem_stream 帧进黑洞，直播层永远空白、零报错。
-  let byActor = femStreams.get(sid)
-  if (byActor === undefined) {
-    byActor = new Map()
-    femStreams.set(sid, byActor)
-  }
-  byActor.set(actorKey, entry)
-  femStreamNotify()
-}
-
-function findLastFemBlock(blocks: readonly FemStreamBlock[], kind: 'text' | 'reasoning' | 'toolcall'): number {
-  for (let i = blocks.length - 1; i >= 0; i--) {
-    if (blocks[i]?.kind === kind) return i
-  }
-  return -1
-}
-
-/** 投影窗 id 的 actorKey 消毒（与宿主 projectionActorKey 同算法，前端比对用）。 */
-function femProjectionActorKey(actor: string): string {
-  return Array.from(actor).map(ch => (/[A-Za-z0-9_-]/.test(ch) ? ch : `_${(ch.codePointAt(0) ?? 0).toString(16)}`)).join('')
-}
-
-/** 应用一条宿主广播；未知形态静默忽略（通道宽松前向兼容）。 */
-function femStreamApply(msg: FemStreamMsg): void {
-  const sid = typeof msg.sid === 'string' ? msg.sid : ''
-  const actor = typeof msg.actor === 'string' ? msg.actor : ''
-  if (sid.length === 0 || actor.length === 0) return
-  const blockKind = msg.blockKind === 'reasoning'
-    ? 'reasoning' as const
-    : msg.blockKind === 'toolcall' ? 'toolcall' as const : 'text' as const
-  const actorKey = femProjectionActorKey(actor)
-  if (msg.kind === 'end') {
-    if (femStreams.get(sid)?.delete(actorKey) === true) femStreamNotify()
-    return
-  }
-  const prev = femStreams.get(sid)?.get(actorKey)?.blocks ?? EMPTY_FEM_BLOCKS
-  if (msg.kind === 'start') {
-    femStreamSet(sid, actorKey, { blocks: [...prev, { kind: blockKind, text: '' }] })
-    return
-  }
-  if (msg.kind === 'delta') {
-    const text = typeof msg.text === 'string' ? msg.text : ''
-    const name = typeof msg.name === 'string' && msg.name.length > 0 ? msg.name : undefined
-    if (blockKind === 'toolcall') {
-      // 工具调用：聚合到「最后一个 toolcall 块」；无则新建（宿主不发 start）。
-      const lastIdx = findLastFemBlock(prev, 'toolcall')
-      if (lastIdx >= 0) {
-        const target = prev[lastIdx] as FemStreamBlock
-        const next = prev.slice()
-        next[lastIdx] = {
-          ...target,
-          text: target.text + text,
-          ...name !== undefined && !target.name ? { name } : {},
-        }
-        femStreamSet(sid, actorKey, { blocks: next })
-      } else {
-        femStreamSet(sid, actorKey, { blocks: [...prev, { kind: 'toolcall', text, ...name !== undefined ? { name } : {} }] })
-      }
-      return
-    }
-    if (text.length === 0) return
-    const lastIdx = findLastFemBlock(prev, blockKind)
-    if (lastIdx >= 0) {
-      const target = prev[lastIdx] as FemStreamBlock
-      const next = prev.slice()
-      next[lastIdx] = { ...target, text: target.text + text }
-      femStreamSet(sid, actorKey, { blocks: next })
-    } else {
-      femStreamSet(sid, actorKey, { blocks: [...prev, { kind: blockKind, text }] })
-    }
-    return
-  }
-  if (msg.kind === 'block_end') {
-    const lastIdx = findLastFemBlock(prev, blockKind)
-    if (lastIdx < 0) return
-    const next = prev.slice()
-    next.splice(lastIdx, 1)
-    femStreamSet(sid, actorKey, { blocks: next })
-  }
-}
-
-// SSE 单例（引用计数）：apply() 时页面级预开一条常驻连接——store 不依赖
-// 锚点挂载才喂帧，锚点晚挂载 read() 也能拿到全量缓冲。
-let femStreamEs: EventSource | undefined
-let femStreamEsRefs = 0
-
-function femStreamAcquire(): () => void {
-  femStreamEsRefs += 1
-  if (femStreamEs === undefined) {
-    femStreamEs = new EventSource('/dsh-femwa/events')
-    femStreamEs.onmessage = (ev: MessageEvent<string>) => {
-      try {
-        const msg = JSON.parse(ev.data) as { type?: string; data?: Record<string, unknown> }
-        if (msg.type === 'fem_stream') femStreamApply((msg.data ?? {}) as FemStreamMsg)
-      } catch {
-        // 非 JSON SSE 行忽略
-      }
-    }
-  }
-  return () => {
-    femStreamEsRefs -= 1
-    if (femStreamEsRefs <= 0 && femStreamEs !== undefined) {
-      femStreamEs.close()
-      femStreamEs = undefined
-    }
-  }
-}
-
-/** React hook：读某主会话某演员的直播块；挂载期间维持 SSE 连接并随帧刷新。 */
-function useFemStream(mainSid: string | undefined, actorKey: string | undefined): readonly FemStreamBlock[] {
-  const [blocks, setBlocks] = useState<readonly FemStreamBlock[]>(EMPTY_FEM_BLOCKS)
-  useEffect(() => {
-    if (mainSid === undefined || actorKey === undefined) return
-    const read = (): void => { setBlocks(femStreams.get(mainSid)?.get(actorKey)?.blocks ?? EMPTY_FEM_BLOCKS) }
-    read()
-    const release = femStreamAcquire()
-    femStreamListeners.add(read)
-    return () => {
-      femStreamListeners.delete(read)
-      release()
-    }
-  }, [mainSid, actorKey])
-  return blocks
-}
+// ── fem_stream 直播缓冲 → 已迁至 client-ui/stream-store.ts（2026-08-26 整理）
 
 declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
   interface ChatNodeDataMap {
@@ -738,32 +530,7 @@ const femDirectorDefinition: ConversationNodeDefinition<FemDirectorData> = {
   },
 }
 
-/** 直播块渲染（speaker 锚点与导演锚点共用同一套视觉）。 */
-function FemStreamLive({ blocks, t }: { blocks: readonly FemStreamBlock[]; t: unknown }) {
-  const safeT = typeof t === 'function' ? (t as (key: string) => string) : (key: string): string => key
-  const codeLabels = useMemo(() => ({ copyLabel: safeT('copy'), copiedLabel: safeT('copied') }), [safeT])
-  return (
-    <div className="fem-stream-root">
-      {blocks.map((block, i) => block.kind === 'reasoning'
-        ? (
-          <FemReasoningRow
-            key={i}
-            text={block.text}
-            running={i === blocks.length - 1}
-            runningLabel={safeT('row.running')}
-          />
-        )
-        : block.kind === 'toolcall'
-          ? (
-            <div key={i} className="fem-stream-toolline">
-              ⚙ {block.name ?? 'tool'}（{block.text.length > 140 ? `${block.text.slice(0, 140)}…` : block.text}）
-            </div>
-          )
-          : <MarkdownText key={i} text={block.text} streaming codeLabels={codeLabels} />)}
-      <span className="fem-stream-caret" aria-hidden />
-    </div>
-  )
-}
+// FemStreamLive → 已迁至 client-ui/fem-stream-live.tsx（2026-08-26 整理）
 
 /** Render one user/message anchor node in god windows（导演流式）。 */
 export function FemDirectorNodeView({ node, useSession, t }: ChatNodeViewProps<'femwa-director'>) {
@@ -1533,7 +1300,7 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
   //   映射未就绪的 fem-proj-* 窗 → 兜底 'god'。
   const activeViewId = ((): string | undefined => {
     if (mainSid === sessionId) {
-      const stored = sessionId === undefined ? undefined : viewBySession.get(sessionId)
+      const stored = sessionId === undefined ? undefined : getView(sessionId)
       return stored ?? 'offstage'
     }
     if (sessionId === proj.god) return 'god'
@@ -1655,37 +1422,7 @@ function FemSubagentCount({ useSession, useSessions, openChild, refresh, setCata
   )
 }
 
-// ── fem-stream 样式表（一次性注入）─────────────────────────────────────────
-// 官方 ReasoningRow.module.css 的 .fem-rr-* 转写（--dsw-alias-* token 同款，
-// 浅色/深色自适应；rc 升级需对照重放）+ 直播容器与光标。不走 css module
-// （构建链不注入插件侧 css），沿用母名黑化的 style 元素路线。
-const FEM_STREAM_CSS = `
-.fem-stream-root{display:flex;flex-direction:column;margin:2px 0 10px}
-.fem-stream-toolline{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:2px 0}
-.fem-stream-caret{display:inline-block;width:8px;height:15px;margin-top:2px;background:var(--dsw-alias-label-secondary,#888);animation:fem-caret-blink 1s steps(2,start) infinite}
-@keyframes fem-caret-blink{50%{opacity:0}}
-.fem-rr-root{display:flex;flex-direction:column}
-.fem-rr-row{position:relative;overflow:hidden}
-.fem-rr-root[data-state='running'] .fem-rr-row::after{content:'';position:absolute;inset-block:0;left:0;width:300px;background:linear-gradient(90deg,transparent 0%,color-mix(in srgb,var(--dsw-alias-bg-base,#fff) 60%,transparent) 55%,transparent 100%);animation:fem-rr-sweep 2.6s ease-out infinite;pointer-events:none}
-@keyframes fem-rr-sweep{0%{left:-300px}90%,100%{left:100%}}
-.fem-rr-leading{flex-shrink:0}
-.fem-rr-chevron{color:var(--dsw-alias-label-secondary)}
-.fem-rr-title{font-weight:400}
-.fem-rr-separator{flex:none;width:2px;height:2px;margin:0 8px;border-radius:1px;background:var(--dsw-alias-label-caption)}
-.fem-rr-summary{min-width:0;overflow:hidden;flex:1 1 auto;color:var(--dsw-alias-label-tertiary);font-size:14px;line-height:24px;text-overflow:ellipsis;white-space:nowrap}
-.fem-rr-summary[data-follow-end]{text-overflow:clip}
-.fem-rr-think-body{padding:4px 0 4px 22px;color:var(--dsw-alias-label-tertiary);font-size:14px;line-height:24px;white-space:pre-wrap;word-break:break-word}
-.fem-a11y-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
-@media (prefers-reduced-motion:reduce){.fem-rr-root[data-state='running'] .fem-rr-row::after{animation:none}}
-`
-
-function ensureFemStreamStyles(): void {
-  if (document.getElementById('fem-stream-style') !== null) return
-  const el = document.createElement('style')
-  el.id = 'fem-stream-style'
-  el.textContent = FEM_STREAM_CSS
-  document.head.appendChild(el)
-}
+// fem-stream 样式表 → 已迁至 client-ui/styles.ts（2026-08-26 整理）
 
 // ── plugin body ───────────────────────────────────────────────────────────
 
