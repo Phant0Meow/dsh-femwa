@@ -64,12 +64,14 @@ const FEM_COMPOSER_CSS = `
 /* 空座位幽灵 gap 反制（2026-08-26）：官方 ChatView 用 .flowItem:empty 兜底
    "decline 的座位不吃列 gap"，但 SlotOutlet 恒输出 <div data-slot
    style="display:contents"> 包装（ui-renderer 锚点契约）——decline 组件的
-   座位永远有子节点，:empty 永不命中，零高座位照吃 column 的 16px gap。
-   femwa 锚点密度高（user/message+step/start 每步双锚点），工具序列中间叠出
-   N×16px 幽灵间距（实测"两条工具间隔时宽时窄"）。反制=零元素后代的自有
-   座位直接 display:none（:has 全现代浏览器可用）；有内容的座位不受影响。 */
-[data-chat-flow-kind='femwa-director']:not(:has(*)){display:none}
-[data-chat-flow-kind='femwa-role']:not(:has(*)){display:none}
+   座位永远有子节点（data-slot div），:empty 与 :has(*) 都不命中，零高座位
+   照吃 column 的 16px gap。femwa 锚点密度高（user/message+step/start 每步
+   双锚点），工具序列中间叠出 N×16px 幽灵间距。正确选择器=检查 data-slot
+   wrapper 内部是否真空（:not(:has([data-slot] *))）；官方 turn-tail 同病
+   顺手一并反制（不动本体文件）。 */
+[data-chat-flow-kind='femwa-director']:not(:has([data-slot] *)){display:none}
+[data-chat-flow-kind='femwa-role']:not(:has([data-slot] *)){display:none}
+[data-chat-flow-kind='turn-tail']:not(:has([data-slot] *)){display:none}
 /* 权限菜单 trigger：官方 PermissionSelect.module.css .trigger 家族逐属性转写
    （fem-comp-perm-*）；菜单体与风险确认弹窗用 ui-primitives 的 Menu /
    RiskConfirmation 官方组件，无需自绘。 */
