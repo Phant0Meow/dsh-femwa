@@ -14,7 +14,7 @@
  * dependency is react (shell singleton, external in the bundle).
  */
 
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import { createPortal } from 'react-dom'
 // Font Awesome Free solid 图标内联组件（currentColor 随文字色）：视角按钮与菜单用。
 import { FaEye, FaPodcast, FaRobot, FaUserSecret } from './fa-icons'
