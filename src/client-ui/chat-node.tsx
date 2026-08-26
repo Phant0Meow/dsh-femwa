@@ -12,7 +12,7 @@ import { useMemo } from 'react'
 import type { ConversationNodeDefinition } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { EMPTY_FEM_BLOCKS, femProjectionActorKey, useFemStream } from './stream-store'
-import { FemStreamLive } from './fem-stream-live'
+import { FemStreamLive, FemTurnStatus, openTurnInfo } from './fem-stream-live'
 import { useView } from './view-state'
 
 /** One rendered dsh-femwa/chat line. */
@@ -120,6 +120,12 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
   const liveBlocks = streamEligible && lastSpeakerKeys.get(actor ?? '') === node.key
     ? liveBlocksRaw
     : EMPTY_FEM_BLOCKS
+  // Deep diving 对齐官方语义（2026-08-26）：窗口存在 open turn（演出进行中，
+  // 含等待首 token/工具执行间隙）即显示，整个 turn 结束才消失——不再依赖
+  // 直播块有无（此前流式间隙会闪断）。挂在该演员最新名字行下；hooks 全部
+  // 前置（早退过滤之前），与文件既有纪律一致。
+  const timeline = chat.timeline
+  const { hasOpen: hasOpenTurn, startTime: openTurnStart } = useMemo(() => openTurnInfo(timeline), [timeline])
   // View-perspective filter: in a role view, meta lines (notice/error/
   // thinking) are god-only, and dialogue lines show only when the actor's
   // scope includes this viewer. Absent `visible` = visible to everyone.
@@ -139,7 +145,9 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
     // 子代理 turn 首行：发言者名字；cot/工具调用/回答从下一行开始。
     // 2026-08-24 方案B：本行兼任流式锚点——直播中的块以官方同款渲染画在
     // 名字正下方（=原生块即将落地的位置），block_end/end 后自动消失；
-    // 无直播时与历史形态完全一致（一行名字，零额外 DOM）。
+    // Deep diving 状态行同样挂最新名字行下、open turn 全程显示（对齐官方
+    // "rides the whole running turn"）；无直播无演出时与历史形态完全一致。
+    const isLatestSpeaker = lastSpeakerKeys.get(actor ?? '') === node.key
     return (
       <div>
         <div style={{
@@ -151,6 +159,7 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
           {actor ?? 'AI'}
         </div>
         {liveBlocks.length > 0 && <FemStreamLive blocks={liveBlocks} t={t} />}
+        {streamEligible && isLatestSpeaker && hasOpenTurn && <FemTurnStatus startTime={openTurnStart} />}
       </div>
     )
   }

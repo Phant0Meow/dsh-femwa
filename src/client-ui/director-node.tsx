@@ -3,24 +3,31 @@
  *
  * 上帝窗里主模型的发言此前要等 assistant/message 落地才整块出现（MIRROR 白
  * 名单无 chunk）。宿主把主模型 chunk 旁路广播成 fem_stream（actor='导演'，
- * 零落盘）；锚点节点只在「最新一个」且有活跃导演缓冲时，在其下渲染打字机。
+ * 零落盘）；本节点在「最新一个锚点」处渲染打字机（流式内容）+ Deep diving
+ * 状态行（open turn 指示）。
  *
- * 锚点事件 = step/start（2026-08-26 修正，此前为 user/message）：主模型 React
- * 多轮（工具调用循环）中间没有新 user/message，第二轮流式会被画在「第一轮
- * 用户消息」的旧锚点上——视觉上第二轮跑到第一轮发言前面。改随 step/start
- * 走（每步一个锚点），直播永远落在最新 step 处=已落地内容之后；与演员机制
- * 同构（speaker 名字行随演员自己的 turn 发）。
- * （2026-08-26 结构整理自 client.tsx 原样迁出。）
+ * 锚点事件 = user/message + step/start（2026-08-26 二次修正）：状态行必须
+ * 恒在消息流末尾——只挂 step/start 的话，turn 间隙落地的新 user/message 会
+ * 排到它后面（用户实测"AI发言/Deep diving/用户Prompt"乱序）。两类事件都建
+ * 锚点、最新者接棒，流末尾归属永远正确。多轮演进史：初版仅 user/message
+ * （React 多轮无新用户消息 → 第二轮流式画进第一轮上方）；二版仅 step/start
+ * （turn 间隙被新消息越过）。
+ *
+ * Deep diving 显示条件对齐官方 ChatView TurnStatus："rides the whole running
+ * turn"——用户消息落地即出现（等待首 token 免得以为卡死）、首 token 后继续
+ * 显示（工具执行/流式全程）、整个 turn 结束才消失。投影窗是无 agent 镜像
+ * 会话（官方 running 永 false），改由 timeline 推导：存在 status==='open'
+ * 的 turn 即演出中。计时起点=open turn 的 turn/start 时间。
  */
 
 import { useMemo } from 'react'
 import type { ConversationNodeDefinition } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { femProjectionActorKey, useFemStream } from './stream-store'
-import { FemStreamLive } from './fem-stream-live'
+import { FemStreamLive, FemTurnStatus, openTurnInfo } from './fem-stream-live'
 import { useView } from './view-state'
 
-/** One step/start anchor node's data（仅 seq，直播内容走 SSE store）。 */
+/** One anchor node's data（仅 seq，直播内容走 SSE store）。 */
 interface FemDirectorData {
   readonly seq: number
 }
@@ -42,8 +49,11 @@ export const femDirectorDefinition: ConversationNodeDefinition<FemDirectorData> 
   kind: 'femwa-director',
   target: 'chat',
   match: (event) => {
-    // 锚点=step/start：React 多轮每步一个锚点，直播跟随最新步落位（见头注释）。
-    if (event.type === 'step/start') return { id: String(event.seq), role: 'start' }
+    // 锚点=user/message + step/start：最新者接棒，Deep diving 恒贴流末尾
+    //（见头注释"二次修正"）。访问形态照抄官方 runningTurnStartTime。
+    if (event.type === 'user/message' || event.type === 'step/start') {
+      return { id: String(event.seq), role: 'start' }
+    }
     return null
   },
   start: (_context, match) => ({ seq: match.event.seq }),
@@ -63,7 +73,7 @@ export const femDirectorDefinition: ConversationNodeDefinition<FemDirectorData> 
   },
 }
 
-/** Render one step/start anchor node in god windows（导演流式）。 */
+/** Render one anchor node in god windows（导演流式 + Deep diving）。 */
 export function FemDirectorNodeView({ node, useSession, t }: ChatNodeViewProps<'femwa-director'>) {
   const sessionId = useSession(snapshot => snapshot.sessionId)
   const view = useView(sessionId)
@@ -83,6 +93,18 @@ export function FemDirectorNodeView({ node, useSession, t }: ChatNodeViewProps<'
     }
     return lastKey === node.key
   }, [chat, node.key])
-  if (!eligible || !isLastDirectorAnchor || blocks.length === 0) return null
-  return <FemStreamLive blocks={blocks} t={t} />
+  // open turn 推导（官方 running 的镜像会话替身）：存在即演出中，全程显示
+  // 不闪烁；turn/end 落地即消失。
+  const timeline = chat.timeline
+  const { hasOpen, startTime } = useMemo(() => openTurnInfo(timeline), [timeline])
+  if (!eligible || !isLastDirectorAnchor) return null
+  const showStream = blocks.length > 0
+  const showStatus = hasOpen
+  if (!showStream && !showStatus) return null
+  return (
+    <>
+      {showStream && <FemStreamLive blocks={blocks} t={t} />}
+      {showStatus && <FemTurnStatus startTime={startTime} />}
+    </>
+  )
 }

@@ -1,9 +1,11 @@
 /**
- * client-ui/fem-stream-live.tsx — 直播块渲染件。
+ * client-ui/fem-stream-live.tsx — 直播块渲染件 + Deep diving 状态行。
  *
  * speaker 锚点与导演锚点共用同一套视觉：reasoning 块走 FemReasoningRow 折叠行、
  * toolcall 块走单行 ⚙ 摘要、正文走官方 MarkdownText 打字机 + 光标。
- * （2026-08-26 结构整理自 client.tsx 原样迁出，行为零变化。）
+ * FemTurnStatus 是官方 ChatView TurnStatus 的同款转写，由调用方按 open-turn
+ * 条件渲染在流末尾（2026-08-26 二次修正：不再内嵌于 FemStreamLive——官方语义
+ * 是"骑整个 running turn 全程"，而非"有直播块才显示"）。
  */
 
 import { useEffect, useMemo, useState } from 'react'
@@ -14,22 +16,47 @@ import { FemReasoningRow } from '../fem-reasoning-row'
 import { type FemStreamBlock } from './stream-store'
 
 /**
- * 官方 ChatView TurnStatus 的同款转写（2026-08-26）：品牌蓝流光
- * "Deep diving..."，15 秒起追加耗时计时（官方 anchored turn/start；此处
- * 锚定组件挂载=直播缓冲首帧，误差毫秒级）。投影窗是没有自己 agent 的镜像
- * 会话，官方渲染条件 useSession(running) 永远为 false——这里改为「直播块
- * 渲染即显示」（FemStreamLive 仅在有活跃缓冲时挂载），卸载即停。
+ * 官方 ChatView runningTurnStartTime 同款 + open-turn 存在性判定。
+ * 投影窗是无 agent 镜像会话（官方 running 永 false），"演出中"由落盘事件
+ * 推导：timeline 存在 status==='open' 的 turn 即进行中；startTime=最近一个
+ * open turn 的 turn/start 时间（中途打开/重启后计时仍真实）。
  */
-function FemTurnStatus() {
+export function openTurnInfo(timeline: unknown): { hasOpen: boolean; startTime: number | null } {
+  const turns = (timeline as { turns?: Map<string, { status?: string; start?: { time?: number } }> } | undefined)?.turns
+  if (turns === undefined) return { hasOpen: false, startTime: null }
+  let latest: number | null = null
+  let hasOpen = false
+  for (const turn of turns.values()) {
+    if (turn?.status !== 'open') continue
+    hasOpen = true
+    if (turn.start !== undefined && typeof turn.start.time === 'number') {
+      latest = turn.start.time
+    }
+  }
+  return { hasOpen, startTime: latest }
+}
+
+/**
+ * 官方 ChatView TurnStatus 同款转写（2026-08-26 对齐官方语义）：品牌蓝流光
+ * "Deep diving..."，15 秒起追加耗时计时。官方行为（源码注释 "rides the whole
+ * running turn"）：用户消息落地即出现（不等首 token，告知"已收到正在处理"，
+ * 免得用户以为卡死）、位置恒在消息流末尾、整个 turn 结束才消失（首 token/
+ * 工具执行/流式全程不闪烁）。显示条件由调用方给（open turn 存在），本组件
+ * 只负责视觉与计时。startTime=open turn 的 turn/start 时间（官方
+ * runningTurnStartTime 同源；null 回退挂载时刻）。
+ */
+export function FemTurnStatus({ startTime }: { startTime: number | null }) {
   const [mountedAt] = useState(() => Date.now())
-  const [elapsedMs, setElapsedMs] = useState(0)
+  // Anchored to turn/start so a mid-turn reload keeps the real elapsed time.
+  const anchor = startTime ?? mountedAt
+  const [elapsedMs, setElapsedMs] = useState(() => Math.max(0, Date.now() - anchor))
   useEffect(() => {
-    const tick = (): void => { setElapsedMs(Math.max(0, Date.now() - mountedAt)) }
+    const tick = (): void => { setElapsedMs(Math.max(0, Date.now() - anchor)) }
     tick()
     const id = setInterval(tick, 1000)
     return () => { clearInterval(id) }
-  }, [mountedAt])
-  // 官方同款阈值：短演出只留纯文案，跑够 15 秒才出现计时。
+  }, [anchor])
+  // 官方同款阈值：短回合只留纯文案，跑够 15 秒才出现计时。
   const showClock = elapsedMs >= 15_000
   const total = Math.max(0, Math.floor(elapsedMs / 1000))
   const minutes = Math.floor(total / 60)
@@ -67,7 +94,6 @@ export function FemStreamLive({ blocks, t }: { blocks: readonly FemStreamBlock[]
             </div>
           )
           : <MarkdownText key={i} text={block.text} streaming codeLabels={codeLabels} />)}
-      <FemTurnStatus />
       <span className="fem-stream-caret" aria-hidden />
     </div>
   )
