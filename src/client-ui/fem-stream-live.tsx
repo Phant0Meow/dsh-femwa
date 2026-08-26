@@ -2,7 +2,8 @@
  * client-ui/fem-stream-live.tsx — 直播块渲染件 + Deep diving 状态行。
  *
  * speaker 锚点与导演锚点共用同一套视觉：reasoning 块走 FemReasoningRow 折叠行、
- * toolcall 块走单行 ⚙ 摘要、正文走官方 MarkdownText 打字机 + 光标。
+ * toolcall 块走单行 ⚙ 摘要、正文走官方 MarkdownText 打字机（2026-08-26 拆除
+ * 自绘闪烁光标：官方流式输出无 caret 装饰，Deep diving 状态行已是进行中信号）。
  * FemTurnStatus 是官方 ChatView TurnStatus 的同款转写，由调用方按 open-turn
  * 条件渲染在流末尾（2026-08-26 二次修正：不再内嵌于 FemStreamLive——官方语义
  * 是"骑整个 running turn 全程"，而非"有直播块才显示"）。
@@ -94,7 +95,6 @@ export function FemStreamLive({ blocks, t }: { blocks: readonly FemStreamBlock[]
             </div>
           )
           : <MarkdownText key={i} text={block.text} streaming codeLabels={codeLabels} />)}
-      <span className="fem-stream-caret" aria-hidden />
     </div>
   )
 }
