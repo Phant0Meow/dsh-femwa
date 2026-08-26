@@ -132,18 +132,6 @@ function writeDraft(sid: string, text: string): void {
 }
 
 /**
- * 投影窗 id → 主会话 id。与 host projection-input.ts 兜底剥法同语义：
- * fem-proj-<sid>-<actorKey>，actorKey 只含 [A-Za-z0-9_] 不含 '-'。
- * @param sid - 当前投影窗会话 id。
- * @returns 主会话 id；非投影窗 id 返回 undefined。
- */
-function resolveMainSid(sid: string | undefined): string | undefined {
-  if (sid === undefined || !sid.startsWith('fem-proj-')) return undefined
-  const main = sid.slice('fem-proj-'.length).replace(/-[^-]*$/, '')
-  return main.length > 0 ? main : undefined
-}
-
-/**
  * 订阅任意会话 face 的一个 projection key（useSyncExternalStore 适配）。
  * faceOf 是 identity-stable bare observable（官方契约），subscribe/getSnapshot
  * 引用稳定；face 缺失时恒定 undefined 快照。
@@ -501,14 +489,15 @@ export function ProjectionComposer({ useSession, useSessions, getSessionFace }: 
     if (sessionId !== undefined) writeDraft(sessionId, next)
   }
 
-  // 主会话 id：优先 sessions 列表 summary.parentId（host 建窗元数据，与
-  // view-button 同款权威来源）；列表尚未载入（手机冷启动直达投影窗）时回退
-  // 字符串剥法。selector 返回原始字符串（引用稳定），列表变化自动重算。
+  // 主会话 id：sessions 列表 summary.parentId（host 建窗元数据，与
+  // view-button 同款权威来源）。列表未就绪时返回 undefined——列表就绪后
+  // selector 返回值变化（undefined → 'xxx'）触发重渲染，届时 face 解析成功；
+  // 不用字符串兜底（会让 selector 恒定、列表就绪的重渲染不触发=刷新后缺
+  // 权限按钮/统计行，2026-08-26 实测 bug）。
   const mainSid = useSessions((state: { byId?: Record<string, { parentId?: string } | undefined> } | undefined): string | undefined => {
     if (typeof sessionId !== 'string') return undefined
     const pid = state?.byId?.[sessionId]?.parentId
-    if (typeof pid === 'string' && pid.length > 0) return pid
-    return resolveMainSid(sessionId)
+    return typeof pid === 'string' && pid.length > 0 ? pid : undefined
   })
   // 主会话 face（投影窗是主会话的遥控器：权限菜单/统计行/停止钮都读它）。
   // binding() 官方注释明示 render-safe 纯解析且 per-session identity-stable；
