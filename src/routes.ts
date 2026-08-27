@@ -25,6 +25,7 @@ import { handleProjectionInput } from './projection-input'
 //   GodMirror 仍被本文件 projection-windows 路由与 RoutesDeps 使用。）
 import { type GodMirror } from './god-mirror'
 import { type ProjectionRegistry } from './projection'
+import { type RunResult } from './tools'
 
 export interface RoutesDeps {
   resolved: ResolvedConfig
@@ -34,11 +35,13 @@ export interface RoutesDeps {
   sessionsStore?: { get(id: SessionId): Session | undefined }
   godMirror: GodMirror
   recordError(sessionId: string, text: string): void
+  /** 前端 AI-trigger run 的回传收口：resolve 对应 sessionId 的等待 Promise。 */
+  runResult(sessionId: string, result: RunResult): void
 }
 
 /** 注册全部 /dsh-femwa/* HTTP 路由（index.ts 总装调用一次）。 */
 export function registerRoutes(ctx: Context, deps: RoutesDeps): void {
-  const { resolved, bridge, runState, projections, sessionsStore, godMirror, recordError } = deps
+  const { resolved, bridge, runState, projections, sessionsStore, godMirror, recordError, runResult } = deps
 
   // HTTP routes: create-session + script listing (sidebar button calls these).
   const webServer = ctx.get('webServer') as { register(spec: unknown): void } | undefined
@@ -262,6 +265,35 @@ export function registerRoutes(ctx: Context, deps: RoutesDeps): void {
             return
           }
           recordError(sessionId, `[编辑器·${source}] ${message}`)
+          writeJson(res, 200, { ok: true })
+        })().catch((error: unknown) => {
+          writeJson(res, 500, { ok: false, error: String(error) })
+        })
+      },
+    })
+    webServer.register({
+      kind: 'exact',
+      path: '/dsh-femwa/run-result',
+      handler: (req: IncomingMessage, res: ServerResponse): void => {
+        void (async () => {
+          // AI 触发「模拟按前端 run 按钮」的结果回传：前端做完守卫/语法检查/
+          // 点火后 POST 到这里，resolve 对应 sessionId 的等待 Promise；
+          // 无等待者（超时已清/重复回传）则静默忽略。
+          const raw = await readBody(req) as unknown as Record<string, unknown>
+          const sessionId = typeof raw.sessionId === 'string' ? raw.sessionId : ''
+          if (sessionId.length === 0) {
+            writeJson(res, 400, { ok: false, error: 'sessionId is required' })
+            return
+          }
+          const result: RunResult = {
+            ok: raw.ok === true,
+            ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
+            ...(raw.conflicts !== undefined && typeof raw.conflicts === 'object'
+              ? { conflicts: raw.conflicts as Record<string, unknown> }
+              : {}),
+            ...(typeof raw.note === 'string' ? { note: raw.note } : {}),
+          }
+          runResult(sessionId, result)
           writeJson(res, 200, { ok: true })
         })().catch((error: unknown) => {
           writeJson(res, 500, { ok: false, error: String(error) })

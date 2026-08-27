@@ -314,6 +314,18 @@ export async function handleRunOnSession(
   const reset = body.reset === true
   try {
     const scriptText = await readScriptText(fems, scriptPath)
+    // 后端编译检查（各自闭环：compiler 纯后端也有自己的语法检查）。
+    // 配合 parse_script 的变量声明校验，编译期就能拦住 @speaker 未声明等错误，
+    // 不启动引擎、无状态残留。base_dir = 剧本文件所在目录（相对 file: 解析用）。
+    const baseDir = scriptPath !== undefined
+      ? scriptPath.replace(/[\\/][^\\/]*$/, '')
+      : ''
+    try {
+      await bridge.send('check', { fems: scriptText, base_dir: baseDir }, 30_000)
+    } catch (error: unknown) {
+      writeJson(res, 400, { ok: false, error: `剧本编译失败：${String(error instanceof Error ? error.message : error)}` })
+      return
+    }
     await startRunOnSession(ctx, resolved, bridge, runState, sessionId, scriptText, scriptPath, reset)
     writeJson(res, 200, { ok: true, sessionId: String(sessionId) })
   } catch (error: unknown) {

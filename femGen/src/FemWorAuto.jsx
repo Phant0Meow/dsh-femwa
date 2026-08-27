@@ -3,7 +3,7 @@
 // ═══════════════════════════════════════════════════════════════
 
 
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo, forwardRef, useImperativeHandle } from 'react';
 import {
   ErrorBoundary, FontStyle, TYPES, ti, SPECIAL_COLORS, SINK_ONLY,
   nid, eid, mid, NW, NH, MW, MH, SPW, SPH, PSW, PSH,
@@ -91,7 +91,7 @@ function structuralSignature(nodes, edges) {
   return JSON.stringify({ ns, es });
 }
 
-export default function FEMEditor({ plugin = false, onRun, onStop, initialScript, initialCheckpoint, initialRunning = false, onExport, onImport, savedPath, onBackToShell, onRestoreError, onPersistScript, getRecordScript } = {}) {
+const FEMEditor = forwardRef(function FEMEditor({ plugin = false, onRun, onStop, initialScript, initialCheckpoint, initialRunning = false, onExport, onImport, savedPath, onBackToShell, onRestoreError, onPersistScript, getRecordScript, onRunResult } = {}, ref) {
 // 插件模式：由 dsh-femwa 注入（plugin=true）——运行/停止走插件回调，
 // SSE 连插件广播路由；独立模式保留原后端调用（getBackendBaseUrl）。
 // initialScript/initialCheckpoint/initialRunning：会话恢复（刷新/重启/运行中打开）。
@@ -231,7 +231,11 @@ export default function FEMEditor({ plugin = false, onRun, onStop, initialScript
   useEffect(() => {
     const handleMouseMove = (e) => {
       if (!isResizingRight) return;
-      const newWidth = window.innerWidth - e.clientX;
+      // 2026-08-26 容器感知：右面板宽度=【编辑器容器右边缘】- 鼠标X。
+      // 以前用 window.innerWidth 当"以为的屏幕"——内嵌在 dsh tab 里时
+      // 容器右边缘 < 窗口右边缘，面板会被算宽、拖出容器右缘。
+      const rootR = editorRootRef.current?.getBoundingClientRect();
+      const newWidth = (rootR ? rootR.right : window.innerWidth) - e.clientX;
       if (newWidth >= 200 && newWidth <= 500) {
         setRightPanelWidth(newWidth);
       }
@@ -287,6 +291,9 @@ const [userApiModel, setUserApiModel] = useState(() => {
   const fileInputRef = useRef(null);
 
   const cvRef = useRef(null);
+  // 编辑器根容器（桌面分支外层 div）：内嵌 dsh tab 时「编辑器以为的屏幕」
+  // 以它为准（2026-08-26 容器感知，右面板 resize 等）。
+  const editorRootRef = useRef(null);
 
   // ═══ 运行时模块自动切换 ═══
   const moduleStackRef = useRef([]);            // 运行时模块栈
@@ -812,7 +819,11 @@ const parOutNodeMap = useMemo(() => {
       } catch (e) {
         console.warn('[FEMEditor] 会话快照恢复失败:', e);
         // 不再静默：画布面板可见 + 上抛给插件层（回传主模型）。
+        // 2026-08-26：解析失败的坏剧本也把【原文】载入输入框（画布留空）——
+        //  ①人类能就地改文本修复；②AI 触发 run 时 handleRunWorkflow 的
+        //  parseFEMS 会拿真实错误回传（而不是「请先编写或导入 FEM 脚本」）。
         const msg = e instanceof Error ? e.message : String(e);
+        setFemText(initialScript);
         setFemError(`会话快照恢复失败：${msg}`);
         if (typeof onRestoreError === 'function') onRestoreError(msg);
       }
@@ -1200,13 +1211,37 @@ if (specialType === 'FOR') {
   }, [soulForm]);
 
   // ── 工作流运行：启动运行 ──
-  const handleRunWorkflow = useCallback(async (femOverride) => {
+  const handleRunWorkflow = useCallback(async (femOverride, source = 'human') => {
+    const isAi = source === 'ai';
+    // AI 触发（femwa-run 模拟前台按钮）：不弹窗不 alert，所有检测结果
+    // 经 onRunResult 回传给 host 工具，由工具返回给主模型（谁触发就返回给谁）。
+    const report = (result) => {
+      if (isAi && typeof onRunResult === 'function') onRunResult(result);
+    };
     console.log('[handleRunWorkflow] ====== 准备启动 ======');
     console.log('[handleRunWorkflow] flowStatus:', flowStatus);
-    if (flowStatus === 'running') return;
+    if (flowStatus === 'running') {
+      report({ ok: false, error: '已有剧本在运行中，请先停止' });
+      return;
+    }
     // 未落盘修改守卫：文本/图相对 record 有未应用的修改时不直接跑，
     // 弹窗说明分歧点，用户选「回去核查」或「放弃修改直接跑」（record 为准）。
     if (plugin && !skipRunGuardRef.current && (femDirty || graphDirty)) {
+      if (isAi) {
+        // AI 触发：不弹窗，把分歧信息（哪边脏、record 是什么、本地是什么）
+        // 回传给 host 工具 → 主模型决定跑哪一版（与人类弹窗同语义：告诉
+        // 调用方、由调用方选择，只是呈现方式不同）。
+        let record = null;
+        if (typeof getRecordScript === 'function') {
+          try { record = await getRecordScript(); } catch (e) { record = null; }
+        }
+        report({
+          ok: false,
+          error: '编辑器存在未落盘修改（多端不统一），需要你决定跑哪一版',
+          conflicts: { textDirty: femDirty, graphDirty, record, local: femText },
+        });
+        return;
+      }
       setRunGuard({ textDirty: femDirty, graphDirty });
       return;
     }
@@ -1215,7 +1250,18 @@ if (specialType === 'FOR') {
     // femOverride 供「放弃修改直接跑」传入 record 原文。
     const fem = typeof femOverride === 'string' && femOverride.trim() ? femOverride : femText;
     if (!fem || !fem.trim()) {
+      if (isAi) { report({ ok: false, error: '请先编写或导入 FEM 脚本' }); return; }
       alert('请先编写或导入 FEM 脚本');
+      return;
+    }
+    // ★ 前端语法检查（各自闭环：femgen 不依赖后端也能检查语法）。
+    // parseFEMS 含 validateDeclarations，错误信息含类型/行号/出错语句。
+    try {
+      parseFEMS(fem);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setFemError(msg);
+      if (isAi) { report({ ok: false, error: msg }); return; }
       return;
     }
     console.log('[handleRunWorkflow] 发送到后端...');
@@ -1245,9 +1291,11 @@ if (specialType === 'FOR') {
         // 插件模式：交给 dsh-femwa 运行（保存剧本 + 启动引擎，同一 run
         // 也驱动聊天窗角色气泡）；SSE 连插件广播路由（相对路径，同源）。
         // 按钮语义：「运行」= reset 从头；「继续」（paused 态）= 断点续跑。
-        if (typeof onRun === 'function') await onRun(fem, { reset: flowStatus !== 'paused' });
+        // AI 触发（femwa-run fresh_start）恒为 reset 从头（fresh_start 语义）。
+        if (typeof onRun === 'function') await onRun(fem, { reset: isAi ? true : flowStatus !== 'paused' });
         setRunId(null);
         connectSse();
+        if (isAi) report({ ok: true, note: '已从头开始运行剧本' });
         return;
       }
       // 1. 发送 FEM 脚本到后端，启动运行（独立模式）
@@ -1297,11 +1345,20 @@ es.onmessage = (event) => {
       };
     } catch (err) {
       console.error('Failed to start workflow:', err);
-      alert('启动工作流失败: ' + err.message);
       setFlowStatus('idle');
       setActiveNodeIds(new Set());
+      if (isAi) { report({ ok: false, error: err instanceof Error ? err.message : String(err) }); return; }
+      alert('启动工作流失败: ' + err.message);
     }
-  }, [flowStatus, userApiKey, userApiProvider, userApiUrl, plugin, femText, femDirty, graphDirty]);
+  }, [flowStatus, userApiKey, userApiProvider, userApiUrl, plugin, femText, femDirty, graphDirty, onRun, onRunResult, getRecordScript]);
+
+  // AI 命令式触发入口（editor-view 经 run_request SSE → ref.triggerRun('ai')）。
+  // 组件挂载 ⇔ 「Fem 编辑器」tab 激活（conversation.view only:active.id）——
+  // triggerRun 只在编辑器活着时可达，守卫/语法检测全在 handleRunWorkflow 内。
+  // 用 ref 持有最新引用防闭包陈旧（同 handleGraphToFemRef 惯例）。
+  const triggerRunRef = useRef((src) => handleRunWorkflow(undefined, src));
+  triggerRunRef.current = (src) => handleRunWorkflow(undefined, src);
+  useImperativeHandle(ref, () => ({ triggerRun: (src) => triggerRunRef.current(src) }), []);
 
   // 「放弃修改，直接跑」：以 record 为定稿——拉取原文覆盖输入框与画布，
   // 清掉两侧脏标记（applyFEMText 内部完成），然后带着 record 原文直接运行。
@@ -2634,6 +2691,7 @@ nodes={nodes}
     <ErrorBoundary>
       <FontStyle scoped={plugin} />
       <div
+        ref={editorRootRef}
         data-fem-theme={theme}
         style={{
           display: 'flex',
@@ -3963,4 +4021,5 @@ if (enrichedNode.type === 'par_out') {
     </div> {/* 闭合最外层 flex 容器 */}
     </ErrorBoundary>
   );
-}
+});
+export default FEMEditor;

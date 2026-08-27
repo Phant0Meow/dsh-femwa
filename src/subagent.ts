@@ -16,7 +16,7 @@ import type { FemwaBridge } from './bridge'
 import type { ResolvedConfig } from './config'
 import { broadcastSse } from './http'
 import { writeTurnScopeFile } from './state-files'
-import { projectionAppend, type ProjectionRegistry } from './projection'
+import { projectionAppend, dedupeIndexFor, type ProjectionRegistry } from './projection'
 
 // ── 镜像簿记与白名单 ──────────────────────────────────────────────────────
 
@@ -353,8 +353,9 @@ export async function runAiSubagent(
     // 幂等兜底：log 里已有同 turn 的 turn/start（可能由 dsh 内部机制补发）
     // 就不重复 append——重复的 turn/start 会让 deliverables 等以
     // turn/start 为 start 的节点收到两个 start Match（历史加载失败）。
-    const dup = session.events.some(e => e.type === 'turn/start'
-      && (e.data as { turn?: number }).turn === baseTurn)
+    // ★ O(1) 去重索引（2026-08-26 性能修复）：旧实现 session.events.some()
+    // 全扫——主会话 13.7 万事件级时每次子代理 turn 都是秒级全数组扫描。
+    const dup = dedupeIndexFor(session).structKeys.has(`turn/start:${baseTurn}`)
     if (dup) {
       turnStarted = true
       return
@@ -378,9 +379,11 @@ export async function runAiSubagent(
   const ensureStepStart = (step: number): void => {
     if (currentStep === step) return
     // 幂等兜底：投影窗 log 里已有相同 turn:step 的 step/start 就不重复。
-    const dup = windows.god?.events.some(e => e.type === 'step/start'
-      && (e.data as { turn?: number }).turn === baseTurn
-      && (e.data as { step?: number }).step === step) ?? false
+    // ★ O(1) 去重索引（2026-08-26 性能修复，同 ensureTurnStart）。
+    let dup = false
+    if (windows.god !== undefined) {
+      dup = dedupeIndexFor(windows.god).structKeys.has(`step/start:${baseTurn}:${step}`)
+    }
     if (dup) {
       currentStep = step
       return

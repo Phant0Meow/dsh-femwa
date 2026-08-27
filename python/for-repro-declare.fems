@@ -19,6 +19,6 @@ action mark @assign:
 
 mainflow:
   [START] -> for @hero in alive_party:
-    -> if (@hero.type == ai) -> [L]:mark ->
-    -> if (@hero.type == human) -> [LP]:mark ->
+    -> if (@hero.type == "ai") -> [L]:mark ->
+    -> if (@hero.type == "human") -> [LP]:mark ->
   -> [END]

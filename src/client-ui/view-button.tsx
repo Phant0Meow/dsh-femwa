@@ -15,6 +15,8 @@ import { FaEye, FaPodcast, FaRobot, FaUserSecret } from '../fa-icons'
 import { CatalogDropdown } from '../lineage-fork.jsx'
 import { type FemwaChatData } from './chat-node'
 import { getView, setView, useView } from './view-state'
+import { subscribeControlEvents } from './stream-store'
+import { editorPageOpenSession, editorPageCloseSession } from './editor-page'
 
 // ── 视角跳转的标签页跟手（2026-08-24）─────────────────────────────────────
 // 需求：切视角后落在哪个标签页（对话/Fem 编辑器）跟随「切换前」所在的标签
@@ -93,6 +95,15 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
     tab.style.display = mainSid !== undefined ? '' : 'none'
     return () => { tab.style.display = '' }
   }, [mainSid])
+  // 单页编辑器「内容跟随」上报（2026-08-26 v3）：本会话窗口打开/关闭时通知
+  // editor-page 宿主——打开的哪个 fem 主会话，单页编辑器就加载哪个（切
+  // Session 内容重载；投影窗与主窗同 mainSid 合并计数）。header.actions 随
+  // 会话切换重挂载，天然给出「当前打开的会话」信号。
+  useEffect(() => {
+    if (mainSid === undefined) return
+    editorPageOpenSession(mainSid)
+    return () => { editorPageCloseSession(mainSid) }
+  }, [mainSid])
   // Script actors from the host (complete after a run) — the menu's source of
   // truth; chat-line actors below only backfill before the first run.
   const [scriptActors, setScriptActors] = useState<string[]>([])
@@ -124,16 +135,16 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
   // sessionActors——这里收到 flow_start 即重新 fetch，由 host 按 sessionId
   // 权威裁决（别家会话开演误触发也无害）。scriptActors 更新后，下方投影窗
   // 列表 effect（deps 含 scriptActors.length）自动重拉，菜单项与跳转目标同步。
+  // 2026-08-26：改为搭全局 SSE 便车（subscribeControlEvents）——原实现每条
+  // 打开窗口一条 EventSource，多窗口时把浏览器 HTTP/1.1 每域 6 连接池挤爆
+  // （RPC「signal timed out」真凶之一）。
   useEffect(() => {
     if (mainSid === undefined) return
-    const es = new EventSource('/dsh-femwa/events')
-    es.onmessage = (ev: MessageEvent<string>): void => {
-      try {
-        const msg = JSON.parse(ev.data) as { type?: string }
-        if (msg.type === 'flow_start') refreshActors(mainSid)
-      } catch { /* 非 JSON SSE 行忽略 */ }
+    const handler = (msg: { type?: string }): void => {
+      if (msg.type === 'flow_start') refreshActors(mainSid)
     }
-    return () => es.close()
+    const unsubscribe = subscribeControlEvents(handler)
+    return unsubscribe
   }, [mainSid, refreshActors])
 
   // 投影窗 id 列表（host 幂等创建；视角菜单跳转目标）。

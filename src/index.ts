@@ -59,7 +59,7 @@ import { createGodMirror } from './god-mirror'
 import { type RunState, registerEngineEventHandlers } from './engine-events'
 import { startRunOnSession } from './run-control'
 import { registerRoutes } from './routes'
-import { registerFemwaTools, type FemwaToolDeps } from './tools'
+import { registerFemwaTools, type FemwaToolDeps, type RunResult } from './tools'
 
 declare module '@deepseek-ai/dsh-session/types' {
   interface SessionEventMap {
@@ -180,6 +180,21 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
   /** 主会话 → 上帝窗镜像（实时监听 + 水位补齐）。 */
   const godMirror = createGodMirror({ femwaRoot: resolved.femwaRoot, sessionsStore, projections })
 
+  // ── femwa-run fresh_start「模拟前端按钮」等待机制 ─────────────────────
+  // 工具广播 run_request 到编辑器（前端做守卫+语法检查+点火），前端做完
+  // POST /dsh-femwa/run-result 回传；本 Map 按 sessionId 挂等待 Promise。
+  // 超时兜底：编辑器未打开 / 前端失联时工具不永久阻塞（30s 后明确报错）。
+  type RunRequestPending = { resolve: (result: RunResult) => void; timer: NodeJS.Timeout }
+  const runRequestPending = new Map<string, RunRequestPending>()
+  const RUN_REQUEST_TIMEOUT = 30_000
+  const resolveRunResult = (sessionId: string, result: RunResult): void => {
+    const pending = runRequestPending.get(sessionId)
+    if (pending === undefined) return
+    clearTimeout(pending.timer)
+    runRequestPending.delete(sessionId)
+    pending.resolve(result)
+  }
+
   const recordError = (sessionId: SessionId, text: string): void => {
     const key = String(sessionId)
     const list = runState.errors.get(key) ?? []
@@ -201,6 +216,7 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
   // HTTP 路由（20 个 /dsh-femwa/* 接口登记）。
   registerRoutes(ctx, {
     resolved, bridge, runState, projections, sessionsStore, godMirror, recordError,
+    runResult: resolveRunResult,
   })
 
   // Bridge lifecycle: start the Python engine subprocess, stop on dispose.
@@ -254,15 +270,27 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
     }
     return { sid, scriptText, effectivePath }
   }
-  // 编辑器上报错误的水位线：takeEditorErrors 每次取走后推进，工具结果只带增量。
-  const editorErrReportedAt = new Map<string, number>()
+  // editor_errors 回传：只取编辑器来源（带 [编辑器·] 前缀）的错误，取走即从
+  // 列表删除。engine 来源的错误（flow_error / 子 agent 失败等）不带走——它们
+  // 已有 steer ❌ 必达通道，不应再经工具返回体重复通知主模型。
+  // errors 大列表保留供画布面板 /dsh-femwa/errors GET 显示用。
   const toolDeps: FemwaToolDeps = {
     takeEditorErrors: (sessionId: string): string[] => {
       const list = runState.errors.get(sessionId) ?? []
-      const since = editorErrReportedAt.get(sessionId) ?? 0
-      const fresh = list.filter((e) => e.ts > since)
-      editorErrReportedAt.set(sessionId, Date.now())
-      return fresh.map((e) => e.text)
+      if (list.length === 0) return []
+      const taken: string[] = []
+      const remaining: typeof list = []
+      for (const e of list) {
+        if (e.text.startsWith('[编辑器·')) {
+          taken.push(e.text)
+        } else {
+          remaining.push(e)
+        }
+      }
+      if (taken.length > 0) {
+        runState.errors.set(sessionId, remaining)
+      }
+      return taken
     },
     mountScript: async (sessionId, scriptPath) => {
       // 双链路①：path + text 一起写。恢复面读取是 text 优先（实际运行版本），
@@ -281,10 +309,18 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
       // 3s 防抖回写会用内存旧本盖掉新写入的地址，重新挂载等于白挂。
       broadcastSse('script_changed', { sessionId })
     },
-    runScript: async (sessionId) => {
-      // fresh_start：从头运行已挂载的剧本（清 checkpoint，reset=true）。
-      const { sid, scriptText, effectivePath } = await resolveMounted(sessionId)
-      await startRunOnSession(ctx, resolved, bridge, runState, sid, scriptText, effectivePath, true)
+    runEditorCommand: (sessionId) => {
+      // fresh_start：模拟按前端 run 按钮。广播 run_request（source:'ai'）→
+      // 编辑器 handleRunWorkflow 做全套检测 → POST /run-result 回传。
+      // 工具侧零检测逻辑（检测只有一份，在前端）。
+      return new Promise<RunResult>((resolve) => {
+        const timer = setTimeout(() => {
+          runRequestPending.delete(sessionId)
+          resolve({ ok: false, error: '前端未响应（30s超时）：femgen 编辑器未打开或未连上 SSE' })
+        }, RUN_REQUEST_TIMEOUT)
+        runRequestPending.set(sessionId, { resolve, timer })
+        broadcastSse('run_request', { sessionId, source: 'ai' })
+      })
     },
     stopScript: async (sessionId) => {
       if (!runState.running) {

@@ -14,7 +14,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { join } from 'node:path'
-import { appendEvent, type ProjectionRegistry } from './projection'
+import { appendEvent, dedupeIndexFor, dedupeStructKey, type ProjectionRegistry } from './projection'
 
 /** 主会话 → 上帝窗镜像白名单：主模型对话（用户输入/思考/工具/回答）进上帝
  * 窗，上帝视角=全视视角（戏外+戏内全部对话）。turn 号保持主会话原号
@@ -100,34 +100,29 @@ export function createGodMirror(deps: {
     const srcSeq = Number(event.seq)
     // 窗内可能存有子代理镜像的「id#seq」字符串复合键（2026-08-24 命名空间隔离），
     // 与本处裸数字键永不相等，天然互不干扰；类型随之放宽为 number | string。
-    const dupBySrc = windows.god.events.some(e => (e.data as { _srcSeq?: number | string } | undefined)?._srcSeq === srcSeq)
+    // ★ O(1) 去重索引（2026-08-26 性能修复）：旧实现每次事件都对 god 窗 events
+    // 做最多 5 次 .some() 全量扫描——13.7 万事件级会话下 O(n²) 秒级卡死（实证
+    // event-loop stall 2514~10274ms）。索引经全局 session/event 钩子增量维护，
+    // 与旧查重语义完全等价（同 _srcSeq / 同 type+turn(:step) → 判重）。
+    const idx = dedupeIndexFor(windows.god)
+    const dupBySrc = idx.srcSeqs.has(srcSeq)
     if (dupBySrc) return
     const mTurn = (event.data as { turn?: number }).turn
     const mStep = (event.data as { step?: number }).step
     if (event.type === 'turn/start' && typeof mTurn === 'number') {
-      const dup = windows.god.events.some(e => e.type === 'turn/start'
-        && (e.data as { turn?: number }).turn === mTurn)
-      if (dup) return
+      if (idx.structKeys.has(`turn/start:${mTurn}`)) return
     }
     if (event.type === 'step/start' && typeof mTurn === 'number' && typeof mStep === 'number') {
-      const dup = windows.god.events.some(e => e.type === 'step/start'
-        && (e.data as { turn?: number }).turn === mTurn
-        && (e.data as { step?: number }).step === mStep)
-      if (dup) return
+      if (idx.structKeys.has(`step/start:${mTurn}:${mStep}`)) return
     }
     // end 侧结构查重（与 start 侧对称）：结构事件不再注入 _srcSeq（见下）后，
     // 源级对账对它们失效，end 重复全靠这里拦——重复的 turn:end 同样破坏
     // react-loop 结构。turn/step 号单调递增不复用，无误杀场景。
     if (event.type === 'turn/end' && typeof mTurn === 'number') {
-      const dup = windows.god.events.some(e => e.type === 'turn/end'
-        && (e.data as { turn?: number }).turn === mTurn)
-      if (dup) return
+      if (idx.structKeys.has(`turn/end:${mTurn}`)) return
     }
     if (event.type === 'step/end' && typeof mTurn === 'number' && typeof mStep === 'number') {
-      const dup = windows.god.events.some(e => e.type === 'step/end'
-        && (e.data as { turn?: number }).turn === mTurn
-        && (e.data as { step?: number }).step === mStep)
-      if (dup) return
+      if (idx.structKeys.has(`step/end:${mTurn}:${mStep}`)) return
     }
     const rawSurface = (event as { surfaceOp?: unknown }).surfaceOp
     const surface = rawSurface === undefined ? undefined : { surfaceOp: rawSurface }
@@ -142,6 +137,10 @@ export function createGodMirror(deps: {
       : { ...(event.data as Record<string, unknown>), _srcSeq: srcSeq }
     try {
       appendEvent(windows.god, event.type, data, surface)
+      // append 成功后补键（索引增量维护；结构性事件查重键与 start/end 两侧对称）。
+      if (!structural) idx.srcSeqs.add(srcSeq)
+      const sk = dedupeStructKey(event.type, data)
+      if (sk !== undefined) idx.structKeys.add(sk)
     } catch (error: unknown) {
       console.log(`[dsh-femwa] main->god mirror(${event.type}) failed: ${String(error)}`)
       return

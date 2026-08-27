@@ -1585,3 +1585,53 @@ femCompiler 是常驻 bridge 子进程启动时一次性 import——GUI 内运�
 2. src/persona.ts injectFemwaDocs 的 femwa:docs section 追加「运行记录查询」段：指路 chronica.py（${packageRoot} 运行时插值，跨机器正确）+ 四个用法 + 对话流/幕后指令两幕说明。
 ### 生效条件
 host 改动——需重启 3081 后新注入文本才出现（注意与 3080 侧重构窗口协调，后构建者胜）。
+## 2026-08-26 修复：会话记录剥空（运行收尾竞态把档案写成 {sessionId}）
+### 病根
+state-files.ts 全部会话记录写入方（writeSessionScript/writePlayResume/updatePlayResume/appendFemSession）都是「async 读→改→async 写」三段式且零互斥。fs.writeFile 有 truncate→write 中间窗口，并发读撞进窗口读到半个 JSON→解析失败被静默当「档案不存在」→从空底重写整份文件。实测场次 869 收尾时（23:37:04，与最后一条 AI 发言同秒）记录被剥成只剩 {"sessionId"}，path/text/rev/femSessions 全灭；此前多次「重启后挂载丢失」实为同因（上一场结束时已中招）。
+### 修改明细（全在 src/state-files.ts，调用方签名零变化）
+1. 新增 recordLocks + withRecordLock(sid, fn)：同一 sessionId 的所有记录变更串行队列，读→改→写全程不交错；
+2. 四个写入方全部改走锁；updatePlayResume 锁内直接经 setPlayResumeLocked 落盘（消除原「内部再调 writePlayResume」的嵌套自锁风险）;
+3. readSessionRecord 加 quarantineOnParseError 参数（仅限持锁写入方开启）：解析失败=真损坏，坏档改名 .corrupt-<ts> 留证并大声报错后按缺失处理；普通读取方不开（并发瞬态撕裂读不可隔离，否则误伤好档）。
+### 验证
+build.mjs 通过，bundle 含隔离逻辑。行为级验证待重启 3081 后：跑任一剧本→flow_done 后检查 user_data/sessions/session-<sid>.json 应完整保留 text/femSessions。
+## 2026-08-26 femwa-run「模拟按前端 run 按钮」（AI 触发复用多端守卫+语法检查）
+### 背景/动机
+用户拍板：femGen 前端的「run 按钮」多端不统一判定逻辑（未落盘修改守卫 femDirty/graphDirty）+ 语法检查（parseFEMS）很珍贵，AI 的 femwa-run 应复用同一份代码——工具不测任何不同，只带「这是 AI 按的」标签触发前端按钮，有错返回给 AI（谁触发就返回给谁）。
+### 修改明细
+1. femGen/src/FemWorAuto.jsx：handleRunWorkflow 加 source 参数（默认 'human'）——AI 触发（'ai'）不弹窗不 alert，各分流点（已有剧在跑/多端不统一/语法错/点火成功/运行错）经 onRunResult 回传（多端不统一时带 conflicts={textDirty,graphDirty,record,local} 供 AI 裁决）；成功时 reset 恒为 true（fresh_start 语义）。组件改 forwardRef + useImperativeHandle 暴露 triggerRun(source)，经 triggerRunRef 调最新 handleRunWorkflow（防闭包陈旧，同 handleGraphToFemRef 惯例）。
+2. src/client-ui/editor-view.tsx：SSE 监听加 run_request 分支→editorRef.triggerRun('ai')；新增 reportRunResult → POST /dsh-femwa/run-result（带 sessionId）。
+3. src/tools.ts：FemwaToolDeps 删 runScript、新增 runEditorCommand(sessionId)；fresh_start 分支改为「广播+等回传」，不再 readScript/takeEditorErrors（成功回执 appendChatBroadcast 🎬 保留）。新增导出 RunResult 类型。
+4. src/index.ts：新增 runRequestPending Map + RUN_REQUEST_TIMEOUT=30s + resolveRunResult；toolDeps.runEditorCommand=广播 run_request{source:'ai'} + await 回传（超时明确报错）；resolveMounted 保留（resume 仍用），runScript 实现删除。
+5. src/routes.ts：新增 route POST /dsh-femwa/run-result（resolve 对应 sessionId 等待者；无等待者静默忽略）。
+### 生效条件
+host+前端双改动——需重启 3081 后才生效（lib/client.js 与 lib/index.js 已重建）。
+## 2026-08-26 单页常驻编辑器架构 v3（编辑器永不卸载 + 内容跟随打开的 Session）
+### 背景/动机
+实测发现「前端必然在线」假设不成立：Fem 编辑器 tab 没激活 → editor-view 未挂载（conversation.view only:active.id）→ host 的 run_request 无人接收 → femwa-run 30s 超时「前端未响应」，坏剧本的编译错误也传不回主模型。用户拍板：内存里只有一个 femgen 网页（单 FEMEditor 实例），内容跟随打开的 Session 加载（打开哪个加载哪个，切 Session 重载）。
+### 修改明细（全在 client 侧，host 零改动）
+1. 新增 src/client-ui/editor-page.tsx：①模块级单页 store（target/锚点/会话引用计数）+ 全局控制 SSE（/dsh-femwa/events 单例，管 run_request 与 script_changed）；②mountFemEditorPage = body 级隐藏容器（fixed inset:0 + visibility:hidden，保留视口尺寸使编辑器布局计算一致）+ createRoot（react-dom/client 已确认在 seed 映射里）；③EditorPageRoot 订阅 store、applyPagePlacement 把根容器 DOM 挪进锚点/挪回隐藏位（同一个 DOM 节点，React 状态零丢失；锚点销毁时即使根容器被连带 detach，fibers 不死，下次 applyPagePlacement 重新挂接即恢复）；④FemEditorPage = 编辑器页（key=sessionId 保证切 Session 全量重载），editor-view 的全部逻辑迁入（session-state 加载/409 冲突弹窗/定稿落盘/导出导入/preflight/restore 横幅/run_result 回传/triggerRun）。
+2. src/client-ui/editor-view.tsx 重写为【锚点】：仅注册/注销 DOM 容器（useLayoutEffect，母会话 id 解析保留）+ composer 隐藏 + data-conversation-composer-overlay 契约；不再自建 SSE/状态。
+3. src/client-ui/view-button.tsx：header.actions 挂载/卸载上报 editorPageOpenSession/CloseSession（refcount 计数，主窗与投影窗同 mainSid 合并）→ 内容跟随「打开的 fem 主会话」。
+4. src/client.tsx：apply() 尾部 mountFemEditorPage(scriptViewInjected)。
+5. femGen/src/FemWorAuto.jsx：坏剧本恢复失败（parseFEMS 抛错）时也 setFemText(initialScript) 载入原文（画布留空）——①人类可就地改；②AI 触发时 handleRunWorkflow 的 parseFEMS 回传真实错误而非「请先编写或导入 FEM 脚本」。
+### 行为语义
+- tab 切换：编辑器不卸载（状态/dirty/SSE 全存活），run_request 永远可达；
+- 切 Session：key 变化 → 编辑器全量重载（从 record），符合「打开哪个加载哪个」；
+- run_request 落在非当前会话：内容切过去加载并跑，跑完不切回（下次会话交互重新对齐）；
+- 锚点（Fem 编辑器 tab）在任意窗口（主窗/投影窗，母会话 id）共享同一实例显示位。
+### 已知待验
+- 隐藏容器从视口尺寸切到锚点时画布自适应（可能有一帧尺寸差异）；
+- 空 rollback：编辑器隐藏时其全局 keydown（space 平移画布）仍生效但不可见（无实际影响）。
+### 生效条件
+纯前端改动——刷新浏览器页面即生效（若缓存旧 client.js 则强刷 Ctrl+F5）。
+
+## 2026-08-27 投影窗去重查重性能修复（O(n) 全扫 → O(1) Set 索引）
+### 病根
+projectionAppend / mirrorMainEventToGod / subagent ensureTurnStart·ensureStepStart 的幂等查重全部是 win.events.some() 全量扫描。投影窗事件积累到 13.7 万级后每次查重 O(n)、事件一多整体 O(n²)，事件循环被同步代码堵死 2.5~10 秒（3081 日志心跳实证 event-loop stall 2514~10274ms）——所有 HTTP RPC 排队超时，症状 = 发消息没反应 + 「signal timed out」+ 无法建立新会话 + 时好时坏（会话越大越频繁）。
+### 修改明细（查重语义零变化，只换数据结构）
+1. src/projection.ts：新增模块级 WeakMap<Session, 索引> 三件套——dedupeIndexFor（懒构建：首次遍历现有 events 全量建 Set）、dedupeStructKey（模块级化）、dedupeMarkIndexed（仅对已建索引的窗增量补键）；projectionAppend 查重与 append 后补键、projectionHasDescriptor 都改走索引；
+2. src/god-mirror.ts：mirrorMainEventToGod 5 处 .some()（_srcSeq + 4 结构键）改 Set 查重 + append 后补键；
+3. src/subagent.ts：ensureTurnStart/ensureStepStart 兜底查重改索引；
+4. createProjectionRegistry 挂全局 ctx.on('session/event') 钩子——任何 append 来源（含 dsh 内部 surface 自动补 start）都同步补键，索引不漏。
+### 验证
+tsc 双绿；lib/index.js 重建；3081 重启后：13.7 万事件大会话 catch-up/投影请求由「卡 10 秒」变「毫秒级返回」（503 等防错响应也即时到达），健康探测全部 200 <50ms。用户待实测发消息/跑剧本流畅度。

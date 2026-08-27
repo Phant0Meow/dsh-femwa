@@ -28,6 +28,7 @@ import { femStreamAcquire } from './client-ui/stream-store'
 import { FemwaChatNodeView, femwaChatDefinition } from './client-ui/chat-node'
 import { FemDirectorNodeView, femDirectorDefinition } from './client-ui/director-node'
 import { FemEditorView, type ScriptViewInjected } from './client-ui/editor-view'
+import { mountFemEditorPage } from './client-ui/editor-page'
 import { FemButton, type FemButtonInjected } from './client-ui/fem-button'
 import { FemSubagentCount, FemViewButton, type FemViewInjected } from './client-ui/view-button'
 import { ProjectionComposer, type ProjectionComposerInjected } from './client-ui/composer'
@@ -315,6 +316,12 @@ export function apply(ctx: any): void {
     },
     FemEditorView,
   ))
+
+  // ── 单页常驻编辑器（2026-08-26 v3）───────────────────────────────────────
+  // body 级隐藏容器 + createRoot：页面寿命内只有一份 FEMEditor 实例，内容
+  // 跟随打开的 Session（view-button 上报 / 锚点注册 / run_request 切目标）。
+  // conversation.view 的 FemEditorView 只是锚点（激活时接收宿主的 DOM）。
+  mountFemEditorPage(scriptViewInjected)
 
   // 投影窗 composer：selector 匹配 fem-proj-* 会话 → 可输入 composer
   // （替代 dsh 默认的 SubagentReadOnlyComposer 只读链）。priority -20

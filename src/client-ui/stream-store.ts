@@ -130,8 +130,19 @@ function femStreamApply(msg: FemStreamMsg): void {
 
 // SSE 单例（引用计数）：apply() 时页面级预开一条常驻连接——store 不依赖
 // 锚点挂载才喂帧，锚点晚挂载 read() 也能拿到全量缓冲。
+// 2026-08-26：控制事件（run_request/script_changed）也搭这条全局 SSE 便车
+// （subscribeControlEvents）——与 fem_stream 共用一个连接，避免第二条长连接
+// 挤占浏览器 HTTP/1.1 每域 6 连接池（曾致 RPC fetch「signal timed out」）。
 let femStreamEs: EventSource | undefined
 let femStreamEsRefs = 0
+
+/** 控制事件订阅（editor-page 单页宿主用）：全局 SSE 收到的每条消息都会转发。 */
+const controlHandlers = new Set<(msg: { type?: string; data?: Record<string, unknown> }) => void>()
+
+export function subscribeControlEvents(h: (msg: { type?: string; data?: Record<string, unknown> }) => void): () => void {
+  controlHandlers.add(h)
+  return () => { controlHandlers.delete(h) }
+}
 
 export function femStreamAcquire(): () => void {
   femStreamEsRefs += 1
@@ -141,6 +152,12 @@ export function femStreamAcquire(): () => void {
       try {
         const msg = JSON.parse(ev.data) as { type?: string; data?: Record<string, unknown> }
         if (msg.type === 'fem_stream') femStreamApply((msg.data ?? {}) as FemStreamMsg)
+        // 控制事件转发给单页宿主（run_request / script_changed 等）。
+        if (controlHandlers.size > 0) {
+          for (const h of [...controlHandlers]) {
+            try { h(msg) } catch { /* 单个处理器异常不影响广播 */ }
+          }
+        }
       } catch {
         // 非 JSON SSE 行忽略
       }

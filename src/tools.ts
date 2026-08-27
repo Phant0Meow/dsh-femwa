@@ -11,6 +11,15 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import { appendChatBroadcast, type ProjectionRegistry } from './projection'
 
+/** 前端「模拟按 run 按钮」回传给工具的结果（POST /dsh-femwa/run-result）。 */
+export type RunResult = {
+  ok: boolean
+  error?: string
+  /** 多端不统一时：哪边脏 + record 原文 + 编辑器本地文本（AI 自己裁决用）。 */
+  conflicts?: Record<string, unknown>
+  note?: string
+}
+
 /** index.ts 注入给工具的执行依赖。 */
 export interface FemwaToolDeps {
   /** 挂载剧本到会话（写会话记录 {path}，用户 femgen 立即可见）。 */
@@ -18,8 +27,9 @@ export interface FemwaToolDeps {
 
   /** 取走自上次调用以来的编辑器上报错误（restore/解析失败等），随工具结果回传主模型。 */
   takeEditorErrors?(sessionId: string): string[]
-  /** 从头运行已挂载的剧本（清 checkpoint，全新一轮）。 */
-  runScript(sessionId: string): Promise<void>
+  /** AI 触发 fresh_start：模拟按前端 run 按钮——广播 run_request 给编辑器，
+   * 等前端守卫+语法检查+点火后的回传结果。工具不做任何检测。 */
+  runEditorCommand(sessionId: string): Promise<RunResult>
   /** 停止当前运行（保留 checkpoint，可 resume 续跑）。 */
   stopScript(sessionId: string): Promise<void>
   /** 暂停当前运行（bridge 现有语义；保留 checkpoint）。 */
@@ -232,11 +242,20 @@ export function registerFemwaTools(
     const sid = String(agent.session.id)
     switch (action) {
       case 'fresh_start': {
-        await deps.runScript(sid)
-        const editorErrors = deps.takeEditorErrors?.(sid) ?? []
+        // AI 触发 = 模拟人类按前端 run 按钮：多端守卫 + 语法检查全由前端
+        // handleRunWorkflow 完成（一份逻辑），结果经 run-result 回传。
+        // 本工具不再做任何检测（不 readScript / 不 takeEditorErrors）。
+        const result = await deps.runEditorCommand(sid)
+        if (result.ok !== true) {
+          return {
+            ok: false,
+            error: result.error ?? '前端未响应（编辑器未打开或超时）',
+            ...(result.conflicts !== undefined ? { conflicts: result.conflicts } : {}),
+          }
+        }
         // 成功回执广播全部窗口给用户看（主会话+god+角色窗；纯 UI，不进模型上下文）。
         appendChatBroadcast(ctx, agent.session, projections, '🎬 剧本已开始（在上帝视角窗口查看）')
-        return { ok: true, action, note: '已从头开始运行剧本', ...(editorErrors.length > 0 ? { editor_errors: editorErrors } : {}) }
+        return { ok: true, action, note: result.note ?? '已从头开始运行剧本' }
       }
       case 'stop':
         // 停止/暂停的用户通知由引擎 flow_stopped 统一广播（前端按钮触发也走

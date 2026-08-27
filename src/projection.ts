@@ -18,7 +18,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { SessionId, type Session } from '@deepseek-ai/dsh-session'
+import { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 
 /** 会话事件的动态 append 面：事件类型在运行时来自引擎事件流/镜像白名单
  * （超出静态 SessionEventMap 的字面量联合，如 subagent/descriptor、镜像的
@@ -26,6 +26,66 @@ import { SessionId, type Session } from '@deepseek-ai/dsh-session'
  * 与直接调用完全一致，仅收敛类型（2026-08-23 重构类型整理）。 */
 export function appendEvent(session: Session, type: string, data: unknown, surface?: unknown): void {
   ;(session.append as (t: string, d: unknown, s?: unknown) => void)(type, data, surface)
+}
+
+// ── 投影窗去重索引（2026-08-26 性能修复）─────────────────────────────────
+// 此前 mirror/projection 的幂等查重是 win.events.some() 全量扫描——投影窗
+// 事件积累到 13.7 万级后每次查重 O(n)、事件一多整体 O(n²)，事件循环被同步
+// 代码堵死数秒（实锤：event-loop stall 2514~10274ms，「signal timed out」
+// + 无法建会话 + 时好时坏全是它的症状）。这里换 O(1) Set 索引：
+//  - 懒构建：首次查询某窗时遍历该窗现有 events 建索引（一次性 O(n)）；
+//  - 增量维护：全局 session/event 钩子对【已建索引】的窗同步补键——无论
+//    append 来自插件（projectionAppend/mirror/subagent）还是 dsh 内部机制
+//    （surface 自动补 turn/start 等），索引都跟上，不会漏键；
+//  - 查重语义与旧 .some() 完全等价（同 _srcSeq / 同结构键 → 判重）。
+const winDedupeIndex = new WeakMap<Session, {
+  srcSeqs: Set<unknown>
+  structKeys: Set<string>
+  hasDescriptor: boolean
+}>()
+
+/** 结构键（与旧 structKey 同款语义，模块级化供查重/建索引共用）：
+ *  turn/start|turn/end → `${type}:${turn}`；step/start|step/end → `${type}:${turn}:${step}`。 */
+export function dedupeStructKey(eventType: string, d: Record<string, unknown>): string | undefined {
+  if (typeof d.turn !== 'number') return undefined
+  if (eventType === 'turn/start' || eventType === 'turn/end') return `${eventType}:${d.turn}`
+  if ((eventType === 'step/start' || eventType === 'step/end') && typeof d.step === 'number') {
+    return `${eventType}:${d.turn}:${d.step}`
+  }
+  return undefined
+}
+
+/** 取某投影窗的去重索引（懒构建：首次遍历现有 events 全量建）。 */
+export function dedupeIndexFor(session: Session): {
+  srcSeqs: Set<unknown>
+  structKeys: Set<string>
+  hasDescriptor: boolean
+} {
+  let idx = winDedupeIndex.get(session)
+  if (idx === undefined) {
+    idx = { srcSeqs: new Set(), structKeys: new Set(), hasDescriptor: false }
+    for (const e of session.events) {
+      const d = (e.data ?? {}) as Record<string, unknown>
+      if (d._srcSeq !== undefined) idx.srcSeqs.add(d._srcSeq)
+      const sk = dedupeStructKey(e.type, d)
+      if (sk !== undefined) idx.structKeys.add(sk)
+      if ((e.type as string) === 'subagent/descriptor') idx.hasDescriptor = true
+    }
+    winDedupeIndex.set(session, idx)
+  }
+  return idx
+}
+
+/** 增量补键（仅对已建索引的窗；未建索引的窗无需——首次查询会懒构建）。
+ *  挂在全局 session/event 钩子上，保证任何 append 来源都不漏键。 */
+export function dedupeMarkIndexed(session: Session, type: string, data: unknown): void {
+  const idx = winDedupeIndex.get(session)
+  if (idx === undefined) return
+  const d = (data ?? {}) as Record<string, unknown>
+  if (d._srcSeq !== undefined) idx.srcSeqs.add(d._srcSeq)
+  const sk = dedupeStructKey(type, d)
+  if (sk !== undefined) idx.structKeys.add(sk)
+  if (type === 'subagent/descriptor') idx.hasDescriptor = true
 }
 
 // ── 1) chat 行写入 ────────────────────────────────────────────────────────
@@ -136,9 +196,11 @@ function projectionId(sid: string, actor: string): string {
   return `fem-proj-${sid}-${projectionActorKey(actor)}`
 }
 
-/** 投影窗是否已带 subagent/descriptor（幂等：fold 取第一个事件为权威，不得重复）。 */
+/** 投影窗是否已带 subagent/descriptor（幂等：fold 取第一个事件为权威，不得重复）。
+ *  O(1) 走去重索引（懒构建一次性全扫，此后增量）；旧实现每次 .some() 全扫
+ *  events——投影窗 13.7 万事件级时每次 ensure 都是一次全数组扫描。 */
 function projectionHasDescriptor(session: Session): boolean {
-  return session.events.some(e => (e.type as string) === 'subagent/descriptor')
+  return dedupeIndexFor(session).hasDescriptor
 }
 
 /** 唤醒的冷投影窗 detach 收集器：apply 的 effect 统一挂清理（插件卸载时
@@ -287,24 +349,20 @@ export function projectionAppend(
   // 结构等价键兜底：同 type+turn(:step) 已存在即跳过。真实源 start 与合成
   // start 的竞态也靠它拦。
   const srcSeq = (data as { _srcSeq?: number | string })._srcSeq
-  const structKey = (eventType: string, d: Record<string, unknown>): string | undefined => {
-    if (typeof d.turn !== 'number') return undefined
-    if (eventType === 'turn/start' || eventType === 'turn/end') return `${eventType}:${d.turn}`
-    if ((eventType === 'step/start' || eventType === 'step/end') && typeof d.step === 'number') {
-      return `${eventType}:${d.turn}:${d.step}`
-    }
-    return undefined
-  }
-  const skey = structKey(type, data)
+  const skey = dedupeStructKey(type, data)
   const appendTo = (win: Session | undefined): void => {
     if (win === undefined) return
-    if (srcSeq !== undefined) {
-      const dup = win.events.some(e => (e.data as { _srcSeq?: number | string } | undefined)?._srcSeq === srcSeq)
-      if (dup) return
-    }
-    if (skey !== undefined && win.events.some(e => structKey(e.type, (e.data ?? {}) as Record<string, unknown>) === skey)) return
+    // O(1) 去重索引（2026-08-26 性能修复）：与旧 .some() 全扫语义完全等价的
+    // Set 查重；索引由全局 session/event 钩子增量维护，任何 append 来源不漏键。
+    const idx = dedupeIndexFor(win)
+    if (srcSeq !== undefined && idx.srcSeqs.has(srcSeq)) return
+    if (skey !== undefined && idx.structKeys.has(skey)) return
     try {
       appendEvent(win, type, data, surfaceOp)
+      // append 成功后补键（防本函数后续再次命中；兼防并发竞态下二次写入）。
+      if (srcSeq !== undefined) idx.srcSeqs.add(srcSeq)
+      if (skey !== undefined) idx.structKeys.add(skey)
+      if (type === 'subagent/descriptor') idx.hasDescriptor = true
     } catch (error: unknown) {
       console.log(`[dsh-femwa] projectionAppend(${type}) failed: ${String(error)}`)
     }
@@ -328,6 +386,15 @@ export interface ProjectionRegistry {
 export function createProjectionRegistry(ctx: Context): ProjectionRegistry {
   const windows = new Map<string, { god?: Session; actors: Map<string, Session> }>()
   const inflight = new Map<string, Promise<unknown>>()
+
+  // 去重索引的全局增量钩子（2026-08-26 性能修复配套）：任何会话事件落地后
+  // 给【已建索引】的窗补键——无论 append 来自插件（projectionAppend/mirror/
+  // subagent）还是 dsh 内部机制（surface 自动补 turn/start 等），索引不漏键。
+  // 未建索引的会话（普通主会话/陌生窗）WeakMap 查询即返回，开销 O(1) 可忽略。
+  ctx.on('session/event', (session: Session, event: SessionEvent) => {
+    dedupeMarkIndexed(session, event.type, event.data)
+  })
+
   const buildOnce = async (sid: string, actors: string[], cwd: string): Promise<void> => {
     const existing = windows.get(sid)
     if (existing !== undefined) {

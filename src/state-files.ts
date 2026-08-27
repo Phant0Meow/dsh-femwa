@@ -43,15 +43,58 @@ export function scriptFingerprint(text: string): string {
   return `sha256:${createHash('sha256').update(normalized, 'utf8').digest('hex')}`
 }
 
-/** 读会话记录文件全文（文本域+演出域）。 */
-async function readSessionRecord(femwaRoot: string, sessionId: string): Promise<SessionRecordFile | undefined> {
+/** 读会话记录文件全文（文本域+演出域）。
+ * quarantineOnParseError：仅限持锁的写入方开启——锁保证本进程写入互斥，
+ * 锁内解析失败=真损坏而非并发撕裂读，此时把坏档改名留证并大声报错
+ * （不许静默吞错红线）后按缺失处理。普通读取方严禁开启：并发读到半截
+ * 文件属正常瞬态，隔离反而会把好档案误伤走。 */
+async function readSessionRecord(femwaRoot: string, sessionId: string, quarantineOnParseError = false): Promise<SessionRecordFile | undefined> {
   const { readFile } = await import('node:fs/promises')
+  let raw: string
   try {
-    const raw = await readFile(sessionScriptPath(femwaRoot, sessionId), 'utf8')
-    return JSON.parse(raw) as SessionRecordFile
+    raw = await readFile(sessionScriptPath(femwaRoot, sessionId), 'utf8')
   } catch {
+    return undefined // 文件不存在=正常缺省
+  }
+  try {
+    return JSON.parse(raw) as SessionRecordFile
+  } catch (error) {
+    if (!quarantineOnParseError) return undefined
+    const { rename } = await import('node:fs/promises')
+    const quarantined = `${sessionScriptPath(femwaRoot, sessionId)}.corrupt-${Date.now()}`
+    try {
+      await rename(sessionScriptPath(femwaRoot, sessionId), quarantined)
+      console.log(`[dsh-femwa] ⚠️ 会话记录损坏，原档已隔离留证: ${quarantined}（${String(error)}）`)
+    } catch (renameError) {
+      console.log(`[dsh-femwa] ⚠️ 会话记录解析失败且隔离失败: ${String(error)} / ${String(renameError)}`)
+    }
     return undefined
   }
+}
+
+// ── 会话记录并发控制（2026-08-26 记录剥空 bug 修复）─────────────────────
+//
+// 病根：全部写入方都是「async 读 → 改 → async 写」三段式且彼此无互斥。
+// fs.writeFile 有 truncate→write 的中间窗口，并发的读撞进窗口会读到半个
+// JSON，解析失败被静默当作「档案不存在」，写入方遂从空底重写整份文件——
+// path/text/rev/femSessions 全部蒸发（实测 2026-08-25 场次 869 运行收尾时
+// 剥空成 {sessionId}）。药方：同一 sessionId 的所有记录变更经
+// withRecordLock 串行化；锁内解析失败按真损坏隔离留证。
+const recordLocks = new Map<string, Promise<unknown>>()
+
+/** 同一 sessionId 的记录变更串行队列：fn 排在前一变更之后执行，
+ * 读到写的全程不与其他变更交错。 */
+function withRecordLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T> {
+  const prev = recordLocks.get(sessionId) ?? Promise.resolve()
+  const next = prev.then(() => fn(), () => fn())
+  recordLocks.set(sessionId, next)
+  return (async (): Promise<T> => {
+    try {
+      return await next
+    } finally {
+      if (recordLocks.get(sessionId) === next) recordLocks.delete(sessionId)
+    }
+  })()
 }
 
 /** 写回会话记录文件整对象。不碰 rev——rev 只归文本快照协议管，
@@ -83,35 +126,43 @@ export async function loadValidPlayResume(femwaRoot: string, sessionId: string, 
   return resume
 }
 
-/** 整块写/删断点（null=删除）。只动 resume 键，不碰文本域与 femSessions。 */
-export async function writePlayResume(femwaRoot: string, sessionId: string, resume: PlayResume | null): Promise<void> {
-  const record: SessionRecordFile = { ...(await readSessionRecord(femwaRoot, sessionId) ?? {}) }
+/** 锁内专用：整块写/删断点（调用方须已持有该 sid 的记录锁）。
+ * 只动 resume 键，不碰文本域与 femSessions。 */
+async function setPlayResumeLocked(femwaRoot: string, sessionId: string, resume: PlayResume | null): Promise<void> {
+  const record: SessionRecordFile = { ...(await readSessionRecord(femwaRoot, sessionId, true) ?? {}) }
   if (resume === null) delete record.resume
   else record.resume = resume
   await writeSessionRecord(femwaRoot, sessionId, record)
 }
 
-/** 按键合并更新断点块（checkpoint 事件增量到达、开跑盖指纹均走这里）。 */
-export async function updatePlayResume(
+/** 整块写/删断点（null=删除）。经会话记录串行队列执行。 */
+export function writePlayResume(femwaRoot: string, sessionId: string, resume: PlayResume | null): Promise<void> {
+  return withRecordLock(sessionId, () => setPlayResumeLocked(femwaRoot, sessionId, resume))
+}
+
+/** 按键合并更新断点块（checkpoint 事件增量到达、开跑盖指纹均走这里）。
+ * 经会话记录串行队列执行；锁内直接落盘，不再嵌套排队（防自锁死锁）。 */
+export function updatePlayResume(
   femwaRoot: string,
   sessionId: string,
   patch: Partial<Omit<PlayResume, 'fingerprint'>> & Partial<Pick<PlayResume, 'fingerprint'>>,
 ): Promise<void> {
-  const base: PlayResume = (await readSessionRecord(femwaRoot, sessionId))?.resume ?? { fingerprint: '' }
-  const next: PlayResume = {
-    ...base,
-    ...patch,
-  }
-  await writePlayResume(femwaRoot, sessionId, next)
+  return withRecordLock(sessionId, async () => {
+    const base: PlayResume = (await readSessionRecord(femwaRoot, sessionId, true))?.resume ?? { fingerprint: '' }
+    await setPlayResumeLocked(femwaRoot, sessionId, { ...base, ...patch })
+  })
 }
 
-/** 记一场演出：dsh 会话 ↔ fem 场次的一对多账本（末位=当前场次）。连续去重。 */
-export async function appendFemSession(femwaRoot: string, sessionId: string, femSessionId: number): Promise<void> {
-  const record: SessionRecordFile = { ...(await readSessionRecord(femwaRoot, sessionId) ?? {}) }
-  const list = record.femSessions ?? []
-  if (list[list.length - 1] === femSessionId) return
-  record.femSessions = [...list, femSessionId]
-  await writeSessionRecord(femwaRoot, sessionId, record)
+/** 记一场演出：dsh 会话 ↔ fem 场次的一对多账本（末位=当前场次）。连续去重。
+ * 经会话记录串行队列执行。 */
+export function appendFemSession(femwaRoot: string, sessionId: string, femSessionId: number): Promise<void> {
+  return withRecordLock(sessionId, async () => {
+    const record: SessionRecordFile = { ...(await readSessionRecord(femwaRoot, sessionId, true) ?? {}) }
+    const list = record.femSessions ?? []
+    if (list[list.length - 1] === femSessionId) return
+    record.femSessions = [...list, femSessionId]
+    await writeSessionRecord(femwaRoot, sessionId, record)
+  })
 }
 
 /** turn→scope 映射文件路径：一 Fem 会话一个 JSON（重启后 /dsh-femwa/turn-scopes 重建用）。 */
@@ -161,32 +212,35 @@ export type WriteSessionScriptResult =
   | { ok: false; reason: 'conflict'; record: SessionScriptRecord }
 
 /** 写会话剧本记录（覆盖式，自动 rev+1）。expectRev 非空时做乐观锁校验：
- * 与服务端当前 rev 不符 → 拒绝写入并返回当前记录（多端并发编辑，后写者输）。 */
-export async function writeSessionScript(
+ * 与服务端当前 rev 不符 → 拒绝写入并返回当前记录（多端并发编辑，后写者输）。
+ * 经会话记录串行队列执行。 */
+export function writeSessionScript(
   femwaRoot: string,
   sessionId: string,
   record: SessionScriptRecord,
   expectRev?: number,
 ): Promise<WriteSessionScriptResult> {
-  const prevFile = await readSessionRecord(femwaRoot, sessionId)
-  if (expectRev !== undefined && (prevFile?.rev ?? 0) !== expectRev) {
-    const conflictRecord: SessionScriptRecord = {}
-    if (prevFile?.path !== undefined) conflictRecord.path = prevFile.path
-    if (prevFile?.text !== undefined) conflictRecord.text = prevFile.text
-    if (prevFile?.rev !== undefined) conflictRecord.rev = prevFile.rev
-    return { ok: false, reason: 'conflict', record: conflictRecord }
-  }
-  const rev = (prevFile?.rev ?? 0) + 1
-  // 文本域（path/text）整体以本次传入为准——「一致→只存地址」依赖字段替换语义；
-  // 演出域（femSessions/resume）是 host 独占的运行态，跨文本写入保留。
-  const next: SessionRecordFile = {
-    ...(prevFile?.femSessions !== undefined ? { femSessions: prevFile.femSessions } : {}),
-    ...(prevFile?.resume !== undefined ? { resume: prevFile.resume } : {}),
-    ...record,
-    rev,
-  }
-  await writeSessionRecord(femwaRoot, sessionId, next)
-  return { ok: true, rev }
+  return withRecordLock(sessionId, async (): Promise<WriteSessionScriptResult> => {
+    const prevFile = await readSessionRecord(femwaRoot, sessionId, true)
+    if (expectRev !== undefined && (prevFile?.rev ?? 0) !== expectRev) {
+      const conflictRecord: SessionScriptRecord = {}
+      if (prevFile?.path !== undefined) conflictRecord.path = prevFile.path
+      if (prevFile?.text !== undefined) conflictRecord.text = prevFile.text
+      if (prevFile?.rev !== undefined) conflictRecord.rev = prevFile.rev
+      return { ok: false, reason: 'conflict', record: conflictRecord }
+    }
+    const rev = (prevFile?.rev ?? 0) + 1
+    // 文本域（path/text）整体以本次传入为准——「一致→只存地址」依赖字段替换语义；
+    // 演出域（femSessions/resume）是 host 独占的运行态，跨文本写入保留。
+    const next: SessionRecordFile = {
+      ...(prevFile?.femSessions !== undefined ? { femSessions: prevFile.femSessions } : {}),
+      ...(prevFile?.resume !== undefined ? { resume: prevFile.resume } : {}),
+      ...record,
+      rev,
+    }
+    await writeSessionRecord(femwaRoot, sessionId, next)
+    return { ok: true, rev }
+  })
 }
 
 /** 读会话剧本记录；不存在返回 undefined。 */

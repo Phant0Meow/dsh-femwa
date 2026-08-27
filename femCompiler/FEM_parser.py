@@ -1722,6 +1722,93 @@ def validate_flow_reentry(script) -> None:
         check(mod.flow, f"module {mname}")
 
 
+# ── 变量声明校验（2026-08-26 新增）──────────────────────────
+# 与前端 femParser.jsx validateDeclarations 规则一致：
+#   1. for 循环变量必须在 vars:（或模块 vars:）中声明
+#   2. for 迭代器若为裸标识符（非列表/引号字符串）必须已声明
+#   3. if 条件表达式里的裸标识符（非引号字符串/数字/保留字）
+#      必须是已声明变量/actor/循环变量
+# 纯增量校验，只读 script 对象不修改，不影响现有校验流程。
+
+_VAR_DECL_RESERVED = frozenset([
+    'and', 'or', 'not', 'in', 'is',
+    'True', 'False', 'None', 'true', 'false', 'TRUE', 'FALSE',
+])
+
+
+def _extract_cond_identifiers(cond: str) -> list:
+    """剥离字符串字面量后提取裸标识符（与前端 _extractCondIdentifiers 一致）。"""
+    no_str = re.sub(r'"[^"]*"|\'[^\']*\'', '""', cond)
+    return re.findall(r'@?[\w]+(?:\.[\w]+)*', no_str)
+
+
+def _main_ident(ident: str) -> str:
+    dot = ident.find('.')
+    return ident[:dot] if dot >= 0 else ident
+
+
+def validate_variable_declarations(script: 'Script') -> None:
+    top_vars = set((script.vars or {}).keys())
+    actors = set((script.actors or {}).keys())
+
+    def validate_flow(flow: Optional[FlowGraph], scope_vars: set, ctx_name: str) -> None:
+        if flow is None:
+            return
+        loop_vars = set()
+
+        # 1) for 循环变量与迭代器声明检查
+        for node in flow.nodes.values():
+            meta = node.meta or {}
+            if meta.get('gw_kind') != 'for':
+                continue
+            var_name = meta.get('var_name', '')
+            iterable = meta.get('iterable', '')
+            if not var_name:
+                continue
+            if var_name not in scope_vars:
+                raise SyntaxError(
+                    f'for 循环变量 "{var_name}" 未在 vars: 中声明'
+                    f'（{ctx_name}，for 条件: "for {var_name} in {iterable}"）。'
+                    f'所有循环变量必须在 vars: 中预先声明，例如: {var_name} = ""'
+                )
+            loop_vars.add(var_name)
+            iterable_s = iterable.strip()
+            if re.match(r'^@?[\w]+$', iterable_s) and iterable_s not in scope_vars:
+                raise SyntaxError(
+                    f'for 迭代器 "{iterable_s}" 未在 vars: 中声明'
+                    f'（{ctx_name}，for 条件: "for {var_name} in {iterable}"）'
+                )
+
+        # 2) 条件表达式裸标识符检查
+        known = scope_vars | actors | loop_vars
+        for edge in flow.edges:
+            if not edge.condition:
+                continue
+            for ident in _extract_cond_identifiers(edge.condition):
+                if ident in _VAR_DECL_RESERVED:
+                    continue
+                main = _main_ident(ident)
+                if re.match(r'^\d+(\.\d+)?$', main):
+                    continue
+                if main.startswith('@'):
+                    if main not in actors and main not in scope_vars and main not in loop_vars:
+                        raise SyntaxError(
+                            f'条件 "{edge.condition}" 引用了未声明的 actor/变量 "{main}"'
+                            f'（{ctx_name}，边 {edge.source} -> {edge.target}）'
+                        )
+                elif main not in known:
+                    raise SyntaxError(
+                        f'条件 "{edge.condition}" 引用了未声明的变量 "{main}"'
+                        f'（{ctx_name}，边 {edge.source} -> {edge.target}）。'
+                        f'字符串字面量请加引号，如 == "ai"；所有变量须在 vars: 中声明'
+                    )
+
+    validate_flow(script.flow, top_vars, 'mainflow')
+    for mname, mod in (script.modules or {}).items():
+        mod_vars = top_vars | set((mod.locals or {}).keys())
+        validate_flow(mod.flow, mod_vars, f'module {mname}')
+
+
 def parse_script(text: str, base_dir: str = ".", models: Optional[Dict[str, Any]] = None,
                  soul_checker: Optional[Callable[[str], bool]] = None) -> Script:
     """主解析入口：文本 → Script 对象；models 非空时编译期校验 AI actor 的 source；
@@ -1801,5 +1888,8 @@ def parse_script(text: str, base_dir: str = ".", models: Optional[Dict[str, Any]
 
     # 编译期检测：回到「多条无条件出边」的节点（分支数爆炸模式）
     validate_flow_reentry(script)
+
+    # 编译期变量声明校验（2026-08-26）：for 循环变量/迭代器/条件裸标识符
+    validate_variable_declarations(script)
 
     return script
