@@ -25,8 +25,8 @@ import { editorPageOpenSession, editorPageCloseSession } from './editor-page'
 // 活 tab 对齐过去（走官方 tab 点击链路 actions.setView，持久化行为与手点一
 // 致）。不新增任何持久化存储。
 
-/** 「Fem 编辑器」标签页固定文案（本插件 conversation.view 注册的 label）。 */
-const FEM_EDITOR_TAB_LABEL = 'Fem 编辑器'
+/** 「Fem 剧本」标签页固定文案（本插件 conversation.view 注册的 label）。 */
+const FEM_EDITOR_TAB_LABEL = 'Fem 剧本'
 /** 对话标签页文案（ui-conversation locales view.chat：中文产品文案为主，英文兜底）。 */
 const CHAT_TAB_LABELS = ['对话', 'Chat']
 
@@ -90,7 +90,7 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
   // 会话切换重挂载，fem 家族窗口恢复显示。
   useEffect(() => {
     const tab = [...document.querySelectorAll<HTMLElement>('[role="tab"]')]
-      .find(el => el.textContent === 'Fem 编辑器')
+      .find(el => el.textContent === FEM_EDITOR_TAB_LABEL)
     if (tab === undefined) return
     tab.style.display = mainSid !== undefined ? '' : 'none'
     return () => { tab.style.display = '' }

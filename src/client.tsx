@@ -311,7 +311,7 @@ export function apply(ctx: any): void {
       name: 'conversation.view',
       id: 'femwa',
       order: 20,
-      label: () => 'Fem 编辑器',
+      label: () => 'Fem 剧本',
       inject: scriptViewInjected,
     },
     FemEditorView,
