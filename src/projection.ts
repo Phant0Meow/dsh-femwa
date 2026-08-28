@@ -22,6 +22,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { readTurnScopeFile } from './state-files'
 
 /** 会话事件的动态 append 面：事件类型在运行时来自引擎事件流/镜像白名单
  * （超出静态 SessionEventMap 的字面量联合，如 subagent/descriptor、镜像的
@@ -414,7 +415,63 @@ export interface ProjectionRegistry {
   get(sid: string): ProjectionWindows | undefined
 }
 
-export function createProjectionRegistry(ctx: Context): ProjectionRegistry {
+// ── 3.5) 戏内窗归档回填 ───────────────────────────────────────────────────
+
+/** 已确认完成回填的会话（进程内缓存；重启后重查一次，门槛判定幂等）。 */
+const stageBackfilled = new Set<string>()
+
+/**
+ * 戏内窗归档回填（2026-08-27）：旧剧本的 stage 窗迟到于历史演出，日志里只有
+ * descriptor——宿主 blank 位（sessionBlank 只认 turn/start）会把它判成空会话，
+ * 前端走 Hero 态隐藏整个 header chrome，还有被"新建会话"复用的风险。这里从
+ * god 窗复制【可判定为戏内】的事件，让 stage 窗获得与其他投影窗同款的
+ * turn/start 结构与内容。可判定=三者之一：
+ *  ① `dsh-femwa/chat` 行（chat 行只存在于投影窗语境，无脑复制）；
+ *  ② `_srcSeq` 为 string 且含 '#'（2026-08-24 命名空间隔离后的子代理镜像；
+ *     裸数字 _srcSeq 是主会话镜像=戏外，绝不复制——宁缺勿污）；
+ *  ③ turn/step 结构事件且 turn ∈ turn_scopes（子代理合成 turn 的权威记录）。
+ * 幂等：仅当 stage 窗还没有 turn/start 时执行；去重索引经全局 session/event
+ * 钩子自动补键，与实时流入的事件天然互斥（同结构键不会双写）。
+ */
+async function backfillStageArchive(femwaRoot: string, sid: string, god: Session, stage: Session): Promise<void> {
+  if (stageBackfilled.has(sid)) return
+  if (stage.events.some(event => event.type === 'turn/start')) {
+    stageBackfilled.add(sid)
+    return
+  }
+  let scopeMap: Record<string, string[]>
+  try {
+    scopeMap = await readTurnScopeFile(femwaRoot, sid)
+  } catch (error: unknown) {
+    console.log(`[dsh-femwa] stage backfill ${sid}: read turn-scopes failed: ${String(error)}`)
+    return
+  }
+  const archivedTurns = new Set(Object.keys(scopeMap).map(Number))
+  let copied = 0
+  for (const event of god.events) {
+    const data = event.data as { turn?: number; _srcSeq?: number | string }
+    const structural = event.type === 'turn/start' || event.type === 'turn/end'
+      || event.type === 'step/start' || event.type === 'step/end'
+    const eligible = event.type === 'dsh-femwa/chat'
+      || (typeof data._srcSeq === 'string' && data._srcSeq.includes('#'))
+      || (structural && typeof data.turn === 'number' && archivedTurns.has(data.turn))
+    if (!eligible) continue
+    const rawSurface = (event as { surfaceOp?: unknown }).surfaceOp
+    const surface = rawSurface === undefined ? undefined : { surfaceOp: rawSurface }
+    try {
+      appendEvent(stage, event.type, { ...data }, surface)
+      copied += 1
+    } catch (error: unknown) {
+      console.log(`[dsh-femwa] stage backfill ${sid}: copy ${event.type}#${String(event.seq)} failed: ${String(error)}`)
+    }
+  }
+  stageBackfilled.add(sid)
+  if (copied > 0) {
+    console.log(`[dsh-femwa] stage backfill ${sid}: +${copied} in-script events from god window`)
+  }
+}
+
+export function createProjectionRegistry(ctx: Context, femwaRoot?: string): ProjectionRegistry {
   const windows = new Map<string, ProjectionWindows>()
   const inflight = new Map<string, Promise<unknown>>()
 
@@ -439,10 +496,17 @@ export function createProjectionRegistry(ctx: Context): ProjectionRegistry {
       if (existing.god === undefined) existing.god = await ensureProjectionWindow(ctx, sid, GOD_ACTOR, cwd)
       // 戏内窗同上帝窗兜底（旧 registry 条目/重启前建的窗可能没有 stage）。
       if (existing.stage === undefined) existing.stage = await ensureProjectionWindow(ctx, sid, STAGE_ACTOR, cwd)
-      return
+    } else {
+      const created = await ensureProjectionWindows(ctx, sid, actors, cwd)
+      windows.set(sid, created)
     }
-    const created = await ensureProjectionWindows(ctx, sid, actors, cwd)
-    windows.set(sid, created)
+    // 戏内窗归档回填（幂等）：旧剧本的 stage 窗没有 turn/start 会被宿主判成
+    // blank 会话（Hero 态隐藏 header、还有被"新建会话"复用的风险），从 god 窗
+    // 把可判定为戏内的事件补进来。
+    const current = windows.get(sid)!
+    if (femwaRoot !== undefined && current.god !== undefined && current.stage !== undefined) {
+      await backfillStageArchive(femwaRoot, sid, current.god, current.stage)
+    }
   }
   return {
     windows,

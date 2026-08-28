@@ -174,8 +174,8 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
     runState.humanWait = undefined
   }
 
-  /** 投影窗注册表：sid → { god, actors }（角色/上帝视角的子代理窗）。 */
-  const projections = createProjectionRegistry(ctx)
+  /** 投影窗注册表：sid → { god, stage, actors }（上帝/戏内/角色视角的子代理窗）。 */
+  const projections = createProjectionRegistry(ctx, resolved.femwaRoot)
 
   /** 主会话 → 上帝窗镜像（实时监听 + 水位补齐）。 */
   const godMirror = createGodMirror({ femwaRoot: resolved.femwaRoot, sessionsStore, projections })

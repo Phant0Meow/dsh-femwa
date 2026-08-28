@@ -1635,3 +1635,77 @@ projectionAppend / mirrorMainEventToGod / subagent ensureTurnStart·ensureStepSt
 4. createProjectionRegistry 挂全局 ctx.on('session/event') 钩子——任何 append 来源（含 dsh 内部 surface 自动补 start）都同步补键，索引不漏。
 ### 验证
 tsc 双绿；lib/index.js 重建；3081 重启后：13.7 万事件大会话 catch-up/投影请求由「卡 10 秒」变「毫秒级返回」（503 等防错响应也即时到达），健康探测全部 200 <50ms。用户待实测发消息/跑剧本流畅度。
+
+
+## 2026-08-27 register legacy 'dsh-femwa/turn-scope' for session-event registry
+### root cause
+src/index.ts only registered 'dsh-femwa/chat' via registerSessionEventType. Legacy
+sessions (pre turn-scope-file refactor) still contain 'dsh-femwa/turn-scope' log
+events; the persistence read path refuses unregistered event types
+(coordinator assertEventsSupported fail-closed), which also failed the
+session-query-sqlite FTS observer on 3081 (search-status unavailable: event type
+"dsh-femwa/turn-scope" unknown to this harness and not marked ignorable).
+### change
+src/index.ts: register 'dsh-femwa/turn-scope' alongside 'dsh-femwa/chat'.
+### verification
+build.mjs OK; lib/index.js rebuilt. Needs 3081 restart; then
+POST /switch-search/api/search-status should return available:true.
+
+
+## 2026-08-27 戏内投影窗 stage（搜索来源二分：主会话=戏外 / 戏内窗=戏内）
+### 背景与拍板
+跨会话搜索（session-query-sqlite + tool-session-query）把每个投影窗都索引，同一段
+戏内对话命中多份。用户拍板（2026-08-27）：①加一个纯戏内归档投影窗（方案B），
+搜索来源唯一化；②搜索排除走工具层（rc.2 官方包 MEOW_MODIFICATIONS 条目4，
+`searchExcludeIdPrefixes:['fem-proj-']` / `searchExcludeIdExemptSuffixes:['-stage']`）；
+③旧剧本不回填（旧戏内内容在上帝窗，被搜索排除后旧的搜不到——知情接受）。
+### 实现要点（复用度极高，架构全走既有通路）
+1. src/projection.ts：导出 `GOD_ACTOR`/`STAGE_ACTOR='stage'` 常量与 `ProjectionWindows`
+   接口（god/stage/actors 三字段，替换 6 处内联形状）；descriptor label 收敛为
+   `descriptorLabel()`（god=👁上帝视角 / stage=📜戏内 / 其余=🎭角色）；
+   `ensureProjectionWindows` 增建 stage 窗（幂等/冷唤醒全自动）；
+   **projectionAppend 加一行 `appendTo(windows.stage)`**——全部戏内事件（聊天行/名字行/
+   turn/step/引擎通知/广播）自动进戏内窗；主会话镜像走 god-mirror 直写 god 窗不经此函数
+   → 戏内窗天然零戏外内容（方案B的根基，零额外代码）；
+   registry buildOnce 补 stage 兜底（旧 registry 条目/重启前窗自动补建）。
+2. src/routes.ts：projection-windows API 返回加 stage id。
+3. src/client.tsx + client-ui/view-button.tsx：listProjectionWindows 类型/proj 缓存加
+   stage；视角菜单加「📜 戏内」项（FaScroll 图标，fa-icons.tsx 新增）；pickView stage
+   分支不写 view 状态（戏内窗默认视图由 fem-proj- 前缀推导 god 视角=全显，无 scope 语义）；
+   activeViewId/label/title 加 stage 情形。
+### 零影响论证
+现有 god/角色窗写入路径一字未动，只多 append 一个全新 id（fem-proj-<sid>-stage）的窗；
+去重索引按窗隔离；lineage 子代理下拉按 fem-proj- 前缀过滤自动隐藏戏内窗；
+chat-node scope 过滤只在非 god 视角生效（戏内窗恒 god 视角=全显）；流式直播锚点不认
+stage 尾段 → 戏内窗无打字机直播（归档窗定位，预期行为）；导演发言/主会话镜像不进戏内窗。
+已知边界（与 god 撞名同类，记档不修）：剧本角色恰好叫纯 ASCII `stage` 会与戏内窗撞 id
+（ensure 幂等复用两窗合一）；engine 无保留名校验。
+### 验证
+tsc（tsconfig.host.json）exit 0；build.mjs 双 bundle 重建（banner 完整、FaScroll/stage/
+📜 戏内转义字面量核验全过）；rc.2 侧排除规则 vitest 105/105。待 3081 重启后用户实测：
+跑短剧本 → fem-proj-<sid>-stage 窗创建且内容=全戏内无戏外 → agent 搜索同关键词不再多份。
+
+## 2026-08-27 戏内窗归档回填（修旧剧本 stage 窗 blank→Hero 无 header）
+### 用户报告
+"现在这个戏内窗连Header都没有。在UI方面，你写的应该是有点问题的，你再检查一下。好好参考其他投影窗的写法。"
+### 根因（官方机制，非 stage 分支代码错）
+宿主 blank 位只认 turn/start（api-proxy.ts sessionBlank：`!events.some(e => e.type === 'turn/start')`，
+插件事件/descriptor 都不算）；blank 会话前端走 Hero 态（ConversationSessionHeader
+`hideChrome = blank && composerPhase === 'blank'`）整个 header chrome 隐藏。god/角色窗
+因子代理镜像必合成 turn/start 而从不 blank；旧剧本的 stage 窗迟到于历史演出、日志只有
+descriptor → 永远 blank → 无 header，且 blank 会话有被"新建会话"复用的风险。
+### 修复（推翻 2026-08-27 早前"不回填"拍板——UI bug 使限定回填成为必要，用户报告即授权）
+projection.ts 新增 backfillStageArchive（registry buildOnce 尾部触发，幂等门槛=stage 窗
+尚无 turn/start + 进程内 Set）：从 god 窗复制可判定为戏内的事件——①dsh-femwa/chat 行
+全部；②_srcSeq 为 string 含 '#'（08-24 命名空间隔离后子代理镜像）；③turn/step 结构事件
+且 turn ∈ turn_scopes 文件（子代理合成 turn 权威记录）。裸数字 _srcSeq（主会话镜像=戏外）
+绝不复制（宁缺勿污，08-24 前旧格式 god 窗因此可能只有结构+chat 行）。复制走 appendEvent
+（surfaceOp 原样），去重靠 stage 窗自身索引钩子。createProjectionRegistry 加 femwaRoot
+参数（index.ts 调用处传 resolved.femwaRoot）。
+### 零影响论证
+只写 stage 窗；复制事件均为 god 窗日志已持久化的合法事件（迁移器合法性继承）；
+god/角色/主会话零写入；O(n) 遍历仅一次（门槛挡重复）；08-24 前旧格式不可判定即跳过。
+### 验证
+tsc exit 0；build.mjs 重建（backfill/archivedTurns/turn_scopes 字面量核验）。
+提交 f8007ef（index.ts 仅含本 hunk，git apply --cached 拆分，他窗遗留 hunks 留工作区）。
+
