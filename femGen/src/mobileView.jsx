@@ -67,6 +67,13 @@ const MobileGlobalStyle = () => (
        画布区自有独立规则（.fem-canvas-zone），此处不再全局禁触。 */
     html, body {
       overscroll-behavior: none;
+    }
+    /* round50：防拖拽误选只作用于 fem 自己的容器，不再挂 html/body——
+       user-select 沿树继承，全局 none 会把 dsh 聊天正文的选择一起杀掉
+       （2026-08-28 猫猫报 3081 手机端无法选中 AI/用户消息文字的根因）。
+       画布区拖节点/连线的手势保护保留在自身容器上。 */
+    .fem-canvas-zone,
+    .fem-bottom-scroll {
       user-select: none;
       -webkit-user-select: none;
     }
