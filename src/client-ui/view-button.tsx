@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { FaEye, FaPodcast, FaRobot, FaScroll, FaUserSecret } from '../fa-icons'
+import { FaClapperboard, FaEye, FaPodcast, FaRobot, FaUserSecret } from '../fa-icons'
 // 官方下箭头（dsh 子代理计数下拉同款）：视角按钮右侧的展开指示。
 import { CatalogDropdown } from '../lineage-fork.jsx'
 import { type FemwaChatData } from './chat-node'
@@ -385,7 +385,7 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
     return typeof sessionId === 'string' && sessionId.startsWith('fem-proj-') ? 'god' : undefined
   })()
   const label = activeViewId === 'god' ? '上帝视角'
-    : activeViewId === 'stage' ? '📜 戏内'
+    : activeViewId === 'stage' ? '戏内视角'
     : activeViewId === 'offstage' ? '戏外 · 主模型'
     : activeViewId ?? '上帝视角'
   const menu = open
@@ -408,7 +408,7 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
           {[
             { id: 'offstage', label: '戏外 · 主模型', Icon: FaRobot },
             { id: 'god', label: '上帝视角', Icon: FaPodcast },
-            { id: 'stage', label: '📜 戏内', Icon: FaScroll },
+            { id: 'stage', label: '戏内视角', Icon: FaClapperboard },
             ...actors.map(actor => ({ id: actor, label: actor, Icon: FaUserSecret })),
           ].map(item => (
             <button

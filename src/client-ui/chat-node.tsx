@@ -90,7 +90,7 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
   const view = useView(sessionId)
   // ── 流式直播订阅（2026-08-24 方案B）───────────────────────────────────
   // 仅投影窗的 speaker 行有资格当锚点；mainSid / 本窗 actorKey 由窗 id
-  // 推导（fem-proj-<sid>-<actorKey>）。可见性：god 窗显示全部演员，角色
+  // 推导（fem-proj-<sid>-<actorKey>）。可见性：god/stage 窗显示全部演员，角色
   // 窗只认自己的 actorKey。hooks 全部前置（早退过滤在 hooks 之后）。
   const projSuffix = sessionId !== undefined && sessionId.startsWith('fem-proj-')
     ? sessionId.slice('fem-proj-'.length)
@@ -102,7 +102,7 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
   const myActorKey = actor !== undefined ? femProjectionActorKey(actor) : undefined
   const streamEligible = view !== 'offstage' && kind === 'speaker'
     && winActorKey !== undefined && myActorKey !== undefined
-    && (winActorKey === 'god' || winActorKey === myActorKey)
+    && (winActorKey === 'god' || winActorKey === 'stage' || winActorKey === myActorKey)
   const liveBlocksRaw = useFemStream(streamEligible ? mainSid : undefined, streamEligible ? myActorKey : undefined)
   const chat = useSession(s => s.chat)
   // 最新行门控：同一演员历史上有多条 speaker 行，只有最新一条允许渲染直播

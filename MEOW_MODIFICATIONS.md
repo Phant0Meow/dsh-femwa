@@ -1709,3 +1709,34 @@ god/角色/主会话零写入；O(n) 遍历仅一次（门槛挡重复）；08-2
 tsc exit 0；build.mjs 重建（backfill/archivedTurns/turn_scopes 字面量核验）。
 提交 f8007ef（index.ts 仅含本 hunk，git apply --cached 拆分，他窗遗留 hunks 留工作区）。
 
+## 2026-08-28 戏内窗四项微调：回填补丁撤销（拍板变更）+ 文案/图标/流式锚点
+### 用户反馈（原话要点）
+"棒！现在显示正常了！" + ①"📜 戏内"改成"戏内视角" ②图标换电影相关 ③"旧剧本不用理！
+当他们不存在就好，别担心那个" ④质疑 god 窗复制："戏内视角不应该依赖god窗啊……比较合理
+的做法是和god窗一模一样的投影方式，只是不放主模型的部分……我们之前写得投影逻辑花了很多
+心思，你直接复制过来就好。流式输出之类的都可以复用吧？" ⑤问 session 标题标记是什么。
+### 澄清与决策
+实时投影主通路本就与用户设想一致（projectionAppend 三分发，stage 与 god 同权，唯一例外
+=god-mirror 主会话镜像不进 stage）；"从 god 窗复制"只是修旧剧本 header 的历史回补补丁，
+不是投影通路。按 ③④ 拍板：**撤销 backfillStageArchive 整个补丁**（回填函数/调用/进程内
+Set/readTurnScopeFile import/createProjectionRegistry femwaRoot 参数全部拆除，index.ts
+调用恢复 createProjectionRegistry(ctx)）——旧剧本 stage 窗回归空窗（用户拍板"当他们
+不存在"），投影逻辑回归纯粹：stage 窗=与 god 窗同一条实时投影通路，唯一区别无主模型镜像。
+### 修改明细（6 文件）
+1. projection.ts：删 backfillStageArchive+stageBackfilled+buildOnce 调用+readTurnScopeFile
+   import；createProjectionRegistry 撤 femwaRoot 参数；descriptorLabel '📜 戏内'→'戏内视角'
+   （此 label=subagent/descriptor 的 label 字段=dsh 原生会话显示名/子代理下拉名，即问题⑤的答案）
+2. index.ts：调用恢复 createProjectionRegistry(ctx)（hunk 级提交）
+3. fa-icons.tsx：FaScroll→FaClapperboard（FA6.7.2 权威 path，unpkg 核验，场记板=电影语义）
+4. view-button.tsx：菜单/按钮 label '戏内视角'+FaClapperboard
+5. chat-node.tsx：streamEligible 加 winActorKey==='stage'（流式打字机锚点对齐 god 窗——
+   fem_stream SSE 本就全窗广播，stage 窗此前只差锚点判定一行）
+6. chat-node.tsx 注释对齐（god/stage 窗显示全部演员）
+### 语义影响
+旧剧本 stage 窗回归 blank→Hero 态（用户拍板接受，"当他们不存在"）；新剧本 stage 窗实时
+投影不受影响且新增流式直播。
+### 验证
+tsc exit 0；产物核验全过：backfill 字面量清零/FaClapperboard 在/FaScroll 清零/
+stage 流式分支在/「视角」转义字面量在。
+
+
