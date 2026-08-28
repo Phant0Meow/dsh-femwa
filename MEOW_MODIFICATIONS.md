@@ -1739,4 +1739,20 @@ Set/readTurnScopeFile import/createProjectionRegistry femwaRoot 参数全部拆�
 tsc exit 0；产物核验全过：backfill 字面量清零/FaClapperboard 在/FaScroll 清零/
 stage 流式分支在/「视角」转义字面量在。
 
+## 2026-08-28 戏内菜单项门控（用户实测拍板：没剧本记录不显示，和角色视角一个道理）
+### 用户实测与拍板（原话要点）
+"剧本还没开始跑，戏内视角根本没东西的时候，如果切换到戏内视角，就连header也没了
+（也就导致换不回来了）。所以正确的修bug方向是，当本session没有任何剧本记录的时候，
+上面的视角菜单里不要显示戏内视角这个选项。和角色视角一个道理吧……"
+（先问"header 消失是因为补丁吗"——澄清：不是补丁，是宿主 blank 机制即上一条目根因；
+回填补丁是当时的修复尝试，已于同日撤销。）
+### 实现
+view-button.tsx 菜单 stage 项加门槛 `actors.length > 0`（与角色项同源：scriptActors
+来自 /dsh-femwa/actors 即剧本记录，chatActors 兜底；没跑过剧本两者皆空 → 菜单只有
+戏外+上帝，空窗入口不存在，卡死场景根除）。跑过剧本后 flow_start 经 d37f33b 机制
+重拉 actors → 菜单自动出现戏内项。pickView 的 proj.stage 守卫保留。
+### 验证
+纯前端改动刷新生效免重启；build 产物 gate 字面量核验（actors.length>0 条件 ×1）。
+
+
 

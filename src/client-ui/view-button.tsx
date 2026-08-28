@@ -408,7 +408,10 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
           {[
             { id: 'offstage', label: '戏外 · 主模型', Icon: FaRobot },
             { id: 'god', label: '上帝视角', Icon: FaPodcast },
-            { id: 'stage', label: '戏内视角', Icon: FaClapperboard },
+            // 戏内项与角色项同门槛（2026-08-28 用户拍板"和角色视角一个道理"）：
+            // 有剧本记录（角色表非空）才显示——没跑过的剧本其 stage 窗会被宿主
+            // 判 blank（Hero 态隐藏整个 header，点进去连视角菜单都消失换不回来）。
+            ...actors.length > 0 ? [{ id: 'stage', label: '戏内视角', Icon: FaClapperboard }] : [],
             ...actors.map(actor => ({ id: actor, label: actor, Icon: FaUserSecret })),
           ].map(item => (
             <button
