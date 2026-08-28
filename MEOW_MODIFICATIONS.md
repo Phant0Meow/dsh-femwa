@@ -1,4 +1,4 @@
-# MEOW 修改记录（dsh-femwa 仓库内留痕）
+﻿# MEOW 修改记录（dsh-femwa 仓库内留痕）
 
 > 与 D:\myFiles\dsh\MEOW修改记录及指南.md 同步。条目只追加不改写。
 
@@ -213,7 +213,7 @@ femGen 已有 `useMobile(768)`（window.innerWidth < 768 + resize 监听）响�
 ### 验证
 - npm run build 重打 lib/client.js 通过（454.0kb）；产物含 MobileLayout 全量代码
 - 备份：MEOW_backups/FemWorAuto.jsx.bak-20260818-*
-- 待实测：3081 桌面视口不变；DevTools 窄视口（375px）出 MobileLayout；手机 tailscale 真机（https://node.tailf4760e.ts.net:8443）验证；关注点=MobileLayout 100vh 布局在 dsh 顶部栏占用后的溢出表现（若溢出再做容器高度适配）
+- 待实测：3081 桌面视口不变；DevTools 窄视口（375px）出 MobileLayout；手机 tailscale 真机（https://<tailscale-域名>:8443）验证；关注点=MobileLayout 100vh 布局在 dsh 顶部栏占用后的溢出表现（若溢出再做容器高度适配）
 
 ## 2026-08-18 手机版 femGen 改造（全屏沉浸 + 返回键开 dsh 边栏 + 设置 tab）
 
