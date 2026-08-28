@@ -523,6 +523,7 @@ export function registerRoutes(ctx: Context, deps: RoutesDeps): void {
           writeJson(res, 200, {
             ok: true,
             god: windows.god === undefined ? undefined : String(windows.god.id),
+            stage: windows.stage === undefined ? undefined : String(windows.stage.id),
             actors,
           })
         })().catch((error: unknown) => {

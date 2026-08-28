@@ -139,12 +139,12 @@ export function apply(ctx: any): void {
   // FemViewButton 注入：打开任意会话（视角菜单跳转投影窗用）+ 投影窗 id 查询。
   const viewInjected = (): FemViewInjected => ({
     openSession: (id: string): void => { sessions?.open?.(id) },
-    listProjectionWindows: async (sid: string): Promise<{ god?: string; actors: Record<string, string> }> => {
+    listProjectionWindows: async (sid: string): Promise<{ god?: string; stage?: string; actors: Record<string, string> }> => {
       const response = await fetch(`/dsh-femwa/projection-windows?sessionId=${encodeURIComponent(sid)}`)
       if (!response.ok) throw new Error(`projection-windows HTTP ${response.status}`)
-      const data = await response.json() as { ok?: boolean; god?: string; actors?: Record<string, string> }
+      const data = await response.json() as { ok?: boolean; god?: string; stage?: string; actors?: Record<string, string> }
       if (data.ok !== true) throw new Error(data.error ?? 'projection-windows failed')
-      return { god: data.god, actors: data.actors ?? {} }
+      return { god: data.god, stage: data.stage, actors: data.actors ?? {} }
     },
   })
 

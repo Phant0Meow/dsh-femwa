@@ -11,7 +11,10 @@
  *  1. appendChat / appendChatProjected —— dsh-femwa/chat 行写入（主会话表面
  *     与投影窗投影，唯一例外 alsoMainSession=llmBridge 直连双写）；
  *  2. 投影窗生命周期 —— ensure/awaken/registry（幂等、冷唤醒、inflight 串行）；
- *  3. projectionAppend —— 按 scope 把事件投进对应窗（空数组=广播全部角色窗）。
+ *     窗型：上帝窗 god / 戏内窗 stage（剧本内全量归档、零戏外镜像，2026-08-27
+ *     搜索去重方案新增）/ 角色窗 <actorKey>；
+ *  3. projectionAppend —— 按 scope 把事件投进对应窗（空数组=广播全部角色窗；
+ *     god 与 stage 恒全量）。
  *
  * （主会话→上帝窗镜像已于 2026-08-26 结构整理迁至 ./god-mirror——原第 4 块
  * createGodMirror 工厂，行为零变化；本文件的 appendEvent 被其单向引用。）
@@ -184,6 +187,24 @@ export function appendChatBroadcast(
 
 // ── 2) 投影窗生命周期 ─────────────────────────────────────────────────────
 
+/** 保留 actor 名：上帝窗（ensureProjectionWindows 固定传 'god'）。 */
+export const GOD_ACTOR = 'god'
+
+/** 保留 actor 名：戏内窗（2026-08-27 搜索去重方案新增）——剧本内全部事件的
+ *  唯一归档窗：收全部戏内内容（聊天行/名字行/结构/引擎通知），不含主会话
+ *  镜像（god-mirror 只写 god 窗，不经 projectionAppend）。搜索来源二分：
+ *  主会话=戏外 / 戏内窗=戏内，同一段对话的命中唯一。 */
+export const STAGE_ACTOR = 'stage'
+
+/** 单主会话的投影窗集合（host 侧窗引用的统一形状）。
+ *  god=上帝窗（全视：戏内全量 + 主会话镜像）；stage=戏内窗（纯戏内归档）；
+ *  actors=角色窗（scope 过滤）。 */
+export interface ProjectionWindows {
+  god?: Session
+  stage?: Session
+  actors: Map<string, Session>
+}
+
 /** 投影窗 actor 消毒：非 [A-Za-z0-9_-] 字符替换为 _+码点十六进制（如 @ → _40、
  *  中文字符各占一段），保证不同角色名消毒后必不相同——旧算法把所有非 ASCII
  *  都压成 _，"@演员"/"@观众" 同得 "___"，两键共享同一投影窗导致事件双写。 */
@@ -191,9 +212,14 @@ function projectionActorKey(actor: string): string {
   return Array.from(actor).map(ch => (/[A-Za-z0-9_-]/.test(ch) ? ch : `_${ch.codePointAt(0)!.toString(16)}`)).join('')
 }
 
-/** 投影窗 id：上帝窗 god / 角色窗 <actorKey>。id 规则化 → 重启后可推导。 */
+/** 投影窗 id：上帝窗 god / 戏内窗 stage / 角色窗 <actorKey>。id 规则化 → 重启后可推导。 */
 function projectionId(sid: string, actor: string): string {
   return `fem-proj-${sid}-${projectionActorKey(actor)}`
+}
+
+/** 投影窗 descriptor 显示名：god=上帝视角 / stage=戏内 / 其余=🎭角色。 */
+function descriptorLabel(actor: string): string {
+  return actor === GOD_ACTOR ? '👁 上帝视角' : actor === STAGE_ACTOR ? '📜 戏内' : `🎭 ${actor}`
 }
 
 /** 投影窗是否已带 subagent/descriptor（幂等：fold 取第一个事件为权威，不得重复）。
@@ -272,7 +298,7 @@ async function ensureProjectionWindow(
           version: 2,
           mode: 'one-shot',
           provider: 'dsh-femwa',
-          label: actor === 'god' ? '👁 上帝视角' : `🎭 ${actor}`,
+          label: descriptorLabel(actor),
         })
       }
       return existing
@@ -284,7 +310,7 @@ async function ensureProjectionWindow(
           version: 2,
           mode: 'one-shot',
           provider: 'dsh-femwa',
-          label: actor === 'god' ? '👁 上帝视角' : `🎭 ${actor}`,
+          label: descriptorLabel(actor),
         })
       }
       console.log(`[dsh-femwa] projection window awakened: ${id} (${actor})`)
@@ -297,7 +323,7 @@ async function ensureProjectionWindow(
       version: 2,
       mode: 'one-shot',
       provider: 'dsh-femwa',
-      label: actor === 'god' ? '👁 上帝视角' : `🎭 ${actor}`,
+      label: descriptorLabel(actor),
     })
     console.log(`[dsh-femwa] projection window created: ${id} (${actor})`)
     return created
@@ -307,20 +333,21 @@ async function ensureProjectionWindow(
   }
 }
 
-/** 上帝窗 + 该剧本全部角色窗的集合（创建/复用）。 */
+/** 上帝窗 + 戏内窗 + 该剧本全部角色窗的集合（创建/复用）。 */
 async function ensureProjectionWindows(
   ctx: Context,
   sid: string,
   actors: string[],
   cwd: string,
-): Promise<{ god?: Session; actors: Map<string, Session> }> {
-  const god = await ensureProjectionWindow(ctx, sid, 'god', cwd)
+): Promise<ProjectionWindows> {
+  const god = await ensureProjectionWindow(ctx, sid, GOD_ACTOR, cwd)
+  const stage = await ensureProjectionWindow(ctx, sid, STAGE_ACTOR, cwd)
   const map = new Map<string, Session>()
   for (const actor of actors) {
     const win = await ensureProjectionWindow(ctx, sid, actor, cwd)
     if (win !== undefined) map.set(actor, win)
   }
-  return { god, actors: map }
+  return { god, stage, actors: map }
 }
 
 // ── 3) 投影写入 ───────────────────────────────────────────────────────────
@@ -331,7 +358,7 @@ async function ensureProjectionWindows(
  *  语义=未限定可见性（与上下文层 no_filter 全可见一致），绝不能解释为
  *  "无人可见"——否则角色窗收不到自己演的戏（2026-08-22 剧中人视角空白 bug）。 */
 export function projectionAppend(
-  windows: { god?: Session; actors: Map<string, Session> },
+  windows: ProjectionWindows,
   type: string,
   data: Record<string, unknown>,
   surfaceOp?: Record<string, unknown>,
@@ -368,6 +395,10 @@ export function projectionAppend(
     }
   }
   appendTo(windows.god)
+  // 戏内窗与上帝窗同权：全部流经本函数的事件都是戏内/运行态内容，戏内窗
+  // 全量归档（主会话镜像走 god-mirror 直写 god 窗，不经此处，故戏内窗天然
+  // 零戏外内容——搜索来源二分的根基）。
+  appendTo(windows.stage)
   if (targets === undefined) {
     for (const win of windows.actors.values()) appendTo(win)
   } else {
@@ -378,13 +409,13 @@ export function projectionAppend(
  * 唤醒要走持久化 I/O），inflight 按 sid 链式串行——flow_start 与 ai_request
  * 并发调用时后者等待前者完成再幂等复用，绝不并发双建同 id 窗。 */
 export interface ProjectionRegistry {
-  windows: Map<string, { god?: Session; actors: Map<string, Session> }>
-  ensure(sid: string, actors: string[], cwd: string): Promise<{ god?: Session; actors: Map<string, Session> }>
-  get(sid: string): { god?: Session; actors: Map<string, Session> } | undefined
+  windows: Map<string, ProjectionWindows>
+  ensure(sid: string, actors: string[], cwd: string): Promise<ProjectionWindows>
+  get(sid: string): ProjectionWindows | undefined
 }
 
 export function createProjectionRegistry(ctx: Context): ProjectionRegistry {
-  const windows = new Map<string, { god?: Session; actors: Map<string, Session> }>()
+  const windows = new Map<string, ProjectionWindows>()
   const inflight = new Map<string, Promise<unknown>>()
 
   // 去重索引的全局增量钩子（2026-08-26 性能修复配套）：任何会话事件落地后
@@ -405,7 +436,9 @@ export function createProjectionRegistry(ctx: Context): ProjectionRegistry {
           if (win !== undefined) existing.actors.set(actor, win)
         }
       }
-      if (existing.god === undefined) existing.god = await ensureProjectionWindow(ctx, sid, 'god', cwd)
+      if (existing.god === undefined) existing.god = await ensureProjectionWindow(ctx, sid, GOD_ACTOR, cwd)
+      // 戏内窗同上帝窗兜底（旧 registry 条目/重启前建的窗可能没有 stage）。
+      if (existing.stage === undefined) existing.stage = await ensureProjectionWindow(ctx, sid, STAGE_ACTOR, cwd)
       return
     }
     const created = await ensureProjectionWindows(ctx, sid, actors, cwd)

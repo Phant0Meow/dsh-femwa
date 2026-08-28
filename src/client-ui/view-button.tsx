@@ -1,16 +1,16 @@
 /**
  * client-ui/view-button.tsx — 视角菜单按钮（session header actions）。
  *
- * 戏外=主会话本体 / 上帝=上帝投影窗 / 角色=角色投影窗；含视角过滤 CSS 注入、
- * proj 窗母名黑化样式切换、「Fem 编辑器」标签页显示范围控制、视角跳转的
- * 标签页跟手、子代理计数座位。
+ * 戏外=主会话本体 / 上帝=上帝投影窗 / 戏内=剧本归档投影窗（2026-08-27）/
+ * 角色=角色投影窗；含视角过滤 CSS 注入、proj 窗母名黑化样式切换、「Fem 编辑器」
+ * 标签页显示范围控制、视角跳转的标签页跟手、子代理计数座位。
  * （2026-08-26 结构整理自 client.tsx 原样迁出，行为零变化。）
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { IconChevronDownOutline14 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { FaEye, FaPodcast, FaRobot, FaUserSecret } from '../fa-icons'
+import { FaEye, FaPodcast, FaRobot, FaScroll, FaUserSecret } from '../fa-icons'
 // 官方下箭头（dsh 子代理计数下拉同款）：视角按钮右侧的展开指示。
 import { CatalogDropdown } from '../lineage-fork.jsx'
 import { type FemwaChatData } from './chat-node'
@@ -46,8 +46,8 @@ function readActiveTabKind(): 'editor' | 'chat' {
 export interface FemViewInjected {
   /** 打开任意会话（视角菜单跳转投影窗/主会话）。 */
   openSession(id: string): void
-  /** 查询主会话的投影窗 id 列表（上帝窗 + 角色窗）。 */
-  listProjectionWindows(sid: string): Promise<{ god?: string; actors: Record<string, string> }>
+  /** 查询主会话的投影窗 id 列表（上帝窗 + 戏内窗 + 角色窗）。 */
+  listProjectionWindows(sid: string): Promise<{ god?: string; stage?: string; actors: Record<string, string> }>
 }
 
 /** Session-header action: switch between god view and per-actor views.
@@ -59,8 +59,8 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
   const sessionId = useSession(snapshot => snapshot.sessionId)
   const view = useView(sessionId)
   const [open, setOpen] = useState(false)
-  // 投影窗 id 缓存：{ god?: string, actors: {name: id} }（host 侧幂等创建）。
-  const [proj, setProj] = useState<{ god?: string; actors: Record<string, string> }>({ actors: {} })
+  // 投影窗 id 缓存：{ god?, stage?, actors: {name: id} }（host 侧幂等创建）。
+  const [proj, setProj] = useState<{ god?: string; stage?: string; actors: Record<string, string> }>({ actors: {} })
   // The button lives on Fem sessions only: the sessions list records the
   // preset each session's agent was composed from (agent-preset/selected
   // keeps it current after a runtime switch), so the menu is ready from boot
@@ -182,6 +182,13 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
       setView(mainSid, 'god')
       pendingTabTransfer = { kind: readActiveTabKind(), expiresAt: Date.now() + 5000 }
       openSession(proj.god)
+      return
+    }
+    // 戏内窗（2026-08-27）：纯剧本归档窗。不写 view 状态——戏内窗自身默认
+    // 视图由 fem-proj- 前缀推导为 god 视角（全显），没有 scope 过滤语义。
+    if (id === 'stage' && proj.stage !== undefined) {
+      pendingTabTransfer = { kind: readActiveTabKind(), expiresAt: Date.now() + 5000 }
+      openSession(proj.stage)
       return
     }
     const actorId = proj.actors[id]
@@ -371,12 +378,14 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
       return stored ?? 'offstage'
     }
     if (sessionId === proj.god) return 'god'
+    if (sessionId === proj.stage) return 'stage'
     for (const [name, winId] of Object.entries(proj.actors)) {
       if (winId === sessionId) return name
     }
     return typeof sessionId === 'string' && sessionId.startsWith('fem-proj-') ? 'god' : undefined
   })()
   const label = activeViewId === 'god' ? '上帝视角'
+    : activeViewId === 'stage' ? '📜 戏内'
     : activeViewId === 'offstage' ? '戏外 · 主模型'
     : activeViewId ?? '上帝视角'
   const menu = open
@@ -399,6 +408,7 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
           {[
             { id: 'offstage', label: '戏外 · 主模型', Icon: FaRobot },
             { id: 'god', label: '上帝视角', Icon: FaPodcast },
+            { id: 'stage', label: '📜 戏内', Icon: FaScroll },
             ...actors.map(actor => ({ id: actor, label: actor, Icon: FaUserSecret })),
           ].map(item => (
             <button
@@ -433,7 +443,10 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
         type="button"
         aria-haspopup="menu"
         aria-expanded={open}
-        title={activeViewId === 'god' ? '上帝视角：显示全部消息' : activeViewId === 'offstage' ? '戏外 · 主模型' : `角色视角：仅显示 ${activeViewId} 可见的消息`}
+        title={activeViewId === 'god' ? '上帝视角：显示全部消息'
+          : activeViewId === 'stage' ? '戏内视角：剧本内全部内容（不含戏外对话）'
+          : activeViewId === 'offstage' ? '戏外 · 主模型'
+          : `角色视角：仅显示 ${activeViewId} 可见的消息`}
         onClick={() => { setOpen(value => !value) }}
         style={{
           display: 'inline-flex',
