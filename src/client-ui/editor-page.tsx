@@ -317,7 +317,7 @@ function FemEditorPage({ sessionId, injected }: { sessionId: string; injected: E
       console.log(`[femwa-page] state loaded sid=${sessionId} script=${data.script === undefined ? 'undefined' : String(data.script.length) + 'ch'} rev=${String(data.rev ?? 0)}`)
       if (pendingRunRef.current) {
         pendingRunRef.current = false
-        settleThenTrigger()
+        triggerAiRun()
       }
     }
   }, [sessionId])
@@ -334,12 +334,13 @@ function FemEditorPage({ sessionId, injected }: { sessionId: string; injected: E
     return () => { pageReloadRef = null }
   }, [sessionId, loadSessionState])
 
-  /** 等恢复 effect 把 initialScript 铺到 femText（applyFEMText+setFemText 异步
-   *  setState）后触发 AI run——直接同步触发会拿到陈旧空 femText。 */
-  const settleThenTrigger = useCallback((): void => {
-    requestAnimationFrame(() => {
-      setTimeout(() => { editorRef.current?.triggerRun?.('ai') }, 30)
-    })
+  /** AI 触发直达（2026-08-28 去 rAF 改造）：旧实现「等一帧+30ms」赌编辑器文本
+   *  已铺好，但 rAF 在隐藏窗口/后台标签完全不跑（60s 点火根因，实测广播后
+   *  62s 才点火、窗口不亮就永不点火）。AI 路径文本已改为现取 record（见
+   *  FemWorAuto handleRunWorkflow），不再依赖编辑器文本就绪——事件直达，
+   *  隐藏窗口照常点火。 */
+  const triggerAiRun = useCallback((): void => {
+    editorRef.current?.triggerRun?.('ai')
   }, [])
 
   /** AI run_request 同步触发钩子（页面已就绪→直接触发；未就绪→排队）。 */
@@ -351,10 +352,10 @@ function FemEditorPage({ sessionId, injected }: { sessionId: string; injected: E
         pendingRunRef.current = true
         return
       }
-      settleThenTrigger()
+      triggerAiRun()
     }
     return () => { pageTriggerRef = null }
-  }, [sessionId, state, settleThenTrigger])
+  }, [sessionId, state, triggerAiRun])
 
   // 断点位置：主流程分支优先，其次任一分支（画布按节点 label 匹配）。
   const checkpointNode = state === null

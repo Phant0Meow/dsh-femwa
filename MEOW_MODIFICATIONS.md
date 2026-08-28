@@ -1754,5 +1754,33 @@ view-button.tsx 菜单 stage 项加门槛 `actors.length > 0`（与角色项同�
 ### 验证
 纯前端改动刷新生效免重启；build 产物 gate 字面量核验（actors.length>0 条件 ×1）。
 
+## 2026-08-28 AI 触发点火去 rAF（60s 点火根因修复）
+### 根因（实测钉死）
+femwa-run fresh_start 链路=工具广播 run_request SSE → femgen 页 settleThenTrigger
+【rAF+30ms】→ handleRunWorkflow → POST /dsh-femwa/run。rAF 在隐藏窗口/后台标签
+完全不跑 → 链条冻在等帧：实测广播后 62s 才点火（恰为窗口恢复可见时刻）、窗口持续
+隐藏则 2 分钟零点火。服务端无辜：直打 POST /run 全程 90ms，引擎收到 run 后 0.2s 开跑；
+/models 2.5ms（collectLlmModels 纯本地）。
+### 用户拍板（原话要点）
+"我想借用按钮的链路，不可能直接点火的，按钮后面有一堆检查呢，我们得复用。真正的问题
+是为什么非得用rAF？把mount和run都改成AI这边调工具，femgen无论藏不藏都可以实时更新。
+这样其实并不存在准备不好的问题。如果没mount到位就run了，那run按钮自己会报错的"；
+"mount也不能是RAF，也需要工具调用之后立即反映在网页上，不管网页藏着还是显示。这两个
+工具是一样的设计"。（host 兜底点火方案被否——守卫一份，必须复用按钮链路。）
+### 修改明细（2 文件）
+1. femGen/src/FemWorAuto.jsx handleRunWorkflow：AI 路径运行文本一律现取
+   getRecordScript()（record 为准——mount 已在工具调用时落盘），取不到回落空串走
+   既有「请先编写或导入 FEM 脚本」报错经 run-result 回传；绝不静默回落编辑器旧文本
+   （不吞错原则）。人类按钮路径不动（仍以输入框文本为准）。
+2. src/client-ui/editor-page.tsx：settleThenTrigger 的 rAF+30ms 删除 → triggerAiRun
+   事件直达（loadSessionState 成功消费 / pageTriggerRef 就绪直触发 / 换目标重挂载
+   排队消费，三触发点全不再等帧）；React 事件/effect/fetch 隐藏窗口照常跑，仅画帧
+   冻结——链路从此不碰画帧。
+### 验证
+广播 → 工具 ok 回执 0.31s（06:02:07.374→06:02:07.681Z），点火 ≤2s（台账 06:02:09，
+秒级粒度）；修复前对照组 30s 超时误报/62s 点火。build 产物核验：triggerAiRun ×4 在、
+settleThenTrigger 清零。mount 链路核验无帧等待（SSE→fetch→setState→restore effect
+全程事件驱动；余下 rAF 仅画布淡入动画/聊天流渲染，纯装饰）。
+
 
 

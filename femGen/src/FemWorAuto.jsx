@@ -1246,9 +1246,20 @@ if (specialType === 'FOR') {
       return;
     }
     skipRunGuardRef.current = false;
-    // ⚡ 跑原文（2026-08-22 重构）：以输入框文本为准，不再运行前经 buildFEM 重生成；
+    // ⚡ 跑原文（2026-08-22 重构）：人类=以输入框文本为准，不运行前经 buildFEM 重生成；
     // femOverride 供「放弃修改直接跑」传入 record 原文。
-    const fem = typeof femOverride === 'string' && femOverride.trim() ? femOverride : femText;
+    // ⚡ AI 触发（2026-08-28 去 rAF 改造）：文本一律现取 record（服务端权威——mount
+    //   已在工具调用时落盘），不再依赖编辑器文本就绪（SSE 替按可能先于恢复到达，
+    //   隐藏窗口更是一帧都不画）。取不到回落空串 → 走既有「请先编写或导入」报错；
+    //   绝不静默回落编辑器旧文本，防止把陈旧剧本跑出去（不静默吞错原则）。
+    let fem = typeof femOverride === 'string' && femOverride.trim() ? femOverride : femText;
+    if (isAi) {
+      let record = null;
+      if (typeof getRecordScript === 'function') {
+        try { record = await getRecordScript(); } catch (e) { record = null; }
+      }
+      fem = (typeof record === 'string' && record.trim()) ? record : '';
+    }
     if (!fem || !fem.trim()) {
       if (isAi) { report({ ok: false, error: '请先编写或导入 FEM 脚本' }); return; }
       alert('请先编写或导入 FEM 脚本');
