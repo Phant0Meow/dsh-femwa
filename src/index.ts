@@ -117,6 +117,10 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
   const registerSessionEventType = (sessionNS as { registerSessionEventType?: (type: string) => () => void }).registerSessionEventType
   if (registerSessionEventType !== undefined) {
     ctx.effect(() => registerSessionEventType('dsh-femwa/chat'), 'dsh-femwa: session event type')
+    // Legacy sessions (pre-turn-scope-file refactor) still carry
+    // 'dsh-femwa/turn-scope' log events; the persistence read path refuses
+    // unregistered types, so admit it or old fem session history cannot load.
+    ctx.effect(() => registerSessionEventType('dsh-femwa/turn-scope'), 'dsh-femwa: session event type (legacy turn-scope)')
   } else {
     console.log('[dsh-femwa] this dsh build lacks registerSessionEventType; loading history of dsh-femwa sessions is unsupported here (see README)')
   }
@@ -293,6 +297,9 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
       return taken
     },
     mountScript: async (sessionId, scriptPath) => {
+      // 挂载=全新开始（用户语义「我就要这一版」）：旧版遗留的报错与本次
+      // 挂载无关，先清空本会话错误列表——mount 之后之前的报错一律作废。
+      runState.errors.delete(sessionId)
       // 双链路①：path + text 一起写。恢复面读取是 text 优先（实际运行版本），
       // mount 只写 path 的话，任何后续快照写回的 stale text 都会遮蔽新挂载的
       // 剧本（2026-08-21「挂载后画布空白」bug 根因）。text 始终与文件内容一致。
@@ -302,6 +309,16 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
         text = await readFile(scriptPath, 'utf8')
       } catch (error) {
         throw new Error(`无法读取剧本文件 ${scriptPath}：${String(error instanceof Error ? error.message : error)}`)
+      }
+      // 同步校验本次挂载文本（与 run 的 resolveMounted 同一套 check；base_dir=
+      // 剧本文件所在目录，file: 相对引用按剧本位置解析）：mount 返回应报
+      //「当前 mount 文本」的错误——历史残留已清、编辑器异步上报慢一拍，
+      // 这里才是 mount 时刻的权威校验。有错只记不拦（挂载不受阻，编辑器可见）。
+      const baseDir = scriptPath.replace(/[\\/][^\\/]*$/, '')
+      try {
+        await bridge.send('check', { fems: text, base_dir: baseDir }, 30_000)
+      } catch (error: unknown) {
+        recordError(SessionId(sessionId), `[编辑器·mount] ${String(error instanceof Error ? error.message : error)}`)
       }
       await writeSessionScript(resolved.femwaRoot, sessionId, { path: scriptPath, text })
       console.log(`[dsh-femwa] femwa-mount ${sessionId} <- ${scriptPath}`)
@@ -359,6 +376,46 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
       const finalText = await readSessionScriptText(resolved.femwaRoot, sessionId)
       if (finalText === undefined) return undefined
       return { path: record.path, text: record.text, finalText }
+    },
+    chronicaQuery: async (opts) => {
+      // femwa-chronica：直接复用插件根目录的 chronica.py CLI（能力只有一份）。
+      // 只读查询，一次性子进程——不走 bridge（那条链路是运行控制/写库用的）。
+      const args: string[] = []
+      if (opts.list !== undefined) args.push('--list', String(opts.list))
+      else if (opts.show !== undefined) args.push(String(opts.show))
+      if (opts.scope === true) args.push('--scope')
+      if (opts.full === true) args.push('--full')
+      const subprocess = ctx.get('subprocess') as {
+        resolveExecutable(command: string): Promise<string>
+      } | undefined
+      if (subprocess === undefined) {
+        throw new Error('subprocess 服务不可用（无法解析 python 可执行文件）')
+      }
+      const pythonPath = await subprocess.resolveExecutable(resolved.python)
+      const [{ execFile }, { promisify }, { join }] = await Promise.all([
+        import('node:child_process'),
+        import('node:util'),
+        import('node:path'),
+      ])
+      try {
+        const { stdout } = await promisify(execFile)(
+          pythonPath,
+          [join(resolved.femwaRoot, 'chronica.py'), ...args],
+          {
+            timeout: 15_000,
+            maxBuffer: 32 * 1024 * 1024,
+            encoding: 'utf8',
+            env: { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' },
+          },
+        )
+        return stdout
+      } catch (error: unknown) {
+        // 红线：不许静默吞错——退出码/stderr 原样带回给主模型。
+        const err = error as { code?: unknown; stderr?: unknown; killed?: boolean; message?: unknown }
+        if (err.killed === true) throw new Error('chronica.py 查询超时（15s）')
+        const stderr = typeof err.stderr === 'string' && err.stderr.length > 0 ? err.stderr : String(err.message ?? '')
+        throw new Error(`chronica.py 查询失败（退出码 ${String(err.code ?? '?')}）：${stderr.slice(-800)}`)
+      }
     },
   }
   ctx.effect(() => registerFemwaTools(ctx, toolDeps, projections), 'dsh-femwa: main-model tools')

@@ -42,6 +42,8 @@ export interface FemwaToolDeps {
   soulList(): Promise<{ souls: Array<{ soul_id: string; soul_name: string }> }>
   /** 新建角色（全局，所有剧本可用；归属 u001；femwa-soul create）。 */
   soulCreate(soulId: string, soulName: string, description: string): Promise<unknown>
+  /** 查询演出台账（Chronica 编年史；复用插件根目录 chronica.py CLI，一次性子进程）。返回两幕文本。 */
+  chronicaQuery(opts: { show?: number; list?: number; scope?: boolean; full?: boolean }): Promise<string>
   /** 是否为 fem 主会话（无 parentSession）——工具调用者校验。 */
   isFemMainSession(agent: Agent): boolean
 }
@@ -161,6 +163,40 @@ const soulTool: FemwaToolSchema = {
   },
 }
 
+/** femwa-chronica：查询演出台账（编年史）——跑完戏看结果 / 复盘 / 排查视野。 */
+const chronicaTool: FemwaToolSchema = {
+  name: 'femwa-chronica',
+  description:
+    '查询 Fem 演出台账（Chronica.wor 编年史）：返回指定场次的【对话流】' +
+    '（showprompt 旁白 + AI 发言 + 人类输入，按时间交织）与【幕后指令】附录（节点 prompt，不属对话流）。\n' +
+    '- 无参数 = 最新一场的两幕全文——剧本跑完后看结果、复盘都用这个；\n' +
+    '- list=只列最近 N 场一览（场次号/剧名/发言数，优先于 show）；\n' +
+    '- show=指定场次号；scope=每行附带可见用户/可见角色（排查视野类问题用）；\n' +
+    '- full=发言全文不截断（默认对话流行截 110 字、指令 90 字；细读诗作/长台词时开）。',
+  parameters: {
+    type: 'object',
+    properties: {
+      show: {
+        type: 'number',
+        description: '场次号（可选；缺省=最新一场）',
+      },
+      list: {
+        type: 'number',
+        description: '只列最近 N 场一览（可选；给了就忽略 show）',
+      },
+      scope: {
+        type: 'boolean',
+        description: '每行附带可见性信息（可选；排查视野类问题用）',
+      },
+      full: {
+        type: 'boolean',
+        description: '发言全文不截断（可选；默认截断）',
+      },
+    },
+    additionalProperties: false,
+  },
+}
+
 /** 注册 femwa 主模型工具（幂等：重复调用先注销再注册）。
  * projections 用于把动作回执广播进投影窗（主会话+god+全部角色窗统一通知）。 */
 export function registerFemwaTools(
@@ -191,7 +227,7 @@ export function registerFemwaTools(
   const register = (
     schema: FemwaToolSchema,
     run: (args: Record<string, unknown>, agent: Agent) => Promise<unknown>,
-    renderText?: (value: { ok: boolean; error?: string; script?: string; source?: string; lines?: number; path?: string; souls?: Array<{ soul_id: string; soul_name: string }>; note?: string }) => string,
+    renderText?: (value: { ok: boolean; error?: string; script?: string; source?: string; lines?: number; path?: string; souls?: Array<{ soul_id: string; soul_name: string }>; note?: string; output?: string }) => string,
   ): void => {
     const dispose = tools.register({
       name: schema.name,
@@ -199,7 +235,7 @@ export function registerFemwaTools(
       parameters: schema.parameters,
       output: {
         schema: { type: 'object', additionalProperties: true },
-        render: (_args: unknown, value: { ok: boolean; error?: string; script?: string; source?: string; lines?: number; path?: string }) => [{
+        render: (_args: unknown, value: { ok: boolean; error?: string; script?: string; source?: string; lines?: number; path?: string; output?: string }) => [{
           type: 'text',
           text: value.ok === true
             ? (renderText !== undefined ? renderText(value) : JSON.stringify(value))
@@ -280,7 +316,7 @@ export function registerFemwaTools(
     return {
       ok: true,
       source: record.path !== undefined ? 'file' : 'session-text',
-      path: record.path,
+      ...(record.path !== undefined ? { path: record.path } : {}),
       lines: record.finalText.split('\n').length,
       script: record.finalText,
     }
@@ -318,6 +354,25 @@ export function registerFemwaTools(
     }
     return JSON.stringify(value)
   })
+
+  register(chronicaTool, async (args) => {
+    const opts: { show?: number; list?: number; scope?: boolean; full?: boolean } = {}
+    if (typeof args.show === 'number' && Number.isFinite(args.show)) opts.show = Math.trunc(args.show)
+    if (typeof args.list === 'number' && Number.isFinite(args.list) && args.list > 0) opts.list = Math.trunc(args.list)
+    if (args.scope === true) opts.scope = true
+    if (args.full === true) opts.full = true
+    const output = await deps.chronicaQuery(opts)
+    // dsh 工具结果要求无损 JSON：undefined 键会整个被拒（"not lossless JSON"），
+    // 未传的参数一律不带键（条件展开），不能写 show: opts.show。
+    return {
+      ok: true,
+      ...(opts.show !== undefined ? { show: opts.show } : {}),
+      ...(opts.list !== undefined ? { list: opts.list } : {}),
+      ...(opts.scope !== undefined ? { scope: opts.scope } : {}),
+      ...(opts.full !== undefined ? { full: opts.full } : {}),
+      output,
+    }
+  }, (value) => value.output ?? JSON.stringify(value))
 
   return () => {
     for (const dispose of disposers) {

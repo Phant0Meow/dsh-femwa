@@ -14,14 +14,48 @@ showprompt 属于剧本正经旁白，属于正经对话流的一部分。
   python chronica.py 869             # 指定场次
   python chronica.py --list 5        # 最近 5 个场次一览（标题+调用数）
   python chronica.py 869 --scope     # 每行附带可见性信息（排查视野问题用）
+  python chronica.py 869 --full      # 发言全文不截断（默认对话流行截 110 字、指令 90 字）
 
 WAL 只读连接（mode=ro），与运行中的引擎互不干扰；
 无需复制副本（复制法是旧文件沙箱时代的绕路，已废弃）。
+2026-08-28 两处加固（用户拍板）：
+  1. 路径要活的：库位置相对脚本自身解析（<脚本目录>/user_data/memory/Chronica.wor），
+     不再写死盘符——整个插件目录搬家/改名照常工作；
+  2. immutable 回退：引擎收尾清掉 wal/shm 边车后 mode=ro 会报
+     "unable to open database file"（只读连接建不了 shm），此时降级
+     immutable=1 快照读（引擎不在写库时安全；引擎运行中边车在场，
+     第一分支即可连上，不受影响）。
+  3. 同日再补一刀（实测踩坑）：immutable 降级原本只 try connect()，但 WAL 库
+     是惰性打开——connect 成功、第一次查询才报错，降级分支永远接不住。
+     现 _connect() 连上后先做一次探针读（sqlite_master 计数）再判定。
 """
-import sqlite3, sys, json
+import os, sqlite3, sys, json
 
-DB = r"D:\myFiles\dsh\dsh-femwa\user_data\memory\Chronica.wor"
-URI = f"file:{DB.replace(chr(92), '/')}?mode=ro"
+_BASE = os.path.dirname(os.path.abspath(__file__))
+DB = os.path.join(_BASE, "user_data", "memory", "Chronica.wor")
+_URI_BASE = "file:" + DB.replace(chr(92), "/")
+
+
+def _connect():
+    """只读连接；mode=ro 连不上（边车被清）时降级 immutable=1 快照读。
+
+    注意：WAL 库是惰性打开——connect() 往往能成功，第一次真读才报
+    "unable to open database file"（2026-08-28 实测报错点在 execute 处）。
+    所以降级判定必须连上后先做一次探针读，只 try connect() 是接不住的。
+    """
+    con = None
+    try:
+        con = sqlite3.connect(f"{_URI_BASE}?mode=ro", uri=True, timeout=3)
+        con.execute("SELECT count(*) FROM sqlite_master").fetchone()  # 探针：强制真读一次
+        return con
+    except sqlite3.OperationalError:
+        if con is not None:
+            try:
+                con.close()
+            except Exception:
+                pass
+    return sqlite3.connect(f"{_URI_BASE}?mode=ro&immutable=1", uri=True, timeout=3)
+
 
 def _scopes(raw):
     if not raw:
@@ -31,6 +65,7 @@ def _scopes(raw):
         return ",".join(str(x) for x in arr) if isinstance(arr, list) else str(raw)
     except Exception:
         return str(raw)
+
 
 def _classify(user_id_raw):
     """dialog.user_id 判别行性质：femshow-*=旁白 / fems-*=指令 / 其余=真人输入。"""
@@ -45,15 +80,21 @@ def _classify(user_id_raw):
         return "directive"
     return "human"
 
+
 def _clip(text, n):
     return str(text).replace("\n", " ")[:n]
+
 
 def main():
     args = sys.argv[1:]
     show_scope = "--scope" in args
     args = [a for a in args if a != "--scope"]
+    show_full = "--full" in args
+    args = [a for a in args if a != "--full"]
+    clip_line = 10**9 if show_full else 110   # 对话流行宽（--full=不截断）
+    clip_dir = 10**9 if show_full else 90     # 幕后指令行宽
 
-    conn = sqlite3.connect(URI, uri=True, timeout=3)
+    conn = _connect()
     cur = conn.cursor()
 
     if "--list" in args:
@@ -96,7 +137,7 @@ def main():
         if kind == "directive":
             continue
         who = {"narration": "旁白", "ai": "AI", "human": "人类"}[kind]
-        line = f"  [{who}] {_clip(text, 110)}"
+        line = f"  [{who}] {_clip(text, clip_line)}"
         if show_scope:
             line += f"\n        可见用户={_scopes(us)} 可见角色={_scopes(ss)}"
         print(line)
@@ -105,7 +146,7 @@ def main():
     directives = [e for e in events if e[1] == "directive"]
     print(f"\n─── 幕后指令（prompt × {len(directives)}，不属对话流）───")
     for ts, kind, tid, text, us, ss in directives:
-        line = f"  t{tid}: {_clip(text, 90)}"
+        line = f"  t{tid}: {_clip(text, clip_dir)}"
         if show_scope:
             line += f"\n        可见用户={_scopes(us)} 可见角色={_scopes(ss)}"
         print(line)
