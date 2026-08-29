@@ -499,13 +499,22 @@ export function ProjectionComposer({ useSession, useSessions, getSessionFace }: 
     const pid = state?.byId?.[sessionId]?.parentId
     return typeof pid === 'string' && pid.length > 0 ? pid : undefined
   })
+  // binding 可解析的判据=官方 resolve() 的 eligible：会话在列表 ids 中（或恰为
+  // 当前会话——composer 只挂在 fem-proj 窗上，永远走前者）。单独订阅它：
+  // 「目录先于列表落地」的启动竞态下，byId[projSid] 由宿主 address walk 在
+  // ids 还空着时先造出来，mainSid 首次非空那一刻 binding 返回 undefined 并被
+  // 下面的 useMemo 永久缓存（inject face 引用稳定、mainSid 之后不再变化=
+  // 永不重算）——刷新后权限按钮/统计行消失、切窗重挂才自愈（2026-08-29 探针
+  // 确定性复现：session.list 比目录慢时必现，大会话变多后 list 变慢所致）。
+  const mainListed = useSessions((state: { ids?: readonly string[] } | undefined): boolean =>
+    typeof mainSid === 'string' && Array.isArray(state?.ids) && state.ids.includes(mainSid))
   // 主会话 face（投影窗是主会话的遥控器：权限菜单/统计行/停止钮都读它）。
   // binding() 官方注释明示 render-safe 纯解析且 per-session identity-stable；
-  // useMemo 按 mainSid 缓存即引用稳定（mainSid 有值 = 会话已在列表 = 必解析
-  // 成功），uSES 订阅不会每渲染重挂。
+  // useMemo 按 [mainSid, mainListed] 缓存即引用稳定——mainListed 翻真（列表
+  // 落地）强制重算一次，清掉竞态窗口里缓存下来的失败解析。
   const mainFace = useMemo(
-    () => mainSid === undefined ? undefined : getSessionFace?.(mainSid),
-    [mainSid, getSessionFace],
+    () => (mainSid === undefined || !mainListed ? undefined : getSessionFace?.(mainSid)),
+    [mainSid, mainListed, getSessionFace],
   )
   const mainSnapshot = useMainSnapshot(mainFace)
   // 官方 primaryStops 同语义：主模型回合进行中 → 主按钮变 Stop。

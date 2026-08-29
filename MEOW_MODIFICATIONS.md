@@ -1784,3 +1784,17 @@ settleThenTrigger 清零。mount 链路核验无帧等待（SSE→fetch→setSta
 
 
 
+
+## 2026-08-29 投影窗刷新丢权限按钮/统计行（启动竞态：目录先于会话列表落地）
+
+### 症状
+刷新页面后，god/角色/戏内投影窗 composer 的权限设置按钮与输入框下统计行消失；切换 session 或切换视角（composer 重挂载）即恢复，仅刷新必现。
+
+### 根因（探针确定性复现钉死）
+恢复的 selection 直接落在投影窗时，宿主 handleConnected 同时发 session.list（重：summarize 全部会话含 13.7 万事件大会话）与 subagent 目录（轻：单 parent listChildren）。目录先回 → projectList 的 address walk 在 ids 还空着时先造出 byId[projSid]（带 parentId）→ composer 首次渲染 mainSid 非空，但 binding(mainSid) 走官方 sessions.resolve() 的 eligible 判据（ids 在册/恰为当前）→ 列表未到 → 返回 undefined → 被 useMemo([mainSid, getSessionFace]) 永久缓存（slot inject face 按 (entry, provideInfo) 缓存引用稳定，mainSid 之后不再变化 = 永不重算）；列表后到只换 byId 值、selector 输出不变，无重渲染触发。权限菜单/统计行读 mainFace 的 projections → 双双 render null。视角按钮不受影响（只依赖 byId）——探针实测「上帝视角按钮在、权限按钮缺」正是判别特征。a0f42ec（08-26 同症状修复）解决的是另一条路径（mainSid 字符串兜底让 selector 恒定），本条是其残留竞态缝。为何最近才稳定复现：大会话越来越多 → session.list 变慢 → catalog 稳定赢下竞态。
+
+### 修复（src/client-ui/composer.tsx，+9 行）
+新增 `mainListed = useSessions(state => ids.includes(mainSid))` 订阅（=官方 binding 可解析判据），useMemo deps 增 mainListed：列表落地翻真 → 强制重算 binding → 按钮自动出现。零行为变化论证：好次序下（list 先于 catalog 或都先于挂载）mainListed 与 mainSid 同一次 projectList 变真，memo 结果与旧代码完全一致；坏次序下从「永久缺失」变「列表落地即恢复」。
+
+### 验证（scripts/probe-composer-refresh.mjs，新增探针）
+headless Edge CDP + Fetch 拦截延迟 session.list 15s 确定性复现：修复后 AFTER-REFRESH 缺（列表未到，数据确实不可得，预期）→ AFTER-LIST-LAND 自动恢复 ✓（修复前同点位永不恢复）→ 切窗回归 ✓。正常无延迟启动（小/大会话各一）不受影响。tsc client 检查 composer 零新增错误。纯前端改动，junction 装配刷新即生效，未重启 3081。
