@@ -171,6 +171,7 @@ export function createGodMirror(deps: {
     if (windows?.god === undefined) return
     const main = sessionsStore?.get(SessionId(sid))
     if (main === undefined) return
+    const t0 = Date.now()
     let last = await loadGodMirrorSeq(sid)
     let wrote = 0
     for (const event of main.events) {
@@ -181,9 +182,8 @@ export function createGodMirror(deps: {
       mirrorMainEventToGod(sid, event)
       wrote += 1
     }
-    if (wrote > 0) {
-      console.log(`[dsh-femwa] god-mirror catch-up ${sid}: +${wrote} events (watermark -> ${last})`)
-    }
+    // [femwa-diag] 事件循环 stall 排查：全量遍历+镜像写入耗时量化。
+    console.log(`[dsh-femwa][diag] god-mirror catch-up ${sid}: ${Date.now() - t0}ms, scanned=${main.events.length}, wrote=${wrote}, watermark->${last}`)
   }
 
   /** 实时镜像：主会话事件白名单转发进上帝窗。投影窗自身与子代理会话都带

@@ -1450,6 +1450,9 @@ const handleWorkflowEvent = useCallback((evt) => {
 
     // 无需节点匹配的事件：直接处理或忽略
     if (type === 'heartbeat' || type === 'step') return;
+    // fem_stream=聊天流/投影窗直播帧（stream-store 消费），画布不使用——
+    // 全局 SSE 里帧量大且多无 node_name，不过滤会每帧刷告警（2026-08-28 降噪）。
+    if (type === 'fem_stream') return;
     const needsNodeMatch = !['flow_start', 'flow_done', 'flow_stopped', 'done', 'module_enter', 'module_exit'].includes(type);
 
     let matchedNode = null;
@@ -1760,6 +1763,19 @@ case 'human_input_error':
         alert('节点出错: ' + (data.error || '未知错误'));
         // ★ 出错时清空模块栈（不切画布，让用户看错误）
         moduleStackRef.current = [];
+        break;
+
+      case 'bridge_run_ended':
+        // 整场运行终止信号（引擎 worker 每场必发）：正常结束 ok=true 时
+        // flow_done 已复位，这里不重复动（别清掉 flow_done 点亮的 END 呼吸灯）；
+        // 异常崩溃 ok=false 时 flow_error 只标红节点不复位 flowStatus——
+        // 前端会永远卡 running，后续 run_request 全被本组件守卫拒绝
+        // （2026-08-29 NameError 卡死事故：编辑器假死只能靠刷新解）。
+        if (data?.ok === false) {
+          setFlowStatus('idle');
+          setActiveNodeIds(new Set());
+          moduleStackRef.current = [];
+        }
         break;
 
       case 'done':

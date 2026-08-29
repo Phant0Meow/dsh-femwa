@@ -113,15 +113,22 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
   const actorsFetchSeq = useRef(0)
   const refreshActors = useCallback((sid: string): void => {
     const seq = ++actorsFetchSeq.current
+    console.log(`[femwa-diag] GET /actors?sessionId=${sid} (seq=${seq})`)
     void fetch(`/dsh-femwa/actors?sessionId=${encodeURIComponent(sid)}`)
       .then(response => response.json())
       .then((data: { ok?: boolean; actors?: string[] }) => {
-        if (seq !== actorsFetchSeq.current) return
+        console.log(`[femwa-diag] /actors response (seq=${seq}): ok=${String(data.ok)} actors=${JSON.stringify(data.actors)}`)
+        if (seq !== actorsFetchSeq.current) {
+          console.log(`[femwa-diag] response STALE (seq=${seq} != current ${actorsFetchSeq.current}), dropped`)
+          return
+        }
         if (data.ok === true && data.actors !== undefined && data.actors.length > 0) {
           setScriptActors(data.actors)
+        } else {
+          console.log('[femwa-diag] response guarded out (ok=false or empty actors) — scriptActors unchanged')
         }
       })
-      .catch(() => { /* menu falls back to actors seen in chat */ })
+      .catch((error: unknown) => { console.log(`[femwa-diag] /actors fetch failed: ${String(error)}`) })
   }, [])
   useEffect(() => {
     if (mainSid === undefined) return
@@ -141,7 +148,10 @@ export function FemViewButton({ useSession, useSessions, openSession, listProjec
   useEffect(() => {
     if (mainSid === undefined) return
     const handler = (msg: { type?: string }): void => {
-      if (msg.type === 'flow_start') refreshActors(mainSid)
+      if (msg.type === 'flow_start') {
+        console.log(`[femwa-diag] SSE flow_start received -> refreshActors(${mainSid})`)
+        refreshActors(mainSid)
+      }
     }
     const unsubscribe = subscribeControlEvents(handler)
     return unsubscribe

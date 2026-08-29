@@ -16,6 +16,10 @@ import { createHash } from 'node:crypto'
 
 // ── 剧本指纹与断点（resume）────────────────────────────────────────────────
 
+// 【cp 诊断】2026-08-29 912 僵尸双跑调查埋点：断点块的每次落盘（写/清）完成
+// 时刻——checkpoint 增量写与 flow_done 清块的竞态证据=两条 DONE 日志的先后。
+const diagTs = (): string => new Date().toISOString().slice(11, 23)
+
 /** PlayResume — 一场被打断的戏的完整断点：世界三元组（身份+进度+变量）。
  * fingerprint=开跑时剧本文本指纹；剧本变更后断点即失效——变了就不是断点，
  * 是新戏。femSessionId=引擎台账场次（世界身份，角色记忆按它落库）。 */
@@ -117,12 +121,15 @@ export async function readPlayResume(femwaRoot: string, sessionId: string): Prom
  * 有断点但不一致 → 清除失效断点并返回 undefined（变了就必须 fresh_start）。 */
 export async function loadValidPlayResume(femwaRoot: string, sessionId: string, scriptText: string): Promise<PlayResume | undefined> {
   const resume = await readPlayResume(femwaRoot, sessionId)
+  console.log(`[femwa-cp-diag ${diagTs()}] loadValidPlayResume sid=${sessionId}: stored=${resume !== undefined}${resume !== undefined ? ` fp=${resume.fingerprint.slice(0, 8)} femSession=${String(resume.femSessionId ?? '-')} cps=${JSON.stringify(Object.keys(resume.checkpoints ?? {}))}` : ''}`)
   if (resume === undefined) return undefined
   if (resume.fingerprint !== scriptFingerprint(scriptText)) {
+    console.log(`[femwa-cp-diag ${diagTs()}] loadValidPlayResume sid=${sessionId}: FINGERPRINT MISMATCH → clearing stale breakpoint`)
     await writePlayResume(femwaRoot, sessionId, null)
     console.log(`[dsh-femwa] ${sessionId}: resume fingerprint mismatch — breakpoint invalidated (script changed)`)
     return undefined
   }
+  console.log(`[femwa-cp-diag ${diagTs()}] loadValidPlayResume sid=${sessionId}: FINGERPRINT MATCH → resume usable`)
   return resume
 }
 
@@ -133,6 +140,9 @@ async function setPlayResumeLocked(femwaRoot: string, sessionId: string, resume:
   if (resume === null) delete record.resume
   else record.resume = resume
   await writeSessionRecord(femwaRoot, sessionId, record)
+  // 【cp 诊断】落盘完成时刻——与另一条写（checkpoint 增量 / flow_done 清块）
+  // 的 DONE 日志先后对时，即竞态的直接证据。
+  console.log(`[femwa-cp-diag ${diagTs()}] setPlayResume DONE sid=${sessionId} op=${resume === null ? 'CLEAR' : `WRITE fp=${resume.fingerprint.slice(0, 8)} cps=${JSON.stringify(Object.keys(resume.checkpoints ?? {}))}`}`)
 }
 
 /** 整块写/删断点（null=删除）。经会话记录串行队列执行。 */

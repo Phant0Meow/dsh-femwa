@@ -293,6 +293,9 @@ export function registerRoutes(ctx: Context, deps: RoutesDeps): void {
               : {}),
             ...(typeof raw.note === 'string' ? { note: raw.note } : {}),
           }
+          // 【run 诊断】每次回传一行——广播被两个前端各消费一次时，这里会
+          // 出现同一 sessionId 的两条 ARRIVE（双消费实锤，时间戳对齐 /run）。
+          console.log(`[femwa-run-diag ${new Date().toISOString().slice(11, 23)}] run-result ARRIVE sid=${sessionId} ok=${String(result.ok)}${result.error !== undefined ? ` error=${result.error}` : ''}`)
           runResult(sessionId, result)
           writeJson(res, 200, { ok: true })
         })().catch((error: unknown) => {
@@ -315,12 +318,14 @@ export function registerRoutes(ctx: Context, deps: RoutesDeps): void {
           return
         }
         const mem = runState.sessionActors.get(sessionId)
+        console.log(`[dsh-femwa][diag] GET /actors ${sessionId}: mem=${mem === undefined ? 'undefined' : JSON.stringify(mem)}`)
         if (mem !== undefined && mem.length > 0) {
           writeJson(res, 200, { ok: true, actors: mem })
           return
         }
         void readTurnScopeFile(resolved.femwaRoot, sessionId).then((record) => {
           const actors = [...new Set(Object.values(record).flat())]
+          console.log(`[dsh-femwa][diag] GET /actors ${sessionId}: mem miss, turn_scopes fallback=${JSON.stringify(actors)}`)
           writeJson(res, 200, { ok: true, actors })
         }).catch((error: unknown) => {
           writeJson(res, 500, { ok: false, error: String(error) })

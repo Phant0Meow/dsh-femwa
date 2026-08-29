@@ -86,38 +86,111 @@ function blocksToText(content: unknown): string {
 }
 
 /**
- * Assemble the child's full trajectory as one long text. cot (reasoning) is
- * kept ONLY on turns that carried tool calls — the same rule dsh's deepseek
- * serialization applies — so pure-text thinking never enters Fem memory.
- * `thinking` returns ALL reasoning (display is separate from storage).
+ * 一个子会话 step（一轮）的结构化转写：四列各归各位。
+ * cot=该轮 reasoning（全量存，可见性由读取侧开关管）；reply=该轮 assistant
+ * 文本；toolCall=该轮工具命令 JSON 数组（callId/name/arguments——dsh core
+ * types.ts 的 tool/call 事件自带，命令与文本天然分离）；toolResult=该轮工具
+ * 结果（[TOOL CALL #N] 模板格式，命令+结果配对）。
  */
-function buildTrajectory(events: readonly SessionEvent[]): { output: string; trajectory: string; thinking: string } {
-  const lines: string[] = []
-  const thoughts: string[] = []
+interface AgentStep {
+  step: number
+  cot: string
+  reply: string
+  toolCall: string
+  toolResult: string
+}
+
+function formatToolBlocks(calls: { callId: string; name: string; arguments: string }[], results: string[]): string {
+  const n = Math.max(calls.length, results.length)
+  const parts: string[] = []
+  for (let i = 0; i < n; i++) {
+    const c = calls[i]
+    const r = results[i] ?? ''
+    const lines: string[] = [`[TOOL CALL #${i + 1}]`]
+    if (c !== undefined) lines.push(`${c.name}(${c.arguments})`)
+    if (r) {
+      lines.push(`[TOOL CALL #${i + 1} RESULT]`)
+      lines.push(r)
+    }
+    lines.push(`[TOOL CALL #${i + 1} END]`)
+    parts.push(lines.join('\n'))
+  }
+  return parts.join('\n\n')
+}
+
+/**
+ * 把子会话事件流按 step 分桶成结构化转写（2026-08-29 转写分离）：assistant/
+ * message 开启新一轮（reasoning→cot、text→reply），tool/call 逮住命令（callId/
+ * name/arguments），tool/result 归属本轮结果——不再拍平成带标记的长文本，
+ * 下游上下文由读取侧按可见性开关重组。output=最后一个非空 reply（流程用）。
+ */
+function buildSteps(events: readonly SessionEvent[]): { output: string; steps: AgentStep[] } {
+  type Bucket = {
+    cot: string[]
+    reply: string[]
+    calls: { callId: string; name: string; arguments: string }[]
+    results: string[]
+  }
+  const buckets = new Map<number, Bucket>()
+  const bucketOf = (step: number): Bucket => {
+    let b = buckets.get(step)
+    if (b === undefined) {
+      b = { cot: [], reply: [], calls: [], results: [] }
+      buckets.set(step, b)
+    }
+    return b
+  }
   let output = ''
   for (const event of events) {
     if (event.type === 'assistant/message') {
-      const content = (event.data.message as { content: unknown }).content
+      const data = event.data as { step?: unknown; message?: { content?: unknown } }
+      const content = data.message?.content
       if (!Array.isArray(content)) continue
-      const text = content.filter(b => (b as { type?: string }).type === 'text')
-        .map(b => String((b as { text?: unknown }).text ?? '')).join('')
-      const reasoning = content.filter(b => (b as { type?: string }).type === 'reasoning')
-        .map(b => String((b as { text?: unknown }).text ?? '')).join('')
-      const toolCalls = content.filter(b => (b as { type?: string }).type === 'tool-call')
-      if (reasoning.length > 0 && toolCalls.length > 0) lines.push(`[思考]\n${reasoning}`)
-      if (reasoning.length > 0) thoughts.push(reasoning)
+      const step = typeof data.step === 'number' ? data.step : 0
+      const b = bucketOf(step)
+      const text = content.filter(b2 => (b2 as { type?: string }).type === 'text')
+        .map(b2 => String((b2 as { text?: unknown }).text ?? '')).join('')
+      const reasoning = content.filter(b2 => (b2 as { type?: string }).type === 'reasoning')
+        .map(b2 => String((b2 as { text?: unknown }).text ?? '')).join('')
+      if (reasoning.length > 0) b.cot.push(reasoning)
       if (text.length > 0) {
-        lines.push(`[回复]\n${text}`)
+        b.reply.push(text)
         output = text
       }
+    } else if (event.type === 'tool/call') {
+      const data = event.data as { step?: unknown; callId?: unknown; name?: unknown; arguments?: unknown }
+      const step = typeof data.step === 'number' ? data.step : 0
+      bucketOf(step).calls.push({
+        callId: typeof data.callId === 'string' ? data.callId : '',
+        name: typeof data.name === 'string' ? data.name : '',
+        arguments: typeof data.arguments === 'string' ? data.arguments : '',
+      })
     } else if (event.type === 'tool/result') {
-      const message = (event.data as { message?: { content?: unknown } }).message
+      const data = event.data as { step?: unknown; message?: { content?: unknown } }
+      const step = typeof data.step === 'number' ? data.step : 0
+      const message = data.message
       if (message === undefined) continue
-      const resultText = blocksToText(message.content)
-      if (resultText.length > 0) lines.push(`[工具结果]\n${resultText}`)
+      const content = message.content
+      const items = Array.isArray(content) ? content : []
+      for (const block of items) {
+        const bl = block as { type?: string; text?: unknown; content?: unknown }
+        if (bl.type !== 'tool-result') continue
+        const text = typeof bl.text === 'string' ? bl.text : blocksToText(bl.content)
+        if (text.length > 0) bucketOf(step).results.push(text)
+      }
     }
   }
-  return { output, trajectory: lines.join('\n\n'), thinking: thoughts.join('\n\n') }
+  const steps: AgentStep[] = [...buckets.keys()].sort((a, b) => a - b).map((step) => {
+    const b = buckets.get(step)!
+    return {
+      step,
+      cot: b.cot.join('\n\n'),
+      reply: b.reply.join('\n\n'),
+      toolCall: b.calls.length > 0 ? JSON.stringify(b.calls) : '',
+      toolResult: b.calls.length > 0 || b.results.length > 0 ? formatToolBlocks(b.calls, b.results) : '',
+    }
+  })
+  return { output, steps }
 }
 
 // ── 工具面 / 模型来源 ─────────────────────────────────────────────────────
@@ -321,7 +394,16 @@ export async function runAiSubagent(
   armIdle()
   const sid = String(session.id)
   const nodeName = String(request.node_name ?? '')
-  const actor = nodeActors.get(nodeName) ?? nodeName
+  // Par 并发安全（2026-08-28）：演员名优先取本次 ai_request 自带的 ai_name
+  // （引擎 _exec_ai 三级解析后随 payload 传递，每请求独立身份）。此前取共享
+  // Map nodeActors[node_name]——par 循环体各分支 node id 相同而演员不同，
+  // context_ready 互相覆盖后 Map 值取决于事件到达序，speaker 行会写上另一
+  // 分支的演员名（流式 fem_stream 的 actor 同错，两演员直播混进同一桶）。
+  // 旧引擎（payload 无 ai_name）回退 Map：单节点/串行语义下仍正确。
+  const requestAiName = typeof request.ai_name === 'string' && request.ai_name.length > 0
+    ? request.ai_name
+    : undefined
+  const actor = requestAiName ?? nodeActors.get(nodeName) ?? nodeName
   // turn 首行：发言者名字（之后 cot/工具调用/回答由 dsh 原生 UI 渲染）
   const scopeInfo = Array.isArray(request.scope_info)
     ? request.scope_info.filter((x): x is string => typeof x === 'string')
@@ -329,17 +411,38 @@ export async function runAiSubagent(
   // 角色名字行：只投影进上帝窗 + scope 命中的角色窗。主会话表面绝不写入
   // （主窗口=戏外=纯 DSH 原生 user+主模型；名字行曾写主会话导致"光有名字
   // 没有内容"的幽灵行——内容 turn 本就只进投影窗）。
+  // 【2026-08-28 Par 并发修复】名字行从「ai_request 到达即写」推迟到「该
+  // 子代理首个事件到达」（ensureSpeakerLine，onChildEvent 最前置同步调用，
+  // 先于一切直播广播与镜像）：此前名字行是预约位，par 时 N 个 ai_request
+  // 连续到达 = N 行名字连排，正文 turn 之后才交错落地（「ID下面不一定是
+  // 发言」）；推迟后名字行紧贴自己的第一块内容。零事件子代理（立即失败/
+  // 空闲超时）由 finally 兜底补写，错误行仍有着落点。监听器挂在 windows
+  // 就绪之后，首次触发时 windows 必已就绪。
   let windows = projections.get(sid)
   if (windows === undefined) {
-    windows = await projections.ensure(sid, scopeInfo ?? [], (session.header as { cwd?: string } | undefined)?.cwd ?? process.cwd())
+    // 【cwd 守卫】同 engine-events flow_start：cwd 缺失绝不落 process.cwd()
+    // （2026-08-23 分组键事故原则，routes.ts projection-windows 同款守卫）。
+    // 此兜底建窗仅在 registry 无窗时可达；抛错交给 ai_request 调用方现有
+    // catch（recordError + 空回传，该演员节点失败、引擎继续），优于建错
+    // 分组产生 duplicate session id 炸整树。
+    const headerCwd = (session.header as { cwd?: string } | undefined)?.cwd
+    if (headerCwd === undefined || headerCwd.length === 0) {
+      throw new Error(`session ${sid} cwd missing — projection windows cannot be ensured (process.cwd() fallback forbidden)`)
+    }
+    windows = await projections.ensure(sid, scopeInfo ?? [], headerCwd)
   }
-  projectionAppend(windows, 'dsh-femwa/chat', {
-    kind: 'speaker',
-    actor,
-    text: actor,
-    ...scopeInfo === undefined ? {} : { visible: scopeInfo },
-    seq: Date.now(),
-  }, undefined, scopeInfo)
+  let speakerWritten = false
+  const ensureSpeakerLine = (): void => {
+    if (speakerWritten || windows === undefined) return
+    speakerWritten = true
+    projectionAppend(windows, 'dsh-femwa/chat', {
+      kind: 'speaker',
+      actor,
+      text: actor,
+      ...scopeInfo === undefined ? {} : { visible: scopeInfo },
+      seq: Date.now(),
+    }, undefined, scopeInfo)
+  }
   const baseTurn = (turnBaseBySession.get(sid) ?? 100_000) + 1
   turnBaseBySession.set(sid, baseTurn + 100)
   const mapTurn = (childTurn: unknown): number =>
@@ -395,6 +498,10 @@ export async function runAiSubagent(
   const onChildEvent = (watched: Session, watchedEvent: SessionEvent): void => {
     if (String(watched.id) !== String(run.id)) return
     armIdle()
+    // 名字行前置（2026-08-28 Par 并发修复）：先于一切直播广播与镜像 append，
+    // 同步执行保证「名字行落盘 → 直播 delta 广播」的顺序，前端锚点行先于
+    // 直播块存在（delta 先到也只是进 femStreams 桶暂存，行挂载后全量读取）。
+    ensureSpeakerLine()
     // 流式直播（2026-08-24 方案B）：chunk 经插件 SSE 通道旁路广播给前端，
     // 零落盘——前端在投影窗 speaker 锚点行下自绘官方同款打字机，块完成时
     // 该块从缓冲移除、原生镜像接管。sid=主会话 id（各投影窗前端自行推导比
@@ -402,33 +509,37 @@ export async function runAiSubagent(
     // 留：femGen 画布节点流式文本（nodeStates.streamingText）仍消费它。
     if (watchedEvent.type === 'assistant/chunk') {
       const chunk = (watchedEvent.data as {
-        chunk?: { type?: string; blockType?: string; text?: unknown; name?: unknown; argumentsDelta?: unknown; block?: { kind?: string } }
+        chunk?: { type?: string; index?: number; blockType?: string; text?: unknown; name?: unknown; argumentsDelta?: unknown; block?: { type?: string } }
       }).chunk
       const sid0 = String(session.id)
       if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
         broadcastSse('ai_token', { node_name: nodeName, actor, token: chunk.text })
-        broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'text', text: chunk.text })
+        broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'text', index: chunk.index, text: chunk.text })
       } else if (chunk?.type === 'reasoning-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
-        broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'reasoning', text: chunk.text })
+        broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'reasoning', index: chunk.index, text: chunk.text })
       } else if (chunk?.type === 'tool-call-delta') {
         // 工具调用参数流式（2026-08-24 用户点名全程流式）：首帧带 name，之后
-        // 只发参数增量；客户端聚合到「最后一个 toolcall 块」（同 step 内工具
-        // 串行，并发工具属于不同演员流，无歧义）。
+        // 只发参数增量。【2026-08-29 修】按源 chunk index 聚合——旧实现按
+        // 「最后一个 toolcall 块」聚合且假设同 step 工具串行，GLM 并行工具
+        // 调用（多 tool-call 块 delta 交错）会把多个工具参数拼进同一块。
         const name = typeof chunk.name === 'string' && chunk.name.length > 0 ? chunk.name : undefined
         const argsDelta = typeof chunk.argumentsDelta === 'string' ? chunk.argumentsDelta : ''
         if (name !== undefined || argsDelta.length > 0) {
           broadcastSse('fem_stream', {
-            kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'toolcall',
+            kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'toolcall', index: chunk.index,
             ...name !== undefined ? { name } : {},
             text: argsDelta,
           })
         }
       } else if (chunk?.type === 'block-start' && (chunk.blockType === 'text' || chunk.blockType === 'reasoning')) {
-        broadcastSse('fem_stream', { kind: 'start', sid: sid0, node_name: nodeName, actor, blockKind: chunk.blockType })
-      } else if (chunk?.type === 'block-end' && (chunk.block?.kind === 'text' || chunk.block?.kind === 'reasoning' || chunk.block?.kind === 'tool-call')) {
+        broadcastSse('fem_stream', { kind: 'start', sid: sid0, node_name: nodeName, actor, blockKind: chunk.blockType, index: chunk.index })
+      } else if (chunk?.type === 'block-end' && (chunk.block?.type === 'text' || chunk.block?.type === 'reasoning' || chunk.block?.type === 'tool-call')) {
+        // 【2026-08-29 修】块类型字段是 block.type（llm StreamChunk 定义），
+        // 旧代码读 chunk.block?.kind——恒 undefined → block_end 广播全丢 →
+        // 直播块只进不出，镜像落地后直播残留=整轮内容双份显示。
         broadcastSse('fem_stream', {
-          kind: 'block_end', sid: sid0, node_name: nodeName, actor,
-          blockKind: chunk.block?.kind === 'tool-call' ? 'toolcall' : chunk.block?.kind,
+          kind: 'block_end', sid: sid0, node_name: nodeName, actor, index: chunk.index,
+          blockKind: chunk.block?.type === 'tool-call' ? 'toolcall' : chunk.block?.type,
         })
       }
     }
@@ -484,13 +595,15 @@ export async function runAiSubagent(
   try {
     const result = await run.result
     let output = typeof result.output === 'string' ? result.output : ''
-    let trajectory = ''
-    let thinking = ''
+    let steps: AgentStep[] = []
     if (run.localAgent !== undefined) {
-      const built = buildTrajectory(run.localAgent.session.events)
-      trajectory = built.trajectory.length > 0 ? built.trajectory : output
-      thinking = built.thinking
+      const built = buildSteps(run.localAgent.session.events)
+      steps = built.steps
       if (output.length === 0 && built.output.length > 0) output = built.output
+    }
+    if (steps.length === 0 && output.length > 0) {
+      // 兜底：事件流没采到时把最终回复当单行，防该 turn 空 react（半行）
+      steps = [{ step: 0, cot: '', reply: output, toolCall: '', toolResult: '' }]
     }
     if (result.stopReason !== 'completed' && result.stopReason !== 'max-tokens') {
       recordError(session.id, `子 agent 结束异常：${result.stopReason}`)
@@ -498,9 +611,9 @@ export async function runAiSubagent(
     // 思考链已在 onChildEvent 实时显示（带角色名的折叠行），这里不再重复。
     await bridge.send('human_input', {
       wait_key: waitKey,
-      body: { output, trajectory },
+      body: { output, steps },
     })
-    console.log(`[dsh-femwa] subagent done: ${String(request.node_name ?? '')} stop=${result.stopReason} output=${output.length}ch thinking=${thinking.length}ch`)
+    console.log(`[dsh-femwa] subagent done: ${String(request.node_name ?? '')} stop=${result.stopReason} output=${output.length}ch steps=${steps.length}`)
     if (output.length > 0) {
       console.log(`[dsh-femwa] subagent output head: ${output.slice(0, 300).replace(/\n/g, '\\n')}`)
     }
@@ -512,11 +625,15 @@ export async function runAiSubagent(
     console.log(`[dsh-femwa] subagent interrupted: ${String(request.node_name ?? '')} ${message}`)
     await bridge.send('human_input', {
       wait_key: waitKey,
-      body: { output: '', trajectory: '' },
+      body: { output: '', steps: [] },
     }).catch((sendError: unknown) => {
       console.log(`[dsh-femwa] timeout回传失败: ${String(sendError)}`)
     })
   } finally {
+    // 名字行兜底（2026-08-28 Par 并发修复配套）：零事件子代理（立即失败/
+    // 空闲超时，一个子会话事件都没发过）没有首事件可触发 ensureSpeakerLine，
+    // 这里补写让错误行/无输出空档有归属；正常路径已写过，幂等跳过。
+    ensureSpeakerLine()
     // 直播兜底收尾（2026-08-24 方案B）：无论正常完成/中断/超时，都清掉该
     // 演员的流式缓冲——前端防残影的最后防线（block_end 已逐块移除，这里
     // 覆盖"块没闭合就结束"的异常路径）。

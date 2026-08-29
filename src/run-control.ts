@@ -76,6 +76,13 @@ export async function collectLlmModels(ctx: Context, resolved: ResolvedConfig): 
 
 // ── 开跑 ─────────────────────────────────────────────────────────────────
 
+// 【run 诊断】2026-08-29 912 僵尸双跑调查埋点：同一请求的全生命周期（到达→
+// 守卫支路→编译→reset/resume 支路→canResume 判定→running 置位→bridge 发送）
+// 每步一行带毫秒时间戳与请求编号，terminal 直接看。竞态分析=对比两个请求的
+// 置位时刻与守卫通过时刻。
+let runDiagSeq = 0
+const diagTs = (): string => new Date().toISOString().slice(11, 23)
+
 /** Start one engine run bound to a Fem session. Registers the run owner
  * BEFORE sending: a tiny script can finish before the run response returns,
  * and events would be dropped. A checkpoint from a previous interrupted run
@@ -90,6 +97,7 @@ export async function startRunOnSession(
   scriptPath?: string,
   reset = false,
 ): Promise<void> {
+  console.log(`[femwa-run-diag ${diagTs()}] startRun begin sid=${String(sessionId)} reset=${reset}`)
   const apiKey = await resolveApiKey(ctx, resolved)
   if (apiKey === undefined) {
     console.log(`[dsh-femwa] credential ${resolved.apiKeyRef} not resolved; AI nodes will fail`)
@@ -127,10 +135,17 @@ export async function startRunOnSession(
   // 「继续」= 剧本指纹一致才允许续跑（变了就不是断点，是新戏）。
   let resumeRec: PlayResume | undefined
   if (reset) {
-    await writePlayResume(resolved.femwaRoot, String(sessionId), null).catch(() => undefined)
-    console.log(`[dsh-femwa] reset ${sessionId}: resume cleared, running from start`)
+    // 不吞错：清块失败意味着旧断点块可能复活被后续"继续"消费（2026-08-28
+    // 912 僵尸双跑的候选成因之一），必须可见——仅补日志，不改失败放行行为。
+    console.log(`[femwa-run-diag ${diagTs()}] RESET branch: clearing resume block sid=${sid}`)
+    await writePlayResume(resolved.femwaRoot, String(sessionId), null).catch((error: unknown) => {
+      console.log(`[femwa-run-diag ${diagTs()}] RESET branch: resume clear FAILED — old breakpoint block may survive: ${String(error)}`)
+    })
+    console.log(`[femwa-run-diag ${diagTs()}] RESET branch: resume cleared OK sid=${sid}`)
   } else {
+    console.log(`[femwa-run-diag ${diagTs()}] RESUME branch: loading valid resume sid=${sid}`)
     resumeRec = await loadValidPlayResume(resolved.femwaRoot, String(sessionId), scriptText)
+    console.log(`[femwa-run-diag ${diagTs()}] RESUME branch: loaded=${resumeRec !== undefined}${resumeRec !== undefined ? ` femSession=${String(resumeRec.femSessionId)} cps=${JSON.stringify(Object.keys(resumeRec.checkpoints ?? {}))}` : ' (no usable breakpoint)'}`)
   }
   // 开演盖章：本轮产生的断点只认当前版本的剧本。
   await updatePlayResume(resolved.femwaRoot, sid, { fingerprint: scriptFingerprint(scriptText) })
@@ -142,11 +157,13 @@ export async function startRunOnSession(
   }
   const canResume = resumeRec?.femSessionId !== undefined
     && Object.keys(resumedCheckpoints).length > 0
+  console.log(`[femwa-run-diag ${diagTs()}] canResume=${canResume} (femSessionId=${String(resumeRec?.femSessionId ?? '-')} cps=${JSON.stringify(resumedCheckpoints)})`)
   if (canResume) {
     console.log(`[dsh-femwa] resuming ${sessionId}: femSession=${resumeRec!.femSessionId} from ${JSON.stringify(resumedCheckpoints)}`)
   }
   runState.sessionId = sessionId
   runState.running = true
+  console.log(`[femwa-run-diag ${diagTs()}] running=true SET sid=${sid} (guard window closed for this slot)`)
   try {
     // base_dir = 剧本文件所在目录（todo #2）：code/memory/context 的相对
     // file: 地址基于它解析。有地址（已保存/导入）→ 剧本文件所在目录；
@@ -154,6 +171,7 @@ export async function startRunOnSession(
     const baseDir = effectivePath !== undefined
       ? effectivePath.replace(/[\\/][^\\/]*$/, '')
       : ''
+    console.log(`[femwa-run-diag ${diagTs()}] bridge.run SEND sid=${sid} resume_state=${canResume ? 'PRESENT(911-style zombie risk if duplicate)' : 'none'}`)
     await bridge.send('run', {
       fems: scriptText,
       base_dir: baseDir,
@@ -276,6 +294,10 @@ export async function handleRunOnSession(
     return
   }
   const body = await readBody(req)
+  const seq = ++runDiagSeq
+  const tag = `#${seq}`
+  const sessionId0 = typeof body.sessionId === 'string' && body.sessionId.trim().length > 0 ? body.sessionId : '-'
+  console.log(`[femwa-run-diag ${diagTs()}] ${tag} === POST /run arrive === sid=${sessionId0} reset=${String(body.reset === true)} running=${runState.running} owner=${String(runState.sessionId ?? '-')}`)
   const sessionId = typeof body.sessionId === 'string' && body.sessionId.trim().length > 0
     ? SessionId(body.sessionId)
     : undefined
@@ -286,16 +308,19 @@ export async function handleRunOnSession(
   const sessionsStore = ctx.get('sessions') as { get(id: SessionId): Session | undefined } | undefined
   const session = sessionsStore?.get(sessionId)
   if (session === undefined) {
+    console.log(`[femwa-run-diag ${diagTs()}] ${tag} REJECT-404 (session not in store)`)
     writeJson(res, 404, { ok: false, error: `session ${sessionId} not found` })
     return
   }
   if (presetOf(session) !== FEM_PRESET) {
+    console.log(`[femwa-run-diag ${diagTs()}] ${tag} REJECT-400 (not fem preset)`)
     writeJson(res, 400, { ok: false, error: '当前会话不是 Fem 剧本模式：请先在会话上方的模式菜单选择「Fem 剧本模式」' })
     return
   }
   if (runState.running) {
     // 引擎一次只能演一场：409 带上归属会话，前端/模型能分清是谁家在跑。
     const owner = String(runState.sessionId ?? '?')
+    console.log(`[femwa-run-diag ${diagTs()}] ${tag} GUARD-REJECT-409 (running=true, owner=${owner})`)
     writeJson(res, 409, {
       ok: false,
       error: owner === sessionId
@@ -304,9 +329,11 @@ export async function handleRunOnSession(
     })
     return
   }
+  console.log(`[femwa-run-diag ${diagTs()}] ${tag} GUARD-PASS (running=false, occupying slot now)`)
   const fems = typeof body.fems === 'string' && body.fems.trim().length > 0 ? body.fems : undefined
   const scriptPath = typeof body.scriptPath === 'string' && body.scriptPath.trim().length > 0 ? body.scriptPath : undefined
   if (fems === undefined && scriptPath === undefined) {
+    console.log(`[femwa-run-diag ${diagTs()}] ${tag} REJECT-400 (no fems/scriptPath)`)
     writeJson(res, 400, { ok: false, error: 'fems or scriptPath is required' })
     return
   }
@@ -320,16 +347,19 @@ export async function handleRunOnSession(
     const baseDir = scriptPath !== undefined
       ? scriptPath.replace(/[\\/][^\\/]*$/, '')
       : ''
+    console.log(`[femwa-run-diag ${diagTs()}] ${tag} check start (bridge compile, guard slot NOT yet occupied by startRun)`)
     try {
       await bridge.send('check', { fems: scriptText, base_dir: baseDir }, 30_000)
+      console.log(`[femwa-run-diag ${diagTs()}] ${tag} check OK`)
     } catch (error: unknown) {
+      console.log(`[femwa-run-diag ${diagTs()}] ${tag} check FAILED: ${String(error instanceof Error ? error.message : error)}`)
       writeJson(res, 400, { ok: false, error: `剧本编译失败：${String(error instanceof Error ? error.message : error)}` })
       return
     }
     await startRunOnSession(ctx, resolved, bridge, runState, sessionId, scriptText, scriptPath, reset)
     writeJson(res, 200, { ok: true, sessionId: String(sessionId) })
   } catch (error: unknown) {
-    console.log(`[dsh-femwa] run-on-session FAILED: ${String(error)}`)
+    console.log(`[femwa-run-diag ${diagTs()}] ${tag} run-on-session FAILED: ${String(error)}`)
     writeJson(res, 500, { ok: false, error: String(error) })
   }
 }

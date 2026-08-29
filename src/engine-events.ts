@@ -25,6 +25,10 @@ import { type GodMirror } from './god-mirror'
 import { runAiSubagent } from './subagent'
 import { updatePlayResume, writePlayResume, appendFemSession } from './state-files'
 
+// 【cp 诊断】2026-08-29 912 僵尸双跑调查埋点：checkpoint 到达/写完成与
+// flow_done 清块的相对时序（竞态证据），到达时的 running 值=迟到写判据。
+const diagTs = (): string => new Date().toISOString().slice(11, 23)
+
 /** 运行结局直达主模型对话流：以 plugin 来源构造 user 消息并 agent.steer()。
  * dsh 官方语义（dsh-agent）：空闲的主模型立即开新回合收到通知；忙碌时在
  * 下一 step 边界消费——必达、不打断当前回合。取代旧 femwa:notify
@@ -175,36 +179,45 @@ export function registerEngineEventHandlers(ctx: Context, deps: EngineEventsDeps
     }
     if (event.type !== 'assistant/chunk') return
     const chunk = (event.data as {
-      chunk?: { type?: string; blockType?: string; text?: unknown; name?: unknown; argumentsDelta?: unknown; block?: { kind?: string } }
+      chunk?: { type?: string; index?: number; blockType?: string; text?: unknown; name?: unknown; argumentsDelta?: unknown; block?: { type?: string } }
     }).chunk
     if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
-      broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: '', actor, blockKind: 'text', text: chunk.text })
+      broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: '', actor, blockKind: 'text', index: chunk.index, text: chunk.text })
     } else if (chunk?.type === 'reasoning-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
-      broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: '', actor, blockKind: 'reasoning', text: chunk.text })
+      broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: '', actor, blockKind: 'reasoning', index: chunk.index, text: chunk.text })
     } else if (chunk?.type === 'tool-call-delta') {
+      // 【2026-08-29 修】按源 chunk index 聚合（GLM 并行工具调用 delta 交错，
+      // 按「最后一个同类块」聚合会把多工具参数拼进同一块）。
       const name = typeof chunk.name === 'string' && chunk.name.length > 0 ? chunk.name : undefined
       const argsDelta = typeof chunk.argumentsDelta === 'string' ? chunk.argumentsDelta : ''
       if (name !== undefined || argsDelta.length > 0) {
         broadcastSse('fem_stream', {
-          kind: 'delta', sid: sid0, node_name: '', actor, blockKind: 'toolcall',
+          kind: 'delta', sid: sid0, node_name: '', actor, blockKind: 'toolcall', index: chunk.index,
           ...name !== undefined ? { name } : {},
           text: argsDelta,
         })
       }
     } else if (chunk?.type === 'block-start' && (chunk.blockType === 'text' || chunk.blockType === 'reasoning')) {
-      broadcastSse('fem_stream', { kind: 'start', sid: sid0, node_name: '', actor, blockKind: chunk.blockType })
-    } else if (chunk?.type === 'block-end' && (chunk.block?.kind === 'text' || chunk.block?.kind === 'reasoning' || chunk.block?.kind === 'tool-call')) {
+      broadcastSse('fem_stream', { kind: 'start', sid: sid0, node_name: '', actor, blockKind: chunk.blockType, index: chunk.index })
+    } else if (chunk?.type === 'block-end' && (chunk.block?.type === 'text' || chunk.block?.type === 'reasoning' || chunk.block?.type === 'tool-call')) {
+      // 【2026-08-29 修】块类型字段是 block.type（llm StreamChunk 定义），旧代码
+      // 读 chunk.block?.kind 恒 undefined → 导演路径 block_end 广播全丢。
       broadcastSse('fem_stream', {
-        kind: 'block_end', sid: sid0, node_name: '', actor,
-        blockKind: chunk.block?.kind === 'tool-call' ? 'toolcall' : chunk.block?.kind,
+        kind: 'block_end', sid: sid0, node_name: '', actor, index: chunk.index,
+        blockKind: chunk.block?.type === 'tool-call' ? 'toolcall' : chunk.block?.type,
       })
     }
   })
 
   // 4) Event bridge: engine events -> chat messages on the run's session.
   ctx.on('dsh-femwa/event', (eventType: string, data: unknown) => {
+    // [femwa-diag] 视角菜单不实时更新排查：flow_start 到达即打点（含两条早退路径）。
+    if (eventType === 'flow_start') console.log(`[dsh-femwa][diag] flow_start event received; runState.sessionId=${String(runState.sessionId)}`)
     const sessionId = runState.sessionId
-    if (sessionId === undefined) return
+    if (sessionId === undefined) {
+      if (eventType === 'flow_start') console.log('[dsh-femwa][diag] flow_start DROPPED before broadcast: runState.sessionId undefined')
+      return
+    }
     // flow_stopped 附加 paused 标记（pausedByUser 判定）：
     // 暂停（bridge 半实现=stop）与停止共用 flow_stopped 事件，前端据此
     // 区分「继续」（paused=true）vs「运行」（idle）按钮——AI 工具
@@ -218,7 +231,11 @@ export function registerEngineEventHandlers(ctx: Context, deps: EngineEventsDeps
     runState.lastEvents.push({ type: eventType, data: payload })
     if (runState.lastEvents.length > 100) runState.lastEvents.shift()
     const session = sessionsStore?.get(sessionId)
-    if (session === undefined) return
+    if (session === undefined) {
+      // [femwa-diag] 此早退在 broadcastSse 之后：帧已发给前端，但 mem 不更新。
+      if (eventType === 'flow_start') console.log(`[dsh-femwa][diag] flow_start broadcast done but DROPPED before sessionActors.set: session ${String(sessionId)} not in store`)
+      return
+    }
     const d = (payload ?? {}) as Record<string, unknown>
     switch (eventType) {
       case 'flow_start': {
@@ -227,6 +244,7 @@ export function registerEngineEventHandlers(ctx: Context, deps: EngineEventsDeps
           ? d.actors.filter((x): x is string => typeof x === 'string')
           : []
         runState.sessionActors.set(String(sessionId), actors)
+        console.log(`[dsh-femwa][diag] flow_start processed: sessionActors[${String(sessionId)}]=${JSON.stringify(actors)} (femSession=${String(d.session_id)})`)
         // 引擎场次身份入账本：dsh 会话 ↔ fem 场次一对多（末位=当前场次）。
         if (typeof d.session_id === 'number') {
           void appendFemSession(resolved.femwaRoot, String(sessionId), d.session_id)
@@ -234,8 +252,17 @@ export function registerEngineEventHandlers(ctx: Context, deps: EngineEventsDeps
         }
         // 上帝窗无条件创建（actors 为空的剧本也要有引擎通知的落点）；
         // 角色窗按剧本角色。幂等创建/复用/冷唤醒；异步，失败仅打日志。
+        // 【cwd 守卫】与 routes.ts projection-windows 同款：主会话 cwd 缺失时
+        // 不建窗——cwd 绝不能落到 process.cwd()，否则投影窗建进宿主启动目录
+        // 分组 → duplicate session id 整树拒绝加载（2026-08-23 事故定案原则：
+        // 分组键绝不允许环境兜底）。同会话 header.cwd 要么一直有要么一直无，
+        // 守卫跳过不会误伤"registry 已有窗"的复用场景。
         const header = session.header as { cwd?: string } | undefined
-        void projections.ensure(String(sessionId), actors, header?.cwd ?? process.cwd()).catch((error: unknown) => {
+        if (header?.cwd === undefined || header.cwd.length === 0) {
+          console.log(`[dsh-femwa] flow_start ${String(sessionId)}: session cwd missing — projection windows NOT ensured (process.cwd() fallback forbidden)`)
+          break
+        }
+        void projections.ensure(String(sessionId), actors, header.cwd).catch((error: unknown) => {
           console.log(`[dsh-femwa] flow_start ensure projection windows failed: ${String(error)}`)
         })
         // 补齐上帝窗缺失的主会话对话（重启缝隙：registry 是内存态，
@@ -309,12 +336,15 @@ export function registerEngineEventHandlers(ctx: Context, deps: EngineEventsDeps
         // 变化时携带）。按键合并进会话记录的 resume 块（指纹由开跑时盖章，
         // 这里绝不覆盖）。
         const cp = (d.checkpoints ?? {}) as Record<string, string>
+        console.log(`[femwa-cp-diag ${diagTs()}] checkpoint ARRIVE sid=${String(sessionId)} running=${runState.running} cps=${JSON.stringify(cp)} femSession=${String(d.session_id ?? '-')}`)
         void updatePlayResume(resolved.femwaRoot, String(sessionId), {
           checkpoints: cp,
           ...(typeof d.session_id === 'number' ? { femSessionId: d.session_id } : {}),
           ...(d.vars !== undefined && typeof d.vars === 'object'
             ? { vars: d.vars as Record<string, Record<string, unknown>> }
             : {}),
+        }).then(() => {
+          console.log(`[femwa-cp-diag ${diagTs()}] checkpoint write DONE sid=${String(sessionId)} running(now)=${runState.running}`)
         }).catch((error: unknown) => console.log(`[dsh-femwa] resume update failed: ${String(error)}`))
         break
       }
@@ -349,16 +379,20 @@ export function registerEngineEventHandlers(ctx: Context, deps: EngineEventsDeps
           recordError(session.id, `子 agent 执行失败：${String(error)}`)
           void bridge.send('human_input', {
             wait_key: String(d.wait_key ?? ''),
-            body: { output: '', trajectory: '' },
+            body: { output: '', steps: [] },
           }).catch(() => undefined)
         })
         break
       }
       case 'flow_done': {
+        console.log(`[femwa-cp-diag ${diagTs()}] flow_done ARRIVE sid=${String(sessionId)} running(was)=${runState.running} → will clear resume block`)
         runState.running = false
         runState.pausedByUser = false
         // 完整跑完：断点块整体作废（下次 run 从头开始）
         void writePlayResume(resolved.femwaRoot, String(sessionId), null)
+          .then(() => {
+            console.log(`[femwa-cp-diag ${diagTs()}] flow_done resume clear DONE sid=${String(sessionId)}`)
+          })
           .catch((error: unknown) => console.log(`[dsh-femwa] resume clear failed: ${String(error)}`))
         // 结局通知全窗广播（主会话+god+角色窗统一可见，2026-08-23 通知统一改造）。
         appendChatBroadcast(ctx, session, projections, '✅ 剧本已跑完')

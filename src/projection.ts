@@ -252,12 +252,16 @@ async function awakenProjectionWindow(
     return undefined
   }
   let prep: { session: Session }
+  const t0 = Date.now()
   try {
     prep = await persistence.prepare(SessionId(id))
+    // [femwa-diag] 事件循环 stall 排查：prepare 内部同步解压+解析大会话日志，
+    // 大投影窗一次唤醒可堵秒级——打点量化，与心跳 stall 时间对齐定位热点。
+    console.log(`[dsh-femwa][diag] awaken ${id}: prepare ${Date.now() - t0}ms, events=${prep.session.events?.length ?? '?'}`)
   } catch (error: unknown) {
     // 2026-08-23 卡死调查：此前这里静默吞错导致"god 窗每次都 created 新空窗"
     // 无从定位。真实错误必须落日志。
-    console.log(`[dsh-femwa] awaken ${id} PREPARE FAILED: ${String(error instanceof Error ? error.message : error)}`)
+    console.log(`[dsh-femwa] awaken ${id} PREPARE FAILED: ${String(error instanceof Error ? error.message : error)} (after ${Date.now() - t0}ms)`)
     return undefined
   }
   try {
