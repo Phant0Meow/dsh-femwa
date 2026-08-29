@@ -18,6 +18,11 @@ export interface FemStreamBlock {
   text: string
   /** toolcall 块：工具名（首帧带 name 的 delta 合并进来）。 */
   name?: string
+  /** 源 chunk index（llm StreamChunk 每块独立编号）——同 step 并行工具调用
+   * （多 tool-call 块 delta 交错）按 index 分块聚合。2026-08-29 前按「最后
+   * 一个同类块」聚合且假设同 step 工具串行，GLM 并行工具会把多工具参数拼
+   * 进同一块。宿主旧广播帧无 index → 回退 findLast 行为。 */
+  index?: number
 }
 
 interface FemStreamMsg {
@@ -25,11 +30,17 @@ interface FemStreamMsg {
   sid?: unknown
   actor?: unknown
   blockKind?: unknown
+  index?: unknown
   text?: unknown
   name?: unknown
 }
 
 export const EMPTY_FEM_BLOCKS: readonly FemStreamBlock[] = []
+
+/** 帧携带的源块编号（缺省/非法 = 旧宿主广播，回退按 kind 找块）。 */
+function msgIndex(msg: FemStreamMsg): number | undefined {
+  return typeof msg.index === 'number' ? msg.index : undefined
+}
 
 /** 主会话id+actorKey → 该演员当前未落地的直播块序列（copy-on-write）。 */
 const femStreams = new Map<string, Map<string, { blocks: readonly FemStreamBlock[] }>>()
@@ -83,47 +94,50 @@ function femStreamApply(msg: FemStreamMsg): void {
     return
   }
   const prev = femStreams.get(sid)?.get(actorKey)?.blocks ?? EMPTY_FEM_BLOCKS
+  const idx = msgIndex(msg)
+  const findByIdx = (blocks: readonly FemStreamBlock[]): number =>
+    idx === undefined ? -1 : blocks.findIndex(b => b.index === idx)
   if (msg.kind === 'start') {
-    femStreamSet(sid, actorKey, { blocks: [...prev, { kind: blockKind, text: '' }] })
+    // 重复 start 幂等（同 index 块已存在则忽略）。
+    if (idx !== undefined && prev.some(b => b.index === idx)) return
+    femStreamSet(sid, actorKey, { blocks: [...prev, { kind: blockKind, text: '', ...(idx !== undefined ? { index: idx } : {}) }] })
     return
   }
   if (msg.kind === 'delta') {
     const text = typeof msg.text === 'string' ? msg.text : ''
     const name = typeof msg.name === 'string' && msg.name.length > 0 ? msg.name : undefined
-    if (blockKind === 'toolcall') {
-      // 工具调用：聚合到「最后一个 toolcall 块」；无则新建（宿主不发 start）。
-      const lastIdx = findLastFemBlock(prev, 'toolcall')
-      if (lastIdx >= 0) {
-        const target = prev[lastIdx] as FemStreamBlock
-        const next = prev.slice()
-        next[lastIdx] = {
-          ...target,
-          text: target.text + text,
-          ...name !== undefined && !target.name ? { name } : {},
-        }
-        femStreamSet(sid, actorKey, { blocks: next })
-      } else {
-        femStreamSet(sid, actorKey, { blocks: [...prev, { kind: 'toolcall', text, ...name !== undefined ? { name } : {} }] })
+    // 定位：index 匹配优先；无 index（旧宿主广播）回退「最后一个同类块」。
+    let at = findByIdx(prev)
+    if (at < 0 && idx === undefined) at = findLastFemBlock(prev, blockKind)
+    if (at < 0) {
+      // 该块的首个 delta：toolcall 无 start 帧、text/reasoning 空文本不建块。
+      if (blockKind === 'toolcall' || text.length > 0) {
+        femStreamSet(sid, actorKey, {
+          blocks: [...prev, {
+            kind: blockKind, text,
+            ...name !== undefined ? { name } : {},
+            ...(idx !== undefined ? { index: idx } : {}),
+          }],
+        })
       }
       return
     }
-    if (text.length === 0) return
-    const lastIdx = findLastFemBlock(prev, blockKind)
-    if (lastIdx >= 0) {
-      const target = prev[lastIdx] as FemStreamBlock
-      const next = prev.slice()
-      next[lastIdx] = { ...target, text: target.text + text }
-      femStreamSet(sid, actorKey, { blocks: next })
-    } else {
-      femStreamSet(sid, actorKey, { blocks: [...prev, { kind: blockKind, text }] })
+    const target = prev[at] as FemStreamBlock
+    const next = prev.slice()
+    next[at] = {
+      ...target,
+      text: target.text + text,
+      ...name !== undefined && !target.name ? { name } : {},
     }
+    femStreamSet(sid, actorKey, { blocks: next })
     return
   }
   if (msg.kind === 'block_end') {
-    const lastIdx = findLastFemBlock(prev, blockKind)
-    if (lastIdx < 0) return
+    let at = findByIdx(prev)
+    if (at < 0 && idx === undefined) at = findLastFemBlock(prev, blockKind)
+    if (at < 0) return
     const next = prev.slice()
-    next.splice(lastIdx, 1)
+    next.splice(at, 1)
     femStreamSet(sid, actorKey, { blocks: next })
   }
 }
@@ -151,7 +165,7 @@ export function femStreamAcquire(): () => void {
     femStreamEs.onmessage = (ev: MessageEvent<string>) => {
       try {
         const msg = JSON.parse(ev.data) as { type?: string; data?: Record<string, unknown> }
-        if (msg.type === 'fem_stream') femStreamApply((msg.data ?? {}) as FemStreamMsg)
+        if (msg.type === 'fem_stream') femStreamApply((msg.data ?? {}) as unknown as FemStreamMsg)
         // 控制事件转发给单页宿主（run_request / script_changed 等）。
         if (controlHandlers.size > 0) {
           for (const h of [...controlHandlers]) {

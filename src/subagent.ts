@@ -411,13 +411,10 @@ export async function runAiSubagent(
   // 角色名字行：只投影进上帝窗 + scope 命中的角色窗。主会话表面绝不写入
   // （主窗口=戏外=纯 DSH 原生 user+主模型；名字行曾写主会话导致"光有名字
   // 没有内容"的幽灵行——内容 turn 本就只进投影窗）。
-  // 【2026-08-28 Par 并发修复】名字行从「ai_request 到达即写」推迟到「该
-  // 子代理首个事件到达」（ensureSpeakerLine，onChildEvent 最前置同步调用，
-  // 先于一切直播广播与镜像）：此前名字行是预约位，par 时 N 个 ai_request
-  // 连续到达 = N 行名字连排，正文 turn 之后才交错落地（「ID下面不一定是
-  // 发言」）；推迟后名字行紧贴自己的第一块内容。零事件子代理（立即失败/
-  // 空闲超时）由 finally 兜底补写，错误行仍有着落点。监听器挂在 windows
-  // 就绪之后，首次触发时 windows 必已就绪。
+  // 【2026-08-29 V3】名字行写在 turn 骨架落地时（ensureTurnStart 内、
+  // turn/start 之前，appendSpeakerLine）：seq 紧贴自己的内容，Par 时名字
+  // 跟随各自 turn，不再出现「ai_request 到达即写」导致的连排预约位。零事件
+  // 子代理（立即失败/空闲超时）由 finally 兜底补写。
   let windows = projections.get(sid)
   if (windows === undefined) {
     // 【cwd 守卫】同 engine-events flow_start：cwd 缺失绝不落 process.cwd()
@@ -432,7 +429,7 @@ export async function runAiSubagent(
     windows = await projections.ensure(sid, scopeInfo ?? [], headerCwd)
   }
   let speakerWritten = false
-  const ensureSpeakerLine = (): void => {
+  const appendSpeakerLine = (): void => {
     if (speakerWritten || windows === undefined) return
     speakerWritten = true
     projectionAppend(windows, 'dsh-femwa/chat', {
@@ -464,6 +461,10 @@ export async function runAiSubagent(
       return
     }
     turnStarted = true
+    // 【V3】名字行随 turn 骨架落地（2026-08-29）：从「ai_request 到达即写」
+    // 移到此处——名字行 seq 紧贴 turn/start，Par 时名字紧跟各自内容，不再
+    // 出现连排预约位。
+    appendSpeakerLine()
     // 投影窗：上帝窗全量 + scope 命中的角色窗。
     projectionAppend(windows, 'turn/start', { turn: baseTurn }, undefined, scopeInfo)
     // 记录镜像 turn 的 scope（合成 turn/start 时；子代理自身没有 turn/start）。
@@ -494,34 +495,63 @@ export async function runAiSubagent(
     currentStep = step
     ensureTurnStart()
     projectionAppend(windows, 'step/start', { turn: baseTurn, step }, undefined, scopeInfo)
+    // 【stream-host 锚（2026-08-29 V3）】本 step 的直播渲染位：前端在该节点
+    // 渲染演员当前直播桶（FemStreamLive）——直播块恒画在镜像流当前末尾（紧
+    // 跟已落地内容），修复"第二步直播画回第一步镜像上面"的劈叉。块落地后
+    // 直播块被 block_end 移除、镜像在同位置接管；桶空时前端不渲染本节点。
+    projectionAppend(windows, 'dsh-femwa/chat', {
+      kind: 'stream-host',
+      actor,
+      text: '',
+      turn: baseTurn,
+      step,
+      ...scopeInfo === undefined ? {} : { visible: scopeInfo },
+      seq: Date.now(),
+    }, undefined, scopeInfo)
   }
   const onChildEvent = (watched: Session, watchedEvent: SessionEvent): void => {
     if (String(watched.id) !== String(run.id)) return
     armIdle()
-    // 名字行前置（2026-08-28 Par 并发修复）：先于一切直播广播与镜像 append，
-    // 同步执行保证「名字行落盘 → 直播 delta 广播」的顺序，前端锚点行先于
-    // 直播块存在（delta 先到也只是进 femStreams 桶暂存，行挂载后全量读取）。
-    ensureSpeakerLine()
-    // 流式直播（2026-08-24 方案B）：chunk 经插件 SSE 通道旁路广播给前端，
-    // 零落盘——前端在投影窗 speaker 锚点行下自绘官方同款打字机，块完成时
-    // 该块从缓冲移除、原生镜像接管。sid=主会话 id（各投影窗前端自行推导比
-    // 对）；block_end 与原生块落地几乎同时，重叠窗口极小。ai_token 原样保
-    // 留：femGen 画布节点流式文本（nodeStates.streamingText）仍消费它。
-    if (watchedEvent.type === 'assistant/chunk') {
-      const chunk = (watchedEvent.data as {
-        chunk?: { type?: string; index?: number; blockType?: string; text?: unknown; name?: unknown; argumentsDelta?: unknown; block?: { type?: string } }
-      }).chunk
+    // 【V3 时序（2026-08-29）】骨架与锚先行（turn/start+名字行、step/start+
+    // stream-host 锚），直播广播后置——前端先收到宿主节点（镜像流内的直播
+    // 渲染位），再收到直播帧画进去。修复"第二步直播画回第一步镜像上面"的
+    // 劈叉：直播块恒画在镜像流当前末尾（stream-host 节点处）。
+    const isChunk = watchedEvent.type === 'assistant/chunk'
+    if (!FORWARD_CHILD_EVENTS.has(watchedEvent.type) && !isChunk) return
+    const chunkWrap = isChunk
+      ? (watchedEvent.data as {
+          chunk?: { type?: string; index?: number; blockType?: string; text?: unknown; name?: unknown; argumentsDelta?: unknown; block?: { type?: string } }
+          turn?: unknown
+          step?: unknown
+        })
+      : undefined
+    const chunk = chunkWrap?.chunk
+    const sid0 = String(session.id)
+    const raw = (watchedEvent.data ?? {}) as Record<string, unknown>
+    const mappedTurn = mapTurn(raw.turn)
+    const mappedStep = typeof raw.step === 'number' ? raw.step : 0
+    // 骨架确保（turn/start+名字行、step/start+stream-host）——chunk 的任何
+    // 帧（含首个 delta）都先把骨架与锚建出来，直播才有落点。step/start 也
+    // 进本条件（2026-08-23 晚）：真实与合成的重复由 projectionAppend 结构
+    // 等价查重拦截。
+    if (watchedEvent.type === 'turn/start' || isChunk
+      || watchedEvent.type === 'assistant/message' || watchedEvent.type === 'step/end'
+      || watchedEvent.type === 'step/start') {
+      ensureTurnStart()
+      if (watchedEvent.type !== 'turn/start') ensureStepStart(mappedStep)
+    }
+    // 流式直播（chunk）：SSE 广播，零落盘。此刻骨架与 stream-host 锚已在
+    // 窗流（session 推送先于 SSE 帧到达），前端把直播块画进镜像流末尾锚。
+    if (isChunk && chunk !== undefined) {
       const sid0 = String(session.id)
-      if (chunk?.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
+      if (chunk.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
         broadcastSse('ai_token', { node_name: nodeName, actor, token: chunk.text })
         broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'text', index: chunk.index, text: chunk.text })
-      } else if (chunk?.type === 'reasoning-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
+      } else if (chunk.type === 'reasoning-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
         broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'reasoning', index: chunk.index, text: chunk.text })
-      } else if (chunk?.type === 'tool-call-delta') {
-        // 工具调用参数流式（2026-08-24 用户点名全程流式）：首帧带 name，之后
-        // 只发参数增量。【2026-08-29 修】按源 chunk index 聚合——旧实现按
-        // 「最后一个 toolcall 块」聚合且假设同 step 工具串行，GLM 并行工具
-        // 调用（多 tool-call 块 delta 交错）会把多个工具参数拼进同一块。
+      } else if (chunk.type === 'tool-call-delta') {
+        // 工具调用参数流式：按源 chunk index 聚合（GLM 并行工具调用的多
+        // tool-call 块 delta 交错，按「最后一个同类块」会拼参数）。
         const name = typeof chunk.name === 'string' && chunk.name.length > 0 ? chunk.name : undefined
         const argsDelta = typeof chunk.argumentsDelta === 'string' ? chunk.argumentsDelta : ''
         if (name !== undefined || argsDelta.length > 0) {
@@ -531,12 +561,12 @@ export async function runAiSubagent(
             text: argsDelta,
           })
         }
-      } else if (chunk?.type === 'block-start' && (chunk.blockType === 'text' || chunk.blockType === 'reasoning')) {
+      } else if (chunk.type === 'block-start' && (chunk.blockType === 'text' || chunk.blockType === 'reasoning')) {
         broadcastSse('fem_stream', { kind: 'start', sid: sid0, node_name: nodeName, actor, blockKind: chunk.blockType, index: chunk.index })
-      } else if (chunk?.type === 'block-end' && (chunk.block?.type === 'text' || chunk.block?.type === 'reasoning' || chunk.block?.type === 'tool-call')) {
-        // 【2026-08-29 修】块类型字段是 block.type（llm StreamChunk 定义），
-        // 旧代码读 chunk.block?.kind——恒 undefined → block_end 广播全丢 →
-        // 直播块只进不出，镜像落地后直播残留=整轮内容双份显示。
+      } else if (chunk.type === 'block-end' && (chunk.block?.type === 'text' || chunk.block?.type === 'reasoning' || chunk.block?.type === 'tool-call')) {
+        // 块类型字段是 block.type（llm StreamChunk 定义），旧代码读
+        // chunk.block?.kind 恒 undefined → block_end 广播全丢 → 直播块只进
+        // 不出，镜像落地后整轮双份。
         broadcastSse('fem_stream', {
           kind: 'block_end', sid: sid0, node_name: nodeName, actor, index: chunk.index,
           blockKind: chunk.block?.type === 'tool-call' ? 'toolcall' : chunk.block?.type,
@@ -550,25 +580,8 @@ export async function runAiSubagent(
     // 镜像裁剪（方案丙）：chunk 只镜像块边界（block-start/block-end 携带完整
     // 块内容），delta/usage/finish 不落日志——历史重放行数大幅下降，
     // 渲染由 block-end 的完整块 + assistant/message 兜底；流式走 SSE 通道。
-    if (watchedEvent.type === 'assistant/chunk') {
-      const ctype = (watchedEvent.data as { chunk?: { type?: string } }).chunk?.type
-      if (ctype !== 'block-start' && ctype !== 'block-end') return
-    }
-    const raw = watchedEvent.data as Record<string, unknown>
-    const mappedTurn = mapTurn(raw.turn)
-    const mappedStep = typeof raw.step === 'number' ? raw.step : 0
-    // 子代理是 one-shot 会话，事件流传统上没有 turn/start、step/start（只有
-    // chunk/message/step/end/turn/end），而 dsh 原生 assistant 节点以
-    // step/start 为 start——这里合成两个 start 事件，原生 turn 才能渲染。
-    // step/start 也进本条件（2026-08-23 晚）：新版子代理源流可能自带真实
-    // step/start——它必须落在合成 turn/start 之后，否则骨架乱序会被持久化
-    // 校验判 malformed（角色窗中毒形态之一）；真实与合成的重复由
-    // projectionAppend 的结构等价查重拦截。
-    if (watchedEvent.type === 'turn/start' || watchedEvent.type === 'assistant/chunk'
-      || watchedEvent.type === 'assistant/message' || watchedEvent.type === 'step/end'
-      || watchedEvent.type === 'step/start') {
-      ensureTurnStart()
-      if (watchedEvent.type !== 'turn/start') ensureStepStart(mappedStep)
+    if (isChunk) {
+      if (chunk?.type !== 'block-start' && chunk?.type !== 'block-end') return
     }
     // 结构事件不注 _srcSeq：dsh 迁移器对 turn/end 强制 data 两键
     // （hasOnlyKeys ['turn','reason']），第三键即冷加载拒载整窗。幂等由
@@ -630,10 +643,10 @@ export async function runAiSubagent(
       console.log(`[dsh-femwa] timeout回传失败: ${String(sendError)}`)
     })
   } finally {
-    // 名字行兜底（2026-08-28 Par 并发修复配套）：零事件子代理（立即失败/
-    // 空闲超时，一个子会话事件都没发过）没有首事件可触发 ensureSpeakerLine，
-    // 这里补写让错误行/无输出空档有归属；正常路径已写过，幂等跳过。
-    ensureSpeakerLine()
+    // 名字行兜底（V3）：零事件子代理（立即失败/空闲超时，一个子会话事件都
+    // 没发过）没有骨架事件触发 appendSpeakerLine，这里补写让错误行/无输出
+    // 空档有归属；正常路径已在 ensureTurnStart 写过，幂等跳过。
+    appendSpeakerLine()
     // 直播兜底收尾（2026-08-24 方案B）：无论正常完成/中断/超时，都清掉该
     // 演员的流式缓冲——前端防残影的最后防线（block_end 已逐块移除，这里
     // 覆盖"块没闭合就结束"的异常路径）。

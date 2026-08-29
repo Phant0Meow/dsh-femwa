@@ -12,14 +12,14 @@ import { useMemo } from 'react'
 import type { ConversationNodeDefinition } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ChatNodeViewProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { EMPTY_FEM_BLOCKS, femProjectionActorKey, useFemStream } from './stream-store'
-import { FemStreamLive, FemTurnStatus, openTurnInfo } from './fem-stream-live'
+import { FemStreamLive, FemTurnStatus } from './fem-stream-live'
 import { useView } from './view-state'
 
 /** One rendered dsh-femwa/chat line. */
 export interface FemwaChatData {
   readonly actor?: string
   readonly text: string
-  readonly kind: 'role' | 'notice' | 'human_wait' | 'prompt' | 'error' | 'thinking' | 'tool_call' | 'speaker' | 'sys'
+  readonly kind: 'role' | 'notice' | 'human_wait' | 'prompt' | 'error' | 'thinking' | 'tool_call' | 'speaker' | 'stream-host' | 'sys'
   /**
    * Actor names this line is visible to (the action's scope). Absent =
    * visible to everyone (role/prompt/human_wait with unknown scope);
@@ -27,6 +27,9 @@ export interface FemwaChatData {
    */
   readonly visible?: readonly string[]
   readonly seq: number
+  /** stream-host 专属：锚定的镜像 turn 号（重映射后），Deep diving 按
+   * 该 turn 的 open 状态显示（多演员并发时各自 turn 各自判定）。 */
+  readonly turn?: number
 }
 
 declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
@@ -59,11 +62,13 @@ export const femwaChatDefinition: ConversationNodeDefinition<FemwaChatData> = {
       throw new Error('femwa-role start requires dsh-femwa/chat')
     }
     const d = match.event.data
+    const turnOf = typeof (d as { turn?: unknown }).turn === 'number' ? (d as unknown as { turn: number }).turn : undefined
     return {
       ...d.actor === undefined ? {} : { actor: d.actor },
       text: d.text,
       kind: d.kind,
       ...d.visible === undefined ? {} : { visible: d.visible },
+      ...turnOf !== undefined ? { turn: turnOf } : {},
       seq: match.event.seq,
     }
   },
@@ -88,10 +93,12 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
   const { actor, text, kind, visible } = node.data
   const sessionId = useSession(snapshot => snapshot.sessionId)
   const view = useView(sessionId)
-  // ── 流式直播订阅（2026-08-24 方案B）───────────────────────────────────
-  // 仅投影窗的 speaker 行有资格当锚点；mainSid / 本窗 actorKey 由窗 id
-  // 推导（fem-proj-<sid>-<actorKey>）。可见性：god/stage 窗显示全部演员，角色
-  // 窗只认自己的 actorKey。hooks 全部前置（早退过滤在 hooks 之后）。
+  // ── 流式直播订阅（2026-08-29 V3：锚点从 speaker 行迁到 stream-host）─────
+  // stream-host 节点（host 每 step 一个，由宿主在镜像流内落）是直播渲染位：
+  // 直播块画在已落地内容之后（跟随镜像流末尾），修复多轮/并发的位置劈叉
+  // （旧锚点= speaker 行，第二轮直播画回第一轮镜像上面）。mainSid / 本窗
+  // actorKey 由窗 id 推导（fem-proj-<sid>-<actorKey>）。god/stage 窗显示
+  // 全部演员，角色窗只认自己的 actorKey。hooks 全部前置（早退过滤在后）。
   const projSuffix = sessionId !== undefined && sessionId.startsWith('fem-proj-')
     ? sessionId.slice('fem-proj-'.length)
     : undefined
@@ -100,13 +107,24 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
     ? projSuffix.slice(projSuffix.lastIndexOf('-') + 1)
     : undefined
   const myActorKey = actor !== undefined ? femProjectionActorKey(actor) : undefined
-  const streamEligible = view !== 'offstage' && kind === 'speaker'
+  const streamEligible = view !== 'offstage' && kind === 'stream-host'
     && winActorKey !== undefined && myActorKey !== undefined
     && (winActorKey === 'god' || winActorKey === 'stage' || winActorKey === myActorKey)
   const liveBlocksRaw = useFemStream(streamEligible ? mainSid : undefined, streamEligible ? myActorKey : undefined)
   const chat = useSession(s => s.chat)
-  // 最新行门控：同一演员历史上有多条 speaker 行，只有最新一条允许渲染直播
-  // （否则旧名字行会重复显示当前缓冲）。按当前 chat 快照单遍扫描。
+  // 最新 host 门控：直播桶是 actor 级缓冲，同演员每 step 一个 host 节点——
+  // 只有最新 host 渲染直播（旧 host 的块已落地清空，避免同一桶画多处）。
+  const lastHostKeys = useMemo(() => {
+    const m = new Map<string, string>()
+    for (const key of chat.order) {
+      const nd = chat.nodes.get(key)
+      if (nd === undefined || nd.kind !== 'femwa-role') continue
+      const fd = nd.data as FemwaChatData
+      if (fd.kind === 'stream-host') m.set(fd.actor ?? '', nd.key)
+    }
+    return m
+  }, [chat])
+  // 该演员最新 speaker 行（stream-host 的名字接力判定用）。
   const lastSpeakerKeys = useMemo(() => {
     const m = new Map<string, string>()
     for (const key of chat.order) {
@@ -117,22 +135,15 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
     }
     return m
   }, [chat])
-  const liveBlocks = streamEligible && lastSpeakerKeys.get(actor ?? '') === node.key
-    ? liveBlocksRaw
-    : EMPTY_FEM_BLOCKS
-  // Deep diving 对齐官方语义（2026-08-26）：窗口存在 open turn（演出进行中，
-  // 含等待首 token/工具执行间隙）即显示，整个 turn 结束才消失——不再依赖
-  // 直播块有无（此前流式间隙会闪断）。挂在该演员最新名字行下；hooks 全部
-  // 前置（早退过滤之前），与文件既有纪律一致。
-  const timeline = chat.timeline
-  const { hasOpen: hasOpenTurn, startTime: openTurnStart } = useMemo(() => openTurnInfo(timeline), [timeline])
-  // 流尾判定（与 director-node 同款修复）：锚点被后续内容节点（正文气泡/
-  // 工具卡片）越过时状态行不再挂在半中间；直播块仍在时豁免（打字机正画在
-  // 名字行下，状态行与它同生同灭）。
-  const isFlowTail = useMemo(
-    () => chat.order[chat.order.length - 1] === node.key,
-    [chat, node.key],
-  )
+  const isLatestHost = lastHostKeys.get(actor ?? '') === node.key
+  const liveBlocks = streamEligible && isLatestHost ? liveBlocksRaw : EMPTY_FEM_BLOCKS
+  // 本 host 所属 turn 的实时状态（open turn 时挂 Deep diving，官方同款
+  // "rides the whole running turn"；多演员并发时各自 turn 各自显示，不互串）。
+  const myTurn = useMemo(() => {
+    const turns = (chat.timeline as unknown as { turns?: Map<string, { status?: string; start?: { time?: number } }> } | undefined)?.turns
+    const t = typeof node.data.turn === 'number' ? turns?.get(String(node.data.turn)) : undefined
+    return t === undefined ? undefined : { open: t.status === 'open', start: t.start?.time ?? null }
+  }, [chat.timeline, node.data.turn])
   // View-perspective filter: in a role view, meta lines (notice/error/
   // thinking) are god-only, and dialogue lines show only when the actor's
   // scope includes this viewer. Absent `visible` = visible to everyone.
@@ -144,17 +155,36 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
     if (kind !== 'sys') return null
   } else if (view !== 'god') {
     if (kind === 'notice' || kind === 'error' || kind === 'thinking' || kind === 'tool_call') return null
-    // speaker 名字行不做 scope 过滤：角色视角也能看到所有角色的名字
-    // （内容 turn 由 CSS 按视角隐藏，名字作为对话流的"演员表"保留）。
-    if (kind !== 'speaker' && visible !== undefined && !visible.includes(view)) return null
+    // speaker 名字行与 stream-host 直播位不做 scope 过滤：角色视角也能看到
+    // 所有角色的名字与正在进行的演出（内容 turn 由 CSS 按视角隐藏）。
+    if (kind !== 'speaker' && kind !== 'stream-host' && visible !== undefined && !visible.includes(view)) return null
+  }
+  if (kind === 'stream-host') {
+    // 镜像流内的直播渲染位：桶空且自身 turn 已闭合 → 无进行中内容，不渲染。
+    if (!myTurn?.open && liveBlocks.length === 0) return null
+    // 直播期名字：正式 speaker 行落地前由 host 显示（落地后接力给 speaker 行）。
+    const hasSpeaker = lastSpeakerKeys.has(actor ?? '')
+    return (
+      <div>
+        {!hasSpeaker && (
+          <div style={{
+            margin: '8px 0 2px',
+            fontWeight: 700,
+            fontSize: '12.5px',
+            color: actorColor(actor ?? 'AI'),
+          }}>
+            {actor ?? 'AI'}
+          </div>
+        )}
+        {liveBlocks.length > 0 && <FemStreamLive blocks={liveBlocks} t={t} />}
+        {myTurn !== undefined && myTurn.open && <FemTurnStatus startTime={myTurn.start} />}
+      </div>
+    )
   }
   if (kind === 'speaker') {
-    // 子代理 turn 首行：发言者名字；cot/工具调用/回答从下一行开始。
-    // 2026-08-24 方案B：本行兼任流式锚点——直播中的块以官方同款渲染画在
-    // 名字正下方（=原生块即将落地的位置），block_end/end 后自动消失；
-    // Deep diving 状态行同样挂最新名字行下、open turn 全程显示（对齐官方
-    // "rides the whole running turn"）；无直播无演出时与历史形态完全一致。
-    const isLatestSpeaker = lastSpeakerKeys.get(actor ?? '') === node.key
+    // 子代理 turn 首行：发言者名字（V3 起随 turn 骨架落地，紧跟内容；cot/
+    // 工具调用/回答由镜像 turn 节点从下一行开始渲染）。直播块已迁 stream-host
+    // 节点（镜像流内），本行回归纯名字行。
     return (
       <div>
         <div style={{
@@ -165,9 +195,6 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
         }}>
           {actor ?? 'AI'}
         </div>
-        {liveBlocks.length > 0 && <FemStreamLive blocks={liveBlocks} t={t} />}
-        {streamEligible && isLatestSpeaker && hasOpenTurn && (isFlowTail || liveBlocks.length > 0)
-          && <FemTurnStatus startTime={openTurnStart} />}
       </div>
     )
   }
