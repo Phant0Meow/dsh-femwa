@@ -35,6 +35,7 @@ import json
 import shutil
 import threading
 import argparse
+import time
 import traceback
 
 # fork 循环回流每轮嵌套一层 asyncio 任务（见 FEM_runtime._run_fork），
@@ -249,7 +250,14 @@ def main():
             if state["running"].is_set():
                 # 上一轮 worker 可能正在收尾（stop 后 runner 停止、worker 清理），
                 # 等待其退出而不是立即拒绝——否则"停掉 → 立刻续跑"会撞串行锁。
-                if not state["running"].wait(10):
+                # 【2026-08-29 修复】原 `if not state["running"].wait(10)` 语义写反：
+                # Event.wait 等的是「置位」，事件已置位时 0 秒返回 True，拒绝分支
+                # 永不可达 → 运行中再收到 run 会直接并发起第二个 worker（实测
+                # fresh_start 双开事故的最后一道闸失效）。改轮询等待「清零」。
+                deadline = time.monotonic() + 10
+                while state["running"].is_set() and time.monotonic() < deadline:
+                    time.sleep(0.1)
+                if state["running"].is_set():
                     send_response(req_id, False, error="a workflow is already running (single-run serial)")
                     return
             ensure_func_code(femwa_root)

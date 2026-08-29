@@ -701,10 +701,18 @@ class FEMRunner:
         self._stopped = False               # 全局停止标志
         self._main_task: Optional[asyncio.Task] = None  # 主协程引用
         self._llm_stop_event: Optional[threading.Event] = None  # LLM 停止信号
-        # 发言人状态机
+        # 发言人状态机（编号已改由 _alloc_turn 独立分配，此状态机仅剩遗留读点）
         self.speaker = {"current": None, "last": None}
         self._oratio_idx = 0
         self._step_idx = 0
+        # ── turn 号分配（2026-08-28 par 丢行根治）──
+        # 旧实现由说话人状态机"推算"turn/step：par 并发分支交叉推进共享状态，
+        # 会产生撞键行（如甲思考 react (turn1,step0) 撞出题的 (turn1,step0)），
+        # 再被 get_session_context 去重静默吞掉——甲亮答上下文丢前文的根因。
+        # 现在节点开工时在锁内领取严格递增的独立 turn 号（按领取顺序定号）。
+        self._turn_lock = threading.Lock()
+        self._turn_seq = None          # 本 run 已分配到的 turn 号；None=尚未首次取号
+        self._turn_seq_sid = None      # 上次取号所属 session（换场时重新对齐起点）
         
         # ── Session 和 Turn 初始化 ──
         from femCompiler.db_utils import init_database, get_max_session_id, get_or_create_session, get_next_turn_id, session_exists
@@ -1855,7 +1863,6 @@ class FEMRunner:
                 ctx = ExecutionContext(f"par_{fork_id}_{item}", mother=mother_ctx)
                 ctx.locals[var_name] = item
                 ctx.current_loop_var = var_name
-                ctx.locals["vote"] = ""
                 token = _current_context.set(ctx)
                 # ── 新增日志 ──
                 print(f"[DEBUG par_branch] 分支开始: var={var_name}, item={item!r}, ctx.locals={ctx.locals}")
@@ -2521,9 +2528,13 @@ class FEMRunner:
 
 
     async def _invoke_ai_llm(self, blocks: dict, ad, eparam: str, actor_info: dict, scope_info: list,
-                             _current_node_id: str) -> str:
+                             _current_node_id: str, ai_name: str = '') -> str:
         """调用一次 LLM（dsh 子 agent 后端 or 直连），返回最终回复文本。
-        AI 输出容错重试的每一轮都走这里。"""
+        AI 输出容错重试的每一轮都走这里。
+        ai_name：执行者演员名（_exec_ai 三级解析结果），随 ai_request 传给
+        宿主——每个请求自带身份（2026-08-28 Par 并发修复）：par 循环体各分支
+        node id 相同而演员不同，宿主旧取法（按 node_id 键控的共享映射）会被
+        后到分支覆盖，speaker 行写上另一分支的演员名。"""
         def stream_cb(token):
             self._emit_event('ai_token', {
                 'node_name': _current_node_id,
@@ -2555,6 +2566,7 @@ class FEMRunner:
             self._emit_event('ai_request', {
                 'wait_key': dsh_wait_key,
                 'node_name': _current_node_id,
+                'ai_name': ai_name or '',
                 'blocks': blocks,
                 'actor_info': actor_info,
                 # source：剧本 actor 声明的模型（裸 id 或 provider/model），宿主据此选模型
@@ -2568,10 +2580,17 @@ class FEMRunner:
             # host 负责：启动子 agent、组装完整轨迹（思考链[仅工具轮]+回复+工具结果）。
             # 引擎在这里只取最终回复（用于继续流程/事件），轨迹全文走 save_ai_turn 落库。
             if isinstance(dsh_result, dict):
-                self._dsh_trajectory_text = dsh_result.get('trajectory') or ''
+                # 转写分离（2026-08-29）：dsh 侧按子会话 step 组装结构化步骤
+                # [{step, cot, reply, toolCall, toolResult}]，引擎逐 step 落库——
+                # cot/tool_call/tool_result 各归各位，response 只存该轮发言。
+                self._dsh_steps = dsh_result.get('steps') or []
+                if not self._dsh_steps and dsh_result.get('trajectory'):
+                    # 兜底：旧宿主 payload 无 steps 时把整段轨迹当单行（历史形态）
+                    self._dsh_steps = [{'step': 0, 'cot': '', 'reply': dsh_result.get('trajectory') or '',
+                                        'toolCall': '', 'toolResult': ''}]
                 return dsh_result.get('output') or ''
             else:
-                self._dsh_trajectory_text = ''
+                self._dsh_steps = []
                 return dsh_result or ''
         else:
             # 直连模式（无 dsh 宿主）：函数级 import 保持局部作用域，勿上移
@@ -2700,7 +2719,7 @@ class FEMRunner:
         # 直接传原始参数，让 _get_actor_info 上下文感知解析
         actor_info = self._get_actor_info(ad, eparam)
         print(f"[DEBUG _exec_ai] 刚获取的 actor_info (准备给 AI 发言用): {actor_info}")
-        self._current_turn_id = self.vm.get('turn_count') or 1
+        turn_id_alloc = self._alloc_turn()   # 本节点独立 turn 号（par 并发安全）
 
         blocks = collect_blocks(
             action=ad,
@@ -2711,7 +2730,7 @@ class FEMRunner:
             memory_defs=self.script.memories,
             context_defs=self.script.contexts,
             session_id=self._current_session_id,
-            turn_id=self._current_turn_id,
+            turn_id=turn_id_alloc,
             actor_info=actor_info,
             runner=self,
             base_dir=self.base_dir,
@@ -2733,7 +2752,8 @@ class FEMRunner:
         if 'user' not in prompt_actor_info and meta_owner:
             prompt_actor_info['user'] = str(meta_owner[0])
 
-        turn_id, oratio_idx = self._update_speaker('human')
+        # 本节点所有行共用 alloc 的 turn 号；oratio 按行内序（prompt=0, showprompt=1）
+        turn_id, oratio_idx = turn_id_alloc, 0
         fems_id = self.script.meta.get('id', 'unknown')
         print(f"[DEBUG save_human_turn] 传入 prompt_actor_info: {prompt_actor_info}")
         event = save_human_turn(
@@ -2751,6 +2771,10 @@ class FEMRunner:
         if event:
             await self.engine.run_in_thread(event.wait)
 
+        # showprompt 渲染提前、落库推迟（2026-08-29 合写）：show 行改与发言行
+        # 同事务落库——要不然都有要不然都没有。prompt 行（幕后指令）保持节点
+        # 开始落库：它是"节点启动过"的痕迹，且不属于对话流。
+        showprompt_text = ''
         if ad.showprompt:
             showprompt_text = str(ad.showprompt)
             if ad.in_mappings:
@@ -2760,21 +2784,6 @@ class FEMRunner:
                         showprompt_text = showprompt_text.replace('{' + im.local_name + '}', str(val))
                     except: pass
             showprompt_text = self._replace_prompt_vars(showprompt_text)
-            print(f"[DEBUG save_human_turn] 传入 prompt_actor_info: {prompt_actor_info}")
-            event_show = save_human_turn(
-                session_id=self._current_session_id,
-                turn_id=turn_id,
-                oratio_idx=oratio_idx,
-                user_input=showprompt_text,
-                actor_info=prompt_actor_info,
-                meta_owner=meta_owner,
-                action_scope=raw_scope,
-                is_node_prompt=True,
-                fems_id=fems_id,
-                prompt_type='showprompt',
-            )
-            if event_show:
-                await self.engine.run_in_thread(event_show.wait)
         print(f"[runtime]💬 AI prompt 已存入 dialog: turn={turn_id}, oratio={oratio_idx}")
 
         # ── 发送上下文就绪事件 ──
@@ -2828,7 +2837,7 @@ class FEMRunner:
         }
         for _attempt in range(max_tries):
             try:
-                llm_output = await self._invoke_ai_llm(blocks, ad, eparam, actor_info, scope_info, _current_node_id)
+                llm_output = await self._invoke_ai_llm(blocks, ad, eparam, actor_info, scope_info, _current_node_id, ai_name or '')
             except FEMTransientError as e:
                 # LLM 临时失败（限流/超时/网络）→ AGENT 桶：feedback 后重跑本节点
                 if _attempt >= max_tries - 1:
@@ -2870,33 +2879,36 @@ class FEMRunner:
         #if llm_output:
         #    print(f"[runtime]🤖 AI 回复:\n{llm_output}")
 
-        # 存储 AI 发言：dsh 后端模式下 response 列存完整轨迹（思考链+回复+工具结果），
-        # 与检索注入一致（一条长文本）；llmBridge 模式存最终回复。
-        stored_response = getattr(self, '_dsh_trajectory_text', '') or llm_output
-        if stored_response:
-            from .save_dialog import save_ai_turn
-            from .FEM_scope_resolver import resolve_scope
-            meta_owner = self.script.meta.get('owner', [])
-            raw_scope = ([], [])
-            if hasattr(ad, 'scope') and ad.scope:
-                raw_scope = resolve_scope(ad.scope, self.script.actors, self.vm)
+        # 存储 AI 发言（2026-08-29 转写分离）：dsh 侧按子会话 step 组装结构化
+        # 转写，引擎逐 step 落库——cot/tool_call/tool_result 各归各位，response
+        # 只存该轮发言，上游思考不再随 response 泄漏进下游上下文。
+        # 兜底：无 steps（直连模式/旧 payload）→ 单行保存，与旧行为对齐（防半行）。
+        dsh_steps = getattr(self, '_dsh_steps', None) or []
+        if not dsh_steps and llm_output:
+            dsh_steps = [{'step': 0, 'cot': '', 'reply': llm_output,
+                          'toolCall': '', 'toolResult': ''}]
+        from .save_dialog import save_ai_finish
+        from .FEM_scope_resolver import resolve_scope
+        meta_owner = self.script.meta.get('owner', [])
+        raw_scope = ([], [])
+        if hasattr(ad, 'scope') and ad.scope:
+            raw_scope = resolve_scope(ad.scope, self.script.actors, self.vm)
 
-            print(f"[DEBUG] BEFORE _update_speaker: speaker={self.speaker}, _step_idx={self._step_idx}, _current_turn_id={self._current_turn_id}")
-            turn_id, step_idx = self._update_speaker('ai')
-            print(f"[DEBUG] AFTER _update_speaker: speaker={self.speaker}, _step_idx={self._step_idx}, _current_turn_id={self._current_turn_id}, return=({turn_id}, {step_idx})")
-            print(f"[DEBUG save_ai_turn] 即将保存 AI 发言，actor_info 值: {actor_info}")
-            event = save_ai_turn(
-                session_id=self._current_session_id,
-                turn_id=turn_id,
-                step_idx=step_idx,
-                response=stored_response,
-                actor_info=actor_info,
-                meta_owner=meta_owner,
-                action_scope=raw_scope,
-            )
-            if event:
-                await self.engine.run_in_thread(event.wait)
-            print(f"[runtime]🔢 turn → {turn_id}, step → {step_idx}")
+        # 收尾合写（2026-08-29）：showprompt 行 + 全部 react step 行同一事务——
+        # show 行从节点开始推迟到此刻，与发言同 commit，消灭「有 show 没发言」半行。
+        event = save_ai_finish(
+            session_id=self._current_session_id,
+            turn_id=turn_id_alloc,
+            showprompt=showprompt_text or None,
+            steps=dsh_steps,
+            actor_info=actor_info,
+            meta_owner=meta_owner,
+            action_scope=raw_scope,
+            fems_id=fems_id,
+        )
+        if event:
+            await self.engine.run_in_thread(event.wait)
+        print(f"[runtime]🔢 turn → {turn_id_alloc}, 转写合写落库（show + {len(dsh_steps)} steps）")
 
         # ── 发送 ai_done 事件 ──
         self._emit_event('ai_done', {
@@ -3038,6 +3050,25 @@ class FEMRunner:
         else:
             return self._current_turn_id, self._oratio_idx
 
+    def _alloc_turn(self) -> int:
+        """分配下一个 turn 号（2026-08-28 par 丢行根治，引擎级锁）。
+        par/fork 并发分支在锁内排队领取严格递增的独立 turn 号——每个节点实例
+        按领取顺序获得唯一身份，任何两行都不可能再撞 (turn, step) 键。
+        取号所属 session 变化时（新开场 / 断点续跑换场）按该 session 的
+        get_next_turn_id 起点重新对齐，续跑场次自然接续旧 turn 序列。
+        注意：取号后本节点的所有行（prompt/showprompt/react）必须共用这个号，
+        用 oratio/step 区分行，不得再改读共享状态机。"""
+        with self._turn_lock:
+            sid = self._current_session_id
+            if getattr(self, '_turn_seq_sid', None) != sid or self._turn_seq is None:
+                # 新 session（或本 run 首次取号）：从"该 session 下一个空位"起算
+                self._turn_seq_sid = sid
+                self._turn_seq = self._current_turn_id - 1
+            self._turn_seq += 1
+            self._current_turn_id = self._turn_seq
+            self.vm.set('turn_count', self._current_turn_id)
+            return self._current_turn_id
+
 
     def _try_apply_human_variables(self, variables: dict, out_defs: list) -> Optional[str]:
         """尝试应用人类输入的变量赋值；成功返回 None，失败返回错误信息（str）。
@@ -3115,6 +3146,11 @@ class FEMRunner:
             from femCompiler.block_collector import collect_blocks
             actor_info = self._get_actor_info(ad, eparam)
             print(f"[DEBUG _exec_human] 刚获取的 actor_info (准备给人类发言用): {actor_info}")
+            turn_id_alloc = self._alloc_turn()   # 本节点独立 turn 号（par 并发安全）
+            # oratio 分配（2026-08-29 合写）：0=节点 prompt、1=showprompt（渲染提前、
+            # 与玩家输入同事务落库）、2+=玩家输入；无 showprompt 的节点输入从 1 起
+            human_oratio = 2 if getattr(ad, 'showprompt', None) else 1
+            fems_id = self.script.meta.get('id', 'unknown')
             blocks = collect_blocks(
                 action=ad,
                 meta=self.script.meta,
@@ -3124,7 +3160,7 @@ class FEMRunner:
                 memory_defs=None,
                 context_defs=self.script.contexts,
                 session_id=self._current_session_id,
-                turn_id=self._current_turn_id,
+                turn_id=turn_id_alloc,
                 actor_info=actor_info,
                 runner=self,
                 base_dir=self.base_dir,
@@ -3183,10 +3219,8 @@ class FEMRunner:
                     if owners:
                         h_actor_info['user'] = str(owners[0])
 
-                print(f"[DEBUG] BEFORE _update_speaker: speaker={self.speaker}, _step_idx={self._step_idx}, _current_turn_id={self._current_turn_id}")
-                turn_id, oratio_idx = self._update_speaker('human')
+                turn_id, oratio_idx = turn_id_alloc, 0
                 fems_id = self.script.meta.get('id', 'unknown')
-                print(f"[DEBUG] AFTER _update_speaker: speaker={self.speaker}, _step_idx={self._step_idx}, _current_turn_id={self._current_turn_id}, return=({turn_id}, {oratio_idx})")
                 print(f"[DEBUG save_human_turn] 传入 actor_info: {actor_info}")
                 event = save_human_turn(
                     session_id=self._current_session_id,
@@ -3202,6 +3236,20 @@ class FEMRunner:
                 if event:
                     await self.engine.run_in_thread(event.wait)
                 print(f"[runtime]💬 Human prompt 已存入 dialog: turn={turn_id}, oratio={oratio_idx}")
+
+            # showprompt 渲染提前、落库推迟（2026-08-29 合写）：human 节点的 show
+            # 行此前从未落库（老缺口），现在与玩家输入行同事务落库——要不然都有
+            # 要不然都没有；输入为空（如超时放行）时只落 show 行 = 超时留痕。
+            show_text = ''
+            if getattr(ad, 'showprompt', None):
+                show_text = str(ad.showprompt)
+                if ad.in_mappings:
+                    for im in ad.in_mappings:
+                        try:
+                            val = self.eval_expr(im.global_expr)
+                            show_text = show_text.replace('{' + im.local_name + '}', str(val))
+                        except: pass
+                show_text = self._replace_prompt_vars(show_text)
 
             # ── 获取人类输入：FastAPI 模式 or CLI 模式 ──
             chat_text = ''
@@ -3345,34 +3393,32 @@ class FEMRunner:
             dialog_text = format_human_dialog(chat_text, variables)
             print(f"[runtime]📝 拼接后的存储文本: {dialog_text!r}")
 
-            # ── 保存人类发言 ──
-            if dialog_text:
-                from .save_dialog import save_human_turn
+            # ── 保存人类发言（2026-08-29 合写）：show 行与输入行同一事务——
+            # 要么都有要不然都没有；输入为空（如超时放行）时只落 show 行=留痕。
+            if dialog_text or show_text:
+                from .save_dialog import save_human_finish
                 from .FEM_scope_resolver import resolve_scope
                 meta_owner = self.script.meta.get('owner', [])
                 raw_scope = ([], [])
                 if ad.scope:
                     raw_scope = resolve_scope(ad.scope, self.script.actors, self.vm)
 
-                turn_id, oratio_idx = self._update_speaker('human')
                 actor_info_save = self._get_actor_info(ad, eparam)
-                print(f"[DEBUG] AFTER _update_speaker: speaker={self.speaker}, turn_id={turn_id}, oratio_idx={oratio_idx}")
-                print(f"[DEBUG save_human_turn] 保存人类输入，actor_info: {actor_info_save}")
                 fems_id = self.script.meta.get('id', 'unknown')
-                event = save_human_turn(
+                event = save_human_finish(
                     session_id=self._current_session_id,
-                    turn_id=turn_id,
-                    oratio_idx=oratio_idx,
+                    turn_id=turn_id_alloc,
+                    showprompt=show_text or None,
                     user_input=dialog_text,
+                    input_oratio=human_oratio,
                     actor_info=actor_info_save,
                     meta_owner=meta_owner,
                     action_scope=raw_scope,
-                    is_node_prompt=False,
                     fems_id=fems_id,
                 )
                 if event:
                     await self.engine.run_in_thread(event.wait)
-                print(f"[runtime]🔢 turn → {turn_id}, oratio → {oratio_idx}")
+                print(f"[runtime]🔢 turn → {turn_id_alloc}, human 收尾合写落库（show + input oratio {human_oratio}）")
 
             self._emit_event('human_done', {
                 'node_name': self._get_current_node_id(),

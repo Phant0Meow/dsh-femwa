@@ -75,15 +75,15 @@ def _do_insert_dialog(session_id, turn_id, oratio_idx, user_prompt, user_id, sou
         conn.close()
 
 def _do_insert_ai(session_id, turn_id, step_idx, response, soul_id,
-                  user_scope, soul_scope, model_id="", cot="", **kwargs):
+                  user_scope, soul_scope, model_id="", cot="", tool_call="", tool_result="", **kwargs):
     from femCompiler.db_utils import _get_conn
     conn = _get_conn()
     try:
         conn.execute("""
             INSERT INTO react_steps
             (session_id, turn_id, step_idx, timestamp, response, soul_id,
-             user_scope, soul_scope, cot, model_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             user_scope, soul_scope, cot, model_id, tool_call, tool_result)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             session_id, turn_id, step_idx,
             int(time.time()),
@@ -92,6 +92,7 @@ def _do_insert_ai(session_id, turn_id, step_idx, response, soul_id,
             json.dumps([str(x) for x in (user_scope or [])]),
             json.dumps([str(x) for x in (soul_scope or [])]),
             cot, model_id,
+            tool_call, tool_result,
         ))
         conn.commit()
     finally:
@@ -155,6 +156,120 @@ def save_ai_turn(session_id, turn_id, step_idx, response, actor_info, meta_owner
     )
     print(f"[SaveDialog] 🤖 AI 发言已入队: session={session_id}, turn={turn_id}, step={step_idx}")
     return event
+
+
+def _do_insert_group(session_id, entries):
+    """单事务多行写入（2026-08-29 合写）：entries 里全部行一次 commit——
+    要么全有要么全无，消灭「有 show 没发言」的半行。异常 rollback 后 raise
+    （不吞错）。entries 元素按 kind 区分：
+      dialog_show  → dialog 表 showprompt 行（femshow-*）
+      human_input  → dialog 表 玩家输入行
+      ai_step      → react_steps 表 一轮转写（cot/tool_call/tool_result 各归各位）
+    """
+    from femCompiler.db_utils import _get_conn
+    conn = _get_conn()
+    try:
+        for e in entries:
+            kind = e['kind']
+            ts = int(time.time())
+            if kind == 'dialog_show':
+                conn.execute("""INSERT INTO dialog
+                    (session_id, turn_id, oratio_idx, user_prompt, user_id, soul_id,
+                     user_scope, soul_scope, work_mode, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (session_id, e['turn_id'], e['oratio_idx'], e['text'],
+                     json.dumps([f"femshow-{e['fems_id']}"]), '',
+                     json.dumps([str(x) for x in (e['user_scope'] or [])]),
+                     json.dumps([str(x) for x in (e['soul_scope'] or [])]),
+                     'chat', ts))
+            elif kind == 'human_input':
+                conn.execute("""INSERT INTO dialog
+                    (session_id, turn_id, oratio_idx, user_prompt, user_id, soul_id,
+                     user_scope, soul_scope, work_mode, timestamp)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (session_id, e['turn_id'], e['oratio_idx'], e['text'],
+                     json.dumps([str(e['user_id'])]) if e['user_id'] else '[]',
+                     e['soul_id'] or '',
+                     json.dumps([str(x) for x in (e['user_scope'] or [])]),
+                     json.dumps([str(x) for x in (e['soul_scope'] or [])]),
+                     'chat', ts))
+            elif kind == 'ai_step':
+                conn.execute("""INSERT INTO react_steps
+                    (session_id, turn_id, step_idx, timestamp, response, soul_id,
+                     user_scope, soul_scope, cot, model_id, tool_call, tool_result)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (session_id, e['turn_id'], e['step_idx'], ts, e['response'],
+                     e['soul_id'] or '',
+                     json.dumps([str(x) for x in (e['user_scope'] or [])]),
+                     json.dumps([str(x) for x in (e['soul_scope'] or [])]),
+                     e.get('cot', ''), e.get('model_id', ''),
+                     e.get('tool_call', ''), e.get('tool_result', '')))
+            else:
+                raise ValueError(f"未知合写行类型: {kind}")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def save_ai_finish(session_id, turn_id, showprompt, steps, actor_info, meta_owner,
+                   action_scope=None, fems_id="unknown", model_id=""):
+    """AI 节点收尾合写（2026-08-29 转写分离配套）：showprompt 行 + 全部 react
+    step 行同一事务落库——要不然都有，要不然都没有，消灭半行。
+
+    showprompt: 渲染后的 showprompt 文本（None/空 = 无 showprompt 的节点）；
+    steps: [{step, cot, reply, toolCall, toolResult}]（转写分离结构），
+    空 steps 回退为单空 react 行（与旧行为对齐）。
+    prompt 行不在本组——节点开始时已落（幕后指令，节点启动痕迹）。
+    model_id: 模型标识（可空，落库 react_steps.model_id 列）。"""
+    user_scope, soul_scope = _build_scope(action_scope, actor_info, meta_owner)
+    soul_id = str(actor_info['soul']) if actor_info.get('soul') else ''
+    entries = []
+    if showprompt:
+        entries.append({'kind': 'dialog_show', 'turn_id': turn_id, 'oratio_idx': 1,
+                        'text': showprompt, 'fems_id': fems_id,
+                        'user_scope': user_scope, 'soul_scope': soul_scope})
+    if not steps:
+        steps = [{'step': 0, 'cot': '', 'reply': '', 'toolCall': '', 'toolResult': ''}]
+    for idx, s in enumerate(steps):
+        if not isinstance(s, dict):
+            s = {'reply': str(s)}
+        entries.append({'kind': 'ai_step', 'turn_id': turn_id,
+                        'step_idx': int(s.get('step', idx) or idx),
+                        'response': str(s.get('reply', '') or ''),
+                        'soul_id': soul_id, 'model_id': model_id,
+                        'cot': str(s.get('cot', '') or ''),
+                        'tool_call': str(s.get('toolCall', '') or ''),
+                        'tool_result': str(s.get('toolResult', '') or ''),
+                        'user_scope': user_scope, 'soul_scope': soul_scope})
+    print(f"[SaveDialog] 🤖 AI 收尾合写已入队: session={session_id}, turn={turn_id}, rows={len(entries)}")
+    return save_queue.enqueue_group(session_id=session_id, entries=entries)
+
+
+def save_human_finish(session_id, turn_id, showprompt, user_input, input_oratio,
+                      actor_info, meta_owner, action_scope=None, fems_id="unknown"):
+    """human 节点收尾合写（2026-08-29）：showprompt 行（本轮新增——此前 human
+    节点的 show 从未落库）+ 玩家输入行同一事务。输入为空（如超时放行）时只写
+    show 行——即「超时留痕」的自然实现：台账上留得住"这个节点等过人"。"""
+    user_scope, soul_scope = _build_scope(action_scope, actor_info, meta_owner)
+    raw_user = actor_info.get('user')
+    soul_id = str(actor_info['soul']) if actor_info.get('soul') else ''
+    entries = []
+    if showprompt:
+        entries.append({'kind': 'dialog_show', 'turn_id': turn_id, 'oratio_idx': 1,
+                        'text': showprompt, 'fems_id': fems_id,
+                        'user_scope': user_scope, 'soul_scope': soul_scope})
+    if user_input:
+        entries.append({'kind': 'human_input', 'turn_id': turn_id,
+                        'oratio_idx': input_oratio, 'text': user_input,
+                        'user_id': str(raw_user) if raw_user else '', 'soul_id': soul_id,
+                        'user_scope': user_scope, 'soul_scope': soul_scope})
+    print(f"[SaveDialog] 💬 human 收尾合写已入队: session={session_id}, turn={turn_id}, rows={len(entries)}")
+    if not entries:
+        return None
+    return save_queue.enqueue_group(session_id=session_id, entries=entries)
 
 
 class SaveQueue:
@@ -227,6 +342,8 @@ class SaveQueue:
                 _do_insert_dialog(**kwargs)
             elif typ == 'ai':
                 _do_insert_ai(**kwargs)
+            elif typ == 'group':
+                _do_insert_group(**kwargs)
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -241,6 +358,10 @@ class SaveQueue:
         event = self._enqueue_with_event('ai', kwargs)
         #print(f"[SaveQueue] enqueue_ai: 任务已入队, event={event}")
         return event
+
+    def enqueue_group(self, **kwargs):
+        """合写入队（2026-08-29）：多行同一事务，event 在整组 commit 后 set"""
+        return self._enqueue_with_event('group', kwargs)
 
     def wait_empty(self, timeout=None):
         """等待队列清空后停止后台线程"""
