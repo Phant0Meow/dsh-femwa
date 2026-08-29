@@ -139,9 +139,12 @@ export function FemwaChatNodeView({ node, useSession, t }: ChatNodeViewProps<'fe
   const liveBlocks = streamEligible && isLatestHost ? liveBlocksRaw : EMPTY_FEM_BLOCKS
   // 本 host 所属 turn 的实时状态（open turn 时挂 Deep diving，官方同款
   // "rides the whole running turn"；多演员并发时各自 turn 各自显示，不互串）。
+  // 【2026-08-29 键型修正】timeline.turns 是 ReadonlyMap<number, TurnLocation>，
+  // 必须用 number 键直查——旧 String() 查 number 键恒 undefined，Deep diving
+  // 与 stream-host 空桶兜底渲染全灭。
   const myTurn = useMemo(() => {
-    const turns = (chat.timeline as unknown as { turns?: Map<string, { status?: string; start?: { time?: number } }> } | undefined)?.turns
-    const t = typeof node.data.turn === 'number' ? turns?.get(String(node.data.turn)) : undefined
+    const turns = (chat.timeline as unknown as { turns?: Map<number, { status?: string; start?: { time?: number } }> } | undefined)?.turns
+    const t = typeof node.data.turn === 'number' ? turns?.get(node.data.turn) : undefined
     return t === undefined ? undefined : { open: t.status === 'open', start: t.start?.time ?? null }
   }, [chat.timeline, node.data.turn])
   // View-perspective filter: in a role view, meta lines (notice/error/

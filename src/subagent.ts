@@ -24,6 +24,15 @@ import { projectionAppend, dedupeIndexFor, type ProjectionRegistry } from './pro
 // 每个子代理 turn 从 1 开始，直接转发会撞号）。每次 run 分配一个 base，
 // 预留 100 个 turn 给该 run 内部递增，fork 并发多个子代理也不冲突。
 const turnBaseBySession = new Map<string, number>()
+// 【2026-08-29 撞号根治】基必须是「进程启动纪元」而非固定值：内存 Map 随
+// 3081 重启清空，固定基（旧 100_000）会让重启后首场从 100001 重来——与上一
+// 进程写进投影窗日志的 turn/start / step/start 结构键（dedupeStructKey）
+// 撞车，projectionAppend 与 ensureStepStart 的查重误判「重复」静默拦截：
+// 演员骨架与 stream-host 直播锚全部不落盘 → 前端无直播渲染位 → 流式显示
+// 全灭（922 场实证，症状=「位置对了但流式没了」）。纪元基随时间前进，跨
+// 重启绝不与历史撞号；进程内仍按 run +100 递增防同进程撞号。turn 号量级
+// ~18 亿仍在 JS 安全整数范围，消费面全为 number 透传无量级假设。
+const TURN_BASE_EPOCH = Math.floor(Date.now() / 1000)
 
 /** 主会话镜像 turn → scope 映射（重映射后的 turn 号 → 节点 scope 演员名）。
  * 前端视角过滤用：god 全显示，角色视角按 scope 隐藏其他 turn。
@@ -440,7 +449,7 @@ export async function runAiSubagent(
       seq: Date.now(),
     }, undefined, scopeInfo)
   }
-  const baseTurn = (turnBaseBySession.get(sid) ?? 100_000) + 1
+  const baseTurn = (turnBaseBySession.get(sid) ?? TURN_BASE_EPOCH) + 1
   turnBaseBySession.set(sid, baseTurn + 100)
   const mapTurn = (childTurn: unknown): number =>
     typeof childTurn === 'number' ? baseTurn + childTurn - 1 : baseTurn
