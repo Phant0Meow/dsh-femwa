@@ -632,9 +632,10 @@ export async function runAiSubagent(
         })
       }
     }
-    // 工具调用登记 + 结果直播帧（V6）：tool/call 记 callId→name 供结果帧取
-    // 名；tool/result 广播 ⚙ 结果行进桶（官方工具行等 turn 落地才出现）。
-    // 纯 SSE 零落盘，正文截断 300 字（桶是瞬态直播面，全文由落地区块承载）。
+    // 工具调用登记 + 结果直播帧（V6/V6.1）：tool/call 记 callId→name 供结
+    // 果帧取名；tool/result 广播进桶由前端合并进同名 toolcall 块（官方一次
+    // 调用一行：IN=args/OUT=result，前端官方行渲染）。纯 SSE 零落盘；正文
+    // 截 2000 字防病态巨型结果刷屏（官方 OUT 卡 150px 内滚动，落地行承接全文）。
     if (watchedEvent.type === 'tool/call') {
       if (typeof raw.callId === 'string' && typeof raw.name === 'string') {
         toolNamesByCallId.set(raw.callId, raw.name)
@@ -659,9 +660,9 @@ export async function runAiSubagent(
       }
       const name = callId !== undefined ? toolNamesByCallId.get(callId) : undefined
       broadcastSse('fem_stream', {
-        kind: 'tool_result', sid: sid0, node_name: nodeName, actor,
+        kind: 'tool_result', sid: sid0, node_name: nodeName, actor, step: mappedStep,
         ...(name !== undefined ? { name } : {}),
-        text: text.length > 300 ? `${text.slice(0, 300)}…` : text,
+        text: text.length > 2000 ? `${text.slice(0, 2000)}…` : text,
       })
     }
     // 镜像到投影窗：dsh 原生 assistant 节点渲染完整 turn（思考折叠/工具卡片/

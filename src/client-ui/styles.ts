@@ -14,7 +14,28 @@
 const FEM_STREAM_CSS = `
 .fem-stream-root{display:flex;flex-direction:column;margin:2px 0 10px}
 .fem-stream-toolline{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:var(--dsw-alias-label-tertiary);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:2px 0}
-.fem-stream-toolresult{opacity:.82}
+/* ── 官方工具行（2026-08-30 V6.1）：ui-tool ToolRow.module.css 逐属性转写
+   （fem-toolrow-* 前缀）。骨架件 DisclosureRow/StateDot/图标是 primitives
+   真件（external→shell 同实例，自带样式），此处只补行级几何与状态样式。
+   全 --dsw token 零写死色值 → 深浅色/第三方主题自动跟随。 */
+.fem-toolrow{display:flex;flex-direction:column}
+.fem-toolrow-row{position:relative;overflow:hidden}
+.fem-toolrow[data-state='running'] .fem-toolrow-row::after{content:'';position:absolute;top:0;bottom:0;left:0;width:300px;background:linear-gradient(90deg,transparent 0%,color-mix(in srgb,var(--dsw-alias-bg-base) 60%,transparent) 55%,transparent 100%);animation:fem-tool-row-sweep 2.6s ease-out infinite;pointer-events:none}
+@keyframes fem-tool-row-sweep{0%{left:-300px}90%,100%{left:100%}}
+.fem-toolrow-leading{flex-shrink:0}
+.fem-toolrow-chevron{color:var(--dsw-alias-label-secondary)}
+.fem-toolrow-title{font-weight:400}
+.fem-toolrow-sep{flex:none;width:2px;height:2px;border-radius:1px;margin:0 8px;background:var(--dsw-alias-label-caption)}
+.fem-toolrow-summary{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px;line-height:24px;color:var(--dsw-alias-label-tertiary)}
+.fem-toolrow-bodywrap{display:flex;flex-direction:column}
+.fem-toolrow-iocard{display:flex;flex-direction:column;margin:4px 0 4px 4px;border:1px solid var(--dsw-alias-border-l1);border-radius:12px;background:var(--dsw-alias-markdown-code-block);font:var(--dsw-font-markdown-code-block-small)}
+.fem-toolrow-iosection{display:grid;grid-template-columns:max-content 1fr;column-gap:14px;align-items:baseline;padding:12px 16px;max-height:150px;overflow-y:auto}
+.fem-toolrow-iosection::-webkit-scrollbar-thumb{border:2px solid transparent;background-clip:padding-box;border-radius:6px}
+.fem-toolrow-iosection::-webkit-scrollbar-track{margin:6px 0}
+.fem-toolrow-iolabel{position:sticky;top:0;align-self:start;color:var(--dsw-alias-label-caption)}
+.fem-toolrow-iodivider{flex:none;height:1px;background:var(--dsw-alias-border-l2)}
+.fem-toolrow-iotext{min-width:0;white-space:pre-wrap;word-break:break-word;color:var(--dsw-alias-label-secondary)}
+.fem-toolrow-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 /* 2026-08-26 拆除自绘闪烁光标（.fem-stream-caret/fem-caret-blink）：官方流式
    输出无 caret 装饰，Deep diving 状态行已承担"进行中"信号（猫猫裁定）。 */
 /* 官方 ChatView TurnStatus 同款转写（2026-08-26）：品牌蓝流光 "Deep diving..."

@@ -9,10 +9,16 @@
  * 是"骑整个 running turn 全程"，而非"有直播块才显示"）。
  */
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 // MarkdownText：官方正文渲染器（基线件，shell 同一实例）——投影窗流式方案B
-// 的打字机正文与原生消息像素同款的关键。
-import { MarkdownText } from '@deepseek-ai/dsh-client-ui-primitives'
+// 的打字机正文与原生消息像素同款的关键。DisclosureRow/StateDot/变体图标同
+// 理（build.mjs 把 primitives 列为 external，require 解析到 shell 同一实例，
+// 自带样式已在页面）——官方工具行的骨架件零转写直接用真件。
+import {
+  DisclosureRow, MarkdownText, StateDot,
+  IconApiOutline14, IconBrowseOutline16, IconCodeOutline16, IconEditOutline16,
+  IconSearchOutline16, IconSparkle16,
+} from '@deepseek-ai/dsh-client-ui-primitives'
 import { FemReasoningRow } from '../fem-reasoning-row'
 import { type FemStreamBlock } from './stream-store'
 
@@ -74,6 +80,160 @@ export function FemTurnStatus({ startTime }: { startTime: number | null }) {
   )
 }
 
+// ── 官方工具行（2026-08-30 V6.1，猫猫拍板"流式就显示官方版样子"）────────
+// 照抄对象：ui-tool ToolRow/GenericToolCard/tool-call-model。骨架件
+// （DisclosureRow/StateDot/变体图标）= primitives 真件；行级样式（running
+// sweep 流光/sep 点/summary 截断/IN-OUT 卡）在 styles.ts 按 ToolRow.module.css
+// 逐属性转写（fem-toolrow-*，--dsw token 原样→深浅色/第三方主题自动跟随）。
+// 未转写部分（terminal/read/search/diff/web 专用卡片、fileLink 打开件、
+// Inspect 轨迹跳转）等 turn 落地由官方原生行接管——直播桶只做通用行。
+type FemToolVariant = 'search' | 'read' | 'bash' | 'write' | 'edit' | 'code' | 'others'
+
+/** Figma 行标题字面量（tool-call-model VARIANT_TITLES 原表）。 */
+const FEM_TOOL_VARIANT_TITLES: Record<FemToolVariant, string> = {
+  search: 'Search', read: 'Read', bash: 'Bash',
+  write: 'Write', edit: 'Edit', code: 'Code', others: 'Tool call',
+}
+
+/** 已知工具名 → 变体（tool-call-model TOOL_VARIANTS 原表；cordis_* 不在——
+ * femwa 桶里不会出现，且缺省即 others 通用行）。 */
+const FEM_TOOL_VARIANTS: Record<string, FemToolVariant> = {
+  bash: 'bash', pwsh: 'bash', read: 'read', web_fetch: 'read',
+  web_search: 'search', grep: 'search', glob: 'search',
+  write: 'write', edit: 'edit', run_code: 'code',
+}
+
+/** 摘要键偏好（tool-call-model SUMMARY_KEYS 原表）。 */
+const FEM_TOOL_SUMMARY_KEYS: Record<FemToolVariant, readonly string[]> = {
+  bash: ['description', 'command'],
+  read: ['path', 'file_path', 'url'],
+  search: ['query', 'pattern', 'url'],
+  write: ['path', 'file_path'],
+  edit: ['path', 'file_path'],
+  code: ['description'],
+  others: [],
+}
+
+/** 变体前置图标（GenericToolCard VARIANT_ICONS 原表，14px 于 16px 槽）。 */
+const FEM_TOOL_VARIANT_ICONS: Record<FemToolVariant, ReactNode> = {
+  search: <IconSearchOutline16 size={14} />,
+  read: <IconBrowseOutline16 size={14} />,
+  bash: <IconApiOutline14 size={14} />,
+  write: <IconEditOutline16 size={14} />,
+  edit: <IconEditOutline16 size={14} />,
+  code: <IconCodeOutline16 size={14} />,
+  others: <IconSparkle16 size={14} />,
+}
+
+function femToolFirstLine(text: string): string {
+  const nl = text.indexOf('\n')
+  return nl === -1 ? text : text.slice(0, nl)
+}
+
+function femToolPick(args: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const v = args[key]
+    if (typeof v === 'string' && v !== '') return v
+  }
+  return undefined
+}
+
+/** 摘要推导（tool-call-model deriveSummary 原逻辑，含流中截断 JSON 的
+ * firstLine 回退——与官方 running 行为一致）。 */
+function femToolDeriveSummary(variant: FemToolVariant, argsRaw: string): string {
+  let parsed: unknown
+  try { parsed = JSON.parse(argsRaw) } catch { return femToolFirstLine(argsRaw) }
+  if (typeof parsed !== 'object' || parsed === null) return femToolFirstLine(argsRaw)
+  const args = parsed as Record<string, unknown>
+  const picked = femToolPick(args, FEM_TOOL_SUMMARY_KEYS[variant])
+  if (picked !== undefined) return femToolFirstLine(picked)
+  for (const v of Object.values(args)) {
+    if (typeof v === 'string' && v !== '') return femToolFirstLine(v)
+  }
+  return femToolFirstLine(argsRaw)
+}
+
+/** 展开 IN 正文（tool-call-model deriveBody 原逻辑：可解析=pretty JSON，
+ * 不可解析=原文，code 变体取 program 本体）。 */
+function femToolDeriveBody(variant: FemToolVariant, argsRaw: string): string | null {
+  if (argsRaw === '') return null
+  let parsed: unknown
+  try { parsed = JSON.parse(argsRaw) } catch { return argsRaw }
+  if (variant === 'code' && typeof parsed === 'object' && parsed !== null) {
+    const code = (parsed as Record<string, unknown>).code
+    if (typeof code === 'string' && code !== '') return code
+  }
+  return JSON.stringify(parsed, null, 2)
+}
+
+/** 一行官方工具行：收起=[图标|StateDot] 标题 · 摘要（running 流光），展开=
+ * IN args / OUT result 卡。result!==undefined → ok 态；无参异常路径由
+ * stream-store 以空参完成态块兜底。 */
+function FemToolRow({ name, args, result, t }: {
+  name: string | undefined
+  args: string
+  result: string | undefined
+  t: (key: string) => string
+}) {
+  const [open, setOpen] = useState(false)
+  const toolName = name ?? ''
+  const variant: FemToolVariant = FEM_TOOL_VARIANTS[toolName] ?? 'others'
+  const running = result === undefined
+  const base = femToolDeriveSummary(variant, args)
+  // others 变体把真实工具名放进摘要槽（官方原逻辑）；参数未到流时以工具名
+  // 单独占位（官方此态是 callId，桶里无 callId → 退化工具名）。
+  const summary = variant === 'others' && toolName !== ''
+    ? (base === '' ? toolName : `${toolName} · ${base}`)
+    : base
+  const body = femToolDeriveBody(variant, args)
+  const output = result !== undefined && result !== '' ? result : null
+  const expandable = body !== null || output !== null
+  return (
+    <div className="fem-toolrow" data-variant={variant} data-tool={toolName} data-state={running ? 'running' : 'ok'}>
+      {running && <span className="fem-toolrow-sr">{t('row.running')}</span>}
+      <DisclosureRow
+        rowClassName="fem-toolrow-row"
+        leadingClassName="fem-toolrow-leading"
+        titleClassName="fem-toolrow-title"
+        chevronClassName="fem-toolrow-chevron"
+        icon={FEM_TOOL_VARIANT_ICONS[variant]}
+        title={FEM_TOOL_VARIANT_TITLES[variant]}
+        open={open && expandable}
+        expandable={expandable}
+        expandOnRowClick
+        keepContentWhenOpen
+        onToggle={() => { setOpen(v => !v) }}
+        collapsedContent={summary !== '' && (
+          <>
+            <span className="fem-toolrow-sep" aria-hidden />
+            <span className="fem-toolrow-summary">{summary}</span>
+          </>
+        )}
+      >
+        <div className="fem-toolrow-bodywrap">
+          {(body !== null || output !== null) && (
+            <div className="fem-toolrow-iocard">
+              {body !== null && (
+                <div className="fem-toolrow-iosection">
+                  <span className="fem-toolrow-iolabel">IN</span>
+                  <span className="fem-toolrow-iotext">{body}</span>
+                </div>
+              )}
+              {body !== null && output !== null && <span className="fem-toolrow-iodivider" aria-hidden />}
+              {output !== null && (
+                <div className="fem-toolrow-iosection">
+                  <span className="fem-toolrow-iolabel">OUT</span>
+                  <span className="fem-toolrow-iotext">{output}</span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </DisclosureRow>
+    </div>
+  )
+}
+
 export function FemStreamLive({ blocks, t }: { blocks: readonly FemStreamBlock[]; t: unknown }) {
   const safeT = typeof t === 'function' ? (t as (key: string) => string) : (key: string): string => key
   const codeLabels = useMemo(() => ({ copyLabel: safeT('copy'), copiedLabel: safeT('copied') }), [safeT])
@@ -90,19 +250,15 @@ export function FemStreamLive({ blocks, t }: { blocks: readonly FemStreamBlock[]
         )
         : block.kind === 'toolcall'
           ? (
-            <div key={i} className="fem-stream-toolline">
-              ⚙ {block.name ?? 'tool'}（{block.text.length > 140 ? `${block.text.slice(0, 140)}…` : block.text}）
-            </div>
+            <FemToolRow
+              key={i}
+              name={block.name}
+              args={block.text}
+              result={block.result}
+              t={safeT}
+            />
           )
-          : block.kind === 'toolresult'
-            ? (
-              // V6：工具结果行（宿主 tool_result 帧）——直播期占位，turn 落
-              // 地后由官方工具行接管。
-              <div key={i} className="fem-stream-toolline fem-stream-toolresult">
-                ⚙ {block.name ?? 'tool'} ✓（{block.text.length > 140 ? `${block.text.slice(0, 140)}…` : block.text}）
-              </div>
-            )
-            : <MarkdownText key={i} text={block.text} streaming codeLabels={codeLabels} />)}
+          : <MarkdownText key={i} text={block.text} streaming codeLabels={codeLabels} />)}
     </div>
   )
 }

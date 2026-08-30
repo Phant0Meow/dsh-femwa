@@ -1835,3 +1835,14 @@ V5 后猫猫实测：无工具 react 轮显示正确，一旦工具调用即乱�
 
 ### 验证
 node build.mjs 双产物 exit 0；lib 字面量：host tool_result/mirrorBuffer/BUFFERED_CHILD_EVENTS 全在、client kind:\"toolresult\"/fem-stream-toolresult/retain 全在；tsc host 0 错；tsc client 14 条=历史基线零新增。3081 已重启（node pid 15592 CreationDate 07:57:54，/ 200，/dsh-femwa/actors 200）。待猫猫跑带工具的 par 剧本实测：直播期名字+桶+Deep diving 稳定钉在骨架旁、turn 落地成官方节点连续区块、名字贴段头。
+
+## 2026-08-30 V6.1 直播工具行升级官方同款（猫猫拍板："流式的时候就显示成官方版的样子"）
+
+### 做法（抄官方抄到零件级）
+骨架件用真官方：build.mjs 本就把 @deepseek-ai/dsh-client-ui-primitives 列 external（require 解析到 shell 同一实例、样式已在页面），DisclosureRow/StateDot/变体图标（IconApiOutline14 等 6 件，与 ui-tool GenericToolCard VARIANT_ICONS 同表）直接 import = 零 CSS 成本像素级官方 chrome。行级样式按 ui-tool ToolRow.module.css 逐属性转写进 FEM_STREAM_CSS（fem-toolrow-* 前缀）：running sweep 流光（color-mix --dsw-alias-bg-base 60%）、2x2 sep 点、14/24 summary FILL 截断、IN/OUT 卡（l1 边 12px 圆角、150px 内滚动、sticky IN/OUT 标签、l2 分隔线）、sr-only 状态文本。行模型照抄 tool-call-model.ts：variant 分类表/figma 标题表（Search/Read/Bash/Write/Edit/Code/Tool call）/摘要键偏好表（bash=[description,command] 等）/deriveSummary（流中截断 JSON 回退 firstLine，与官方 running 行为一致）/deriveBody（可解析 pretty JSON、code 取 program）。
+
+### 数据流变化
+tool_result 帧由"独立 toolresult 块"改为**合并进最近同名未完成 toolcall 块**（官方语义一次调用一行：IN=流式参数、OUT=结果，块 running→ok；step 同源匹配防并行同名串线；无在流参数块时空参完成态行兜底）。FemStreamBlock 加 result 字段、删 toolresult 种类（.fem-stream-toolresult 同删）。宿主 tool_result 帧补 step、正文上限 300→2000（官方 OUT 卡 150px 内滚动承接）。未转写：terminal/read/search/diff/web 专用卡片、fileLink 打开件、Inspect 轨迹跳转——这些等 turn 落地由官方原生行接管，直播桶只做通用行。
+
+### 验证
+node build.mjs exit 0；tsc host 0 错、client 改动文件 0 错（基线 14 不变）；lib/client.js 字面量 fem-toolrow×36/DisclosureRow×3/tool_result×1/toolresult 残留 0。3081 重启（pid 26124 CreationDate 08:28:35，API 200）。待猫猫硬刷新实测：react 工具调用流式期即显示官方行（running 流光→结果后 ok 态、点行展开 IN/OUT 卡）。

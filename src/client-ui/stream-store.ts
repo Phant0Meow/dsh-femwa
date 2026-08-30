@@ -16,9 +16,9 @@
 import { useEffect, useState } from 'react'
 
 export interface FemStreamBlock {
-  kind: 'text' | 'reasoning' | 'toolcall' | 'toolresult'
+  kind: 'text' | 'reasoning' | 'toolcall'
   text: string
-  /** toolcall 块：工具名（首帧带 name 的 delta 合并进来）；toolresult 块：工具名（结果帧带）。 */
+  /** toolcall 块：工具名（首帧带 name 的 delta 合并进来）。 */
   name?: string
   /** 源 chunk index（llm StreamChunk 每块独立编号）——同 step 并行工具调用
    * （多 tool-call 块 delta 交错）按 index 分块聚合。2026-08-29 前按「最后
@@ -28,6 +28,10 @@ export interface FemStreamBlock {
   /** V6：帧所属 react 步号。块保留在桶里后 index 跨步复用，匹配必须限定
    * 同 step（宿主旧帧无 step → undefined，与旧块 undefined 对 undefined 匹配）。 */
   step?: number
+  /** V6 官方工具行：tool_result 帧合并进同名 toolcall 块后的展平结果文本
+   * （官方一次调用一行：收起=摘要行，展开=IN args/OUT result 卡）。undefined
+   * =调用还在跑（running 流光态）。 */
+  result?: string
 }
 
 interface FemStreamMsg {
@@ -174,14 +178,36 @@ function femStreamApply(msg: FemStreamMsg): void {
     return
   }
   if (msg.kind === 'tool_result') {
-    // V6：⚙ 结果行进桶（演员缓冲下官方工具行等 turn 落地才出现，直播期
-    // 由桶补位）。纯附加，不与 toolcall 块合并——落地后整块由官方行接管。
+    // V6 官方工具行语义：一次调用一行——结果帧合并进最近一个同名未完成
+    // toolcall 块（IN=流式参数，OUT=结果），块由 running 变 ok。无在流参数
+    // 块（异常路径）时以完成态空参行兜底，不丢结果。step 同源匹配（并行
+    // 同名调用不串线）。
     const name = typeof msg.name === 'string' && msg.name.length > 0 ? msg.name : undefined
     const text = typeof msg.text === 'string' ? msg.text : ''
     if (name === undefined && text.length === 0) return
-    femStreamSet(sid, actorKey, {
-      blocks: [...prev, { kind: 'toolresult', text, ...(name !== undefined ? { name } : {}) }],
-    })
+    let at = -1
+    for (let i = prev.length - 1; i >= 0; i--) {
+      const b = prev[i]
+      if (b?.kind !== 'toolcall' || b.result !== undefined) continue
+      if (name !== undefined && b.name !== name) continue
+      if (step !== undefined && b.step !== undefined && b.step !== step) continue
+      at = i
+      break
+    }
+    if (at >= 0) {
+      const next = prev.slice()
+      next[at] = { ...(prev[at] as FemStreamBlock), result: text }
+      femStreamSet(sid, actorKey, { blocks: next })
+    } else {
+      femStreamSet(sid, actorKey, {
+        blocks: [...prev, {
+          kind: 'toolcall', text: '',
+          ...(name !== undefined ? { name } : {}),
+          ...(step !== undefined ? { step } : {}),
+          result: text,
+        }],
+      })
+    }
     return
   }
   if (msg.kind === 'block_end') {
