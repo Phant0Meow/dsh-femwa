@@ -386,17 +386,30 @@ export async function runAiSubagent(
   // 推理等级注入：子 agent（spawn 进程内）不走 apiproxy 的 model-selection
   // 安装（installSelection 只作用于会话 agent），导致用户在模型选择里调的
   // 推理等级对子 agent 永远无效（表现为"关了推理还在输出 cot"）。
-  // 这里直接给子 agent 的请求链注入：显式配置 subagentReasoning 优先，
-  // 否则跟随全局默认模型选择（用户 UI 保存的默认）。
+  // 这里直接给子 agent 的请求链注入（2026-08-30 改造，语义对齐 dsh
+  // installModelSelection 的「absent effort clears inherited effort」）：
+  // 优先级 actor thinking 标签 > 插件配置 subagentReasoning > 全局默认模型
+  // 选择；三层全无时显式剥离继承的 effort——落到适配器/部署默认（settings
+  // 的 profile reasoning），不再由上游残留决定。钩子因此必须永远安装：旧版
+  // 「有档位才挂」会让 default 态残留继承档位，而 pi-ai 的 zai 格式对缺省
+  // 档位发 thinking disabled——glm-5.3-flash 强制思考网关直接 400 1210。
   if (run.localAgent !== undefined) {
-    const effort = resolved.subagentReasoning
-      ?? (defaultModel?.currentSelection() as { reasoningEffort?: string } | undefined)?.reasoningEffort
-    if (effort !== undefined && effort.length > 0) {
-      run.localAgent.ctx.on('agent/request', async (_payload, next) => {
-        const resolvedCall = await next()
-        return { ...resolvedCall, reasoningEffort: effort } as typeof resolvedCall
-      })
-    }
+    run.localAgent.ctx.on('agent/request', async (_payload, next) => {
+      const resolvedCall = await next()
+      const actorThinking = typeof request.actor_thinking === 'string' && request.actor_thinking.trim().length > 0
+        ? request.actor_thinking.trim()
+        : undefined
+      const effort = actorThinking
+        ?? resolved.subagentReasoning
+        ?? (defaultModel?.currentSelection() as { reasoningEffort?: string } | undefined)?.reasoningEffort
+      const { reasoningEffort: _inheritedEffort, ...withoutInheritedEffort } = resolvedCall
+      return {
+        ...withoutInheritedEffort,
+        ...effort !== undefined && effort.length > 0
+          ? { reasoningEffort: effort }
+          : {},
+      } as typeof resolvedCall
+    })
   }
   // Watchdog starts once the child exists; every child-session event rearms
   // it. Listener is scoped to the child's session id and disposed in finally.
@@ -420,10 +433,15 @@ export async function runAiSubagent(
   // 角色名字行：只投影进上帝窗 + scope 命中的角色窗。主会话表面绝不写入
   // （主窗口=戏外=纯 DSH 原生 user+主模型；名字行曾写主会话导致"光有名字
   // 没有内容"的幽灵行——内容 turn 本就只进投影窗）。
-  // 【2026-08-29 V3】名字行写在 turn 骨架落地时（ensureTurnStart 内、
-  // turn/start 之前，appendSpeakerLine）：seq 紧贴自己的内容，Par 时名字
-  // 跟随各自 turn，不再出现「ai_request 到达即写」导致的连排预约位。零事件
-  // 子代理（立即失败/空闲超时）由 finally 兜底补写。
+  // 【2026-08-29 V3.1】名字行写入点=「首个将真正落盘的镜像事件之前」（
+  // onChildEvent 镜像段、裁剪判定之后调用 appendSpeakerLine）。结构性理由：
+  // par 并发下每个演员的骨架（turn/start、step/start、stream-host 锚）在
+  // 各自首个 chunk 到达时即全部落地，而内容块（流式裁剪后的 block 边界）
+  // 必然晚于骨架——无论名字写在 ai_request 时（V1）、首个事件时（V2）还是
+  // turn 骨架时（V3.0），所有名字都落在所有内容之前=「AI1 AI2 内容1 内容2」
+  // 连排。镜像裁剪保证首个镜像事件之前本演员零内容落地，故此处写入的 seq
+  // 恒紧贴内容开头。流式期的名字显示由 stream-host 锚承担（前端 !hasSpeaker
+  // 接力），speaker 行只做历史归属标记；零事件子代理由 finally 兜底补写。
   let windows = projections.get(sid)
   if (windows === undefined) {
     // 【cwd 守卫】同 engine-events flow_start：cwd 缺失绝不落 process.cwd()
@@ -470,10 +488,8 @@ export async function runAiSubagent(
       return
     }
     turnStarted = true
-    // 【V3】名字行随 turn 骨架落地（2026-08-29）：从「ai_request 到达即写」
-    // 移到此处——名字行 seq 紧贴 turn/start，Par 时名字紧跟各自内容，不再
-    // 出现连排预约位。
-    appendSpeakerLine()
+    // 【V3.1】名字行不再随骨架落地（挪到镜像段首块前）——par 并发下所有
+    // 演员的骨架先于一切内容落地，随骨架写=名字连排（V3.0 事故）。
     // 投影窗：上帝窗全量 + scope 命中的角色窗。
     projectionAppend(windows, 'turn/start', { turn: baseTurn }, undefined, scopeInfo)
     // 记录镜像 turn 的 scope（合成 turn/start 时；子代理自身没有 turn/start）。
@@ -521,10 +537,11 @@ export async function runAiSubagent(
   const onChildEvent = (watched: Session, watchedEvent: SessionEvent): void => {
     if (String(watched.id) !== String(run.id)) return
     armIdle()
-    // 【V3 时序（2026-08-29）】骨架与锚先行（turn/start+名字行、step/start+
-    // stream-host 锚），直播广播后置——前端先收到宿主节点（镜像流内的直播
-    // 渲染位），再收到直播帧画进去。修复"第二步直播画回第一步镜像上面"的
-    // 劈叉：直播块恒画在镜像流当前末尾（stream-host 节点处）。
+    // 【V3 时序（2026-08-29）】骨架与锚先行（turn/start、step/start+
+    // stream-host 锚；名字行 V3.1 起不随骨架，见镜像段落点），直播广播后
+    // 置——前端先收到宿主节点（镜像流内的直播渲染位），再收到直播帧画进去。
+    // 修复"第二步直播画回第一步镜像上面"的劈叉：直播块恒画在镜像流当前末尾
+    // （stream-host 节点处）。
     const isChunk = watchedEvent.type === 'assistant/chunk'
     if (!FORWARD_CHILD_EVENTS.has(watchedEvent.type) && !isChunk) return
     const chunkWrap = isChunk
@@ -592,6 +609,10 @@ export async function runAiSubagent(
     if (isChunk) {
       if (chunk?.type !== 'block-start' && chunk?.type !== 'block-end') return
     }
+    // 【V3.1 名字行落点】走到此处=本事件已通过裁剪、必将真正落盘。名字行
+    // 在首个落盘镜像事件之前写入（幂等，仅首个生效）——seq 恒紧贴内容开头，
+    // par 并发下不连排（骨架期不写名字，理由见 appendSpeakerLine 处注释）。
+    appendSpeakerLine()
     // 结构事件不注 _srcSeq：dsh 迁移器对 turn/end 强制 data 两键
     // （hasOnlyKeys ['turn','reason']），第三键即冷加载拒载整窗。幂等由
     // projectionAppend 的结构等价查重兜底。
