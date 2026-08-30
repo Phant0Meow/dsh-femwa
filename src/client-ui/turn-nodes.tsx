@@ -16,6 +16,15 @@
  *    SSE 缓冲，零落盘）+ Deep diving（turn open 时，官方「骑整个 running
  *    turn」语义）。取代旧「每 step 一个 stream-host 锚」方案。
  *
+ * 【V6 2026-08-30 关键前提】本文件的 min/max 追逐锚之所以现在成立，是因为
+ * 宿主端改成了 turn 原子缓冲（subagent.ts BUFFERED_CHILD_EVENTS）：内容事件
+ * turn/end 才落盘，同一 turn 的官方节点物理连续成块——直播期窗口里本 turn
+ * 零内容事件，两个 anchor 恒走回退（start+0.5 / start+0.6，名字+直播桶钉
+ * 在骨架旁稳定不跳）；落地后 min/max 恰为区块两端（头贴段首、流尾贴段尾，
+ * 随后 turn 关闭本节点隐藏）。V5 的失败不在锚公式而在「到达即落盘」——
+ * 到达序交错下 min/max 追的是被撕裂的物理位置（god 窗日志诊断实锤：
+ * @甲@丙@乙 连排=三个 head 都吸附在三家首 chunk 连排区）。
+ *
  * 历史兼容：无 turn 字段的旧 speaker / 旧 stream-host 行仍由 femwaChat 处理
  * （speaker 渲染名字、stream-host 按原条件渲染 null），本文件只接手新版数据。
  */
@@ -218,8 +227,10 @@ export function FemTurnStreamNodeView({ node, useSession, t }: ChatNodeViewProps
     return t === undefined ? undefined : { open: t.status === 'open', start: t.start?.time ?? null }
   }, [chat.timeline, turn])
   if (view === 'offstage') return null
-  // 桶空且 turn 已闭合 → 无进行中内容（历史重放隐形；旧 stream-host 行同款语义）。
-  if (liveBlocks.length === 0 && !(myTurn !== undefined && myTurn.open)) return null
+  // 【V6】turn 关闭 = 内容已随宿主缓冲落地成块（官方区块接管）→ 本节点隐藏，
+  // 防桶内保留块与落地区块双份。桶空且无 turn（历史重放/异常）→ 同样隐藏。
+  if (myTurn !== undefined && !myTurn.open) return null
+  if (liveBlocks.length === 0 && myTurn === undefined) return null
   return (
     <div>
       {liveBlocks.length > 0 && <FemStreamLive blocks={liveBlocks} t={t} />}

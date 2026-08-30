@@ -3,8 +3,10 @@
  *
  * host 的 runAiSubagent 把演员 chunk 旁路广播到 /dsh-femwa/events；这里按
  * 「主会话 id + actorKey」分桶缓冲，speaker 锚点行在名字正下方渲染官方同
- * 款打字机。块完成（block_end）即从缓冲移除——原生镜像几乎同时落地接管；
- * run 结束（end）整桶清空兜底。全部内存态，不写任何会话日志。
+ * 款打字机。【V6 2026-08-30】块完成（block_end+retain）后【保留】在桶里——
+ * 宿主 turn 原子缓冲下镜像行要等 turn/end 落地才接管，即删会文字闪空；桶
+ * 的清空权威 = turn 关闭（节点隐藏）+ run 结束（end 帧整桶清）。导演路径
+ * （无 retain 帧）维持原「落地即移除」语义。全部内存态，不写任何会话日志。
  *
  * 2026-08-26 结构整理自 client.tsx 原样迁出（行为零变化）；femProjectionActorKey
  * 是投影窗 id 的 actorKey 消毒（与宿主 projection.ts projectionActorKey 同算法，
@@ -14,25 +16,32 @@
 import { useEffect, useState } from 'react'
 
 export interface FemStreamBlock {
-  kind: 'text' | 'reasoning' | 'toolcall'
+  kind: 'text' | 'reasoning' | 'toolcall' | 'toolresult'
   text: string
-  /** toolcall 块：工具名（首帧带 name 的 delta 合并进来）。 */
+  /** toolcall 块：工具名（首帧带 name 的 delta 合并进来）；toolresult 块：工具名（结果帧带）。 */
   name?: string
   /** 源 chunk index（llm StreamChunk 每块独立编号）——同 step 并行工具调用
    * （多 tool-call 块 delta 交错）按 index 分块聚合。2026-08-29 前按「最后
    * 一个同类块」聚合且假设同 step 工具串行，GLM 并行工具会把多工具参数拼
    * 进同一块。宿主旧广播帧无 index → 回退 findLast 行为。 */
   index?: number
+  /** V6：帧所属 react 步号。块保留在桶里后 index 跨步复用，匹配必须限定
+   * 同 step（宿主旧帧无 step → undefined，与旧块 undefined 对 undefined 匹配）。 */
+  step?: number
 }
 
 interface FemStreamMsg {
-  kind: 'start' | 'delta' | 'block_end' | 'end'
+  kind: 'start' | 'delta' | 'block_end' | 'end' | 'tool_result'
   sid?: unknown
   actor?: unknown
   blockKind?: unknown
   index?: unknown
+  step?: unknown
   text?: unknown
   name?: unknown
+  /** V6 演员路径 block_end 专用：块保留在桶里（缓冲下镜像行 turn 落地才
+   * 接管，即删会文字闪空）；导演路径不带此标记，维持落地即移除。 */
+  retain?: unknown
 }
 
 export const EMPTY_FEM_BLOCKS: readonly FemStreamBlock[] = []
@@ -40,6 +49,33 @@ export const EMPTY_FEM_BLOCKS: readonly FemStreamBlock[] = []
 /** 帧携带的源块编号（缺省/非法 = 旧宿主广播，回退按 kind 找块）。 */
 function msgIndex(msg: FemStreamMsg): number | undefined {
   return typeof msg.index === 'number' ? msg.index : undefined
+}
+
+/** 帧携带的 react 步号（V6）：undefined = 旧宿主广播，与 undefined 块匹配。 */
+function msgStep(msg: FemStreamMsg): number | undefined {
+  return typeof msg.step === 'number' ? msg.step : undefined
+}
+
+function sameStep(blockStep: number | undefined, frameStep: number | undefined): boolean {
+  return blockStep === frameStep
+}
+
+/** 按 (index, step) 从后往前定位块；无 index 时回退「最后一个同类块」。
+ * 从后往前：同 (index,step) 理论唯一，防御性容忍异常帧序列。 */
+function findBlockAt(
+  blocks: readonly FemStreamBlock[],
+  idx: number | undefined,
+  step: number | undefined,
+  kind: FemStreamBlock['kind'],
+): number {
+  if (idx !== undefined) {
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const b = blocks[i]
+      if (b?.index === idx && sameStep(b.step, step) && b.kind === kind) return i
+    }
+    return -1
+  }
+  return findLastFemBlock(blocks, kind)
 }
 
 /** 主会话id+actorKey → 该演员当前未落地的直播块序列（copy-on-write）。 */
@@ -68,7 +104,7 @@ function femStreamSet(sid: string, actorKey: string, entry: { blocks: readonly F
   femStreamNotify()
 }
 
-function findLastFemBlock(blocks: readonly FemStreamBlock[], kind: 'text' | 'reasoning' | 'toolcall'): number {
+function findLastFemBlock(blocks: readonly FemStreamBlock[], kind: FemStreamBlock['kind']): number {
   for (let i = blocks.length - 1; i >= 0; i--) {
     if (blocks[i]?.kind === kind) return i
   }
@@ -95,20 +131,24 @@ function femStreamApply(msg: FemStreamMsg): void {
   }
   const prev = femStreams.get(sid)?.get(actorKey)?.blocks ?? EMPTY_FEM_BLOCKS
   const idx = msgIndex(msg)
-  const findByIdx = (blocks: readonly FemStreamBlock[]): number =>
-    idx === undefined ? -1 : blocks.findIndex(b => b.index === idx)
+  const step = msgStep(msg)
   if (msg.kind === 'start') {
-    // 重复 start 幂等（同 index 块已存在则忽略）。
-    if (idx !== undefined && prev.some(b => b.index === idx)) return
-    femStreamSet(sid, actorKey, { blocks: [...prev, { kind: blockKind, text: '', ...(idx !== undefined ? { index: idx } : {}) }] })
+    // 重复 start 幂等（同 index+step 块已存在则忽略）。
+    if (idx !== undefined && prev.some(b => b.index === idx && sameStep(b.step, step))) return
+    femStreamSet(sid, actorKey, {
+      blocks: [...prev, {
+        kind: blockKind, text: '',
+        ...(idx !== undefined ? { index: idx } : {}),
+        ...(step !== undefined ? { step } : {}),
+      }],
+    })
     return
   }
   if (msg.kind === 'delta') {
     const text = typeof msg.text === 'string' ? msg.text : ''
     const name = typeof msg.name === 'string' && msg.name.length > 0 ? msg.name : undefined
-    // 定位：index 匹配优先；无 index（旧宿主广播）回退「最后一个同类块」。
-    let at = findByIdx(prev)
-    if (at < 0 && idx === undefined) at = findLastFemBlock(prev, blockKind)
+    // 定位：index+step 匹配优先；无 index（旧宿主广播）回退「最后一个同类块」。
+    let at = findBlockAt(prev, idx, step, blockKind)
     if (at < 0) {
       // 该块的首个 delta：toolcall 无 start 帧、text/reasoning 空文本不建块。
       if (blockKind === 'toolcall' || text.length > 0) {
@@ -117,6 +157,7 @@ function femStreamApply(msg: FemStreamMsg): void {
             kind: blockKind, text,
             ...name !== undefined ? { name } : {},
             ...(idx !== undefined ? { index: idx } : {}),
+            ...(step !== undefined ? { step } : {}),
           }],
         })
       }
@@ -132,9 +173,24 @@ function femStreamApply(msg: FemStreamMsg): void {
     femStreamSet(sid, actorKey, { blocks: next })
     return
   }
+  if (msg.kind === 'tool_result') {
+    // V6：⚙ 结果行进桶（演员缓冲下官方工具行等 turn 落地才出现，直播期
+    // 由桶补位）。纯附加，不与 toolcall 块合并——落地后整块由官方行接管。
+    const name = typeof msg.name === 'string' && msg.name.length > 0 ? msg.name : undefined
+    const text = typeof msg.text === 'string' ? msg.text : ''
+    if (name === undefined && text.length === 0) return
+    femStreamSet(sid, actorKey, {
+      blocks: [...prev, { kind: 'toolresult', text, ...(name !== undefined ? { name } : {}) }],
+    })
+    return
+  }
   if (msg.kind === 'block_end') {
-    let at = findByIdx(prev)
-    if (at < 0 && idx === undefined) at = findLastFemBlock(prev, blockKind)
+    // V6：retain 帧（演员路径）块保留在桶里——缓冲下镜像行要等 turn/end
+    // 落地才接管，即删会文字闪空；桶的清空权威 = turn 关闭（节点隐藏）+
+    // run 结束 end 帧。无 retain（导演路径）维持原语义：原生工具卡落地即
+    // 移除 ⚙ 行防双份。
+    if (msg.retain === true) return
+    let at = findBlockAt(prev, idx, step, blockKind)
     if (at < 0) return
     const next = prev.slice()
     next.splice(at, 1)

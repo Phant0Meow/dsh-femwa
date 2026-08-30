@@ -50,6 +50,16 @@ const FORWARD_CHILD_EVENTS = new Set([
 /** surface-eligible 事件（会话 API 要求 surfaceOp 标记）；其余事件不能带。 */
 const SURFACE_OP_EVENTS = new Set(['assistant/message', 'tool/result'])
 
+/** V6 turn 原子缓冲（2026-08-30）：这些镜像事件不在到达时落盘，攒进
+ * mirrorBuffer、turn/end 到达时一次性按序落盘——同一 turn 的官方节点在窗
+ * 日志里物理连续成块（「隐形容器」：chat 渲染=纯 anchorSeq 平面排序，落盘
+ * 连续 ⇒ 排序连续 ⇒ 名字下恒为该角色的完整段落），par 交错与 react 工具
+ * 间隔不再把段落撕碎。骨架（turn/start、step/start）与 speaker 名字行不在
+ * 列——它们即时落盘，充当直播期的稳定锚（见 turn-nodes.tsx 回退 anchor）。 */
+const BUFFERED_CHILD_EVENTS = new Set([
+  'assistant/chunk', 'assistant/message', 'tool/call', 'tool/result', 'step/end',
+])
+
 // ── prompt / trajectory 组装 ─────────────────────────────────────────────
 
 /** 剧场应急提示（2026-08-25《宵夜大辩论》裁决事件）：断档续跑等场景下引擎
@@ -442,6 +452,11 @@ export async function runAiSubagent(
   // 连排。镜像裁剪保证首个镜像事件之前本演员零内容落地，故此处写入的 seq
   // 恒紧贴内容开头。流式期的名字显示由 stream-host 锚承担（前端 !hasSpeaker
   // 接力），speaker 行只做历史归属标记；零事件子代理由 finally 兜底补写。
+  // 【2026-08-30 V6 注】stream-host 锚已废（V5 改 turn 级节点、V6 再改缓冲）。
+  // 名字行现在的角色=「直播区锚」：即时落盘（仍在本演员首个内容事件之前，
+  // 只不过内容事件此刻进缓冲、turn/end 才落地），前端 fem-turn-head 在直播
+  // 期用它回退 anchor（turn/start+0.5）把名字+直播桶钉在骨架旁；turn 落地
+  // 后 head 改用区块首内容 seq−0.5 吸附段落头，本行历史归属语义不变。
   let windows = projections.get(sid)
   if (windows === undefined) {
     // 【cwd 守卫】同 engine-events flow_start：cwd 缺失绝不落 process.cwd()
@@ -476,6 +491,23 @@ export async function runAiSubagent(
   turnBaseBySession.set(sid, baseTurn + 100)
   const mapTurn = (childTurn: unknown): number =>
     typeof childTurn === 'number' ? baseTurn + childTurn - 1 : baseTurn
+  // ── V6 turn 原子缓冲 ────────────────────────────────────────────────
+  // 内容镜像事件先排队，turn/end 到达时 flushMirrorBuffer 一次性落盘。
+  // flush 全同步（projectionAppend 无 await，Node 单线程），中途不可能插入
+  // 其他演员的事件 ⇒ 区块连续性是结构保证。工具名登记表供结果直播帧取名。
+  const mirrorBuffer: Array<{
+    type: string
+    data: Record<string, unknown>
+    surface: Record<string, unknown> | undefined
+  }> = []
+  const toolNamesByCallId = new Map<string, string>()
+  const flushMirrorBuffer = (): void => {
+    if (mirrorBuffer.length === 0) return
+    const pending = mirrorBuffer.splice(0)
+    for (const item of pending) {
+      projectionAppend(windows, item.type, item.data, item.surface, scopeInfo)
+    }
+  }
   // 合成 turn/step 起始事件（子代理 one-shot 会话没有这两个 start 事件，
   // 原生 assistant 节点以 step/start 为 start，缺了就不渲染）。
   let turnStarted = false
@@ -531,11 +563,13 @@ export async function runAiSubagent(
   const onChildEvent = (watched: Session, watchedEvent: SessionEvent): void => {
     if (String(watched.id) !== String(run.id)) return
     armIdle()
-    // 【V3 时序（2026-08-29）】骨架与锚先行（turn/start、step/start+
-    // stream-host 锚；名字行 V3.1 起不随骨架，见镜像段落点），直播广播后
-    // 置——前端先收到宿主节点（镜像流内的直播渲染位），再收到直播帧画进去。
-    // 修复"第二步直播画回第一步镜像上面"的劈叉：直播块恒画在镜像流当前末尾
-    // （stream-host 节点处）。
+    // 【V6 时序（2026-08-30）】骨架与名字行即时落盘（turn/start、step/start、
+    // speaker——直播期的稳定锚，前端 turn 级节点回退 anchor 挂在它们旁边）；
+    // 内容镜像事件进 mirrorBuffer 缓冲，turn/end 到达时原子落盘成连续区块
+    // （「隐形容器」，见 BUFFERED_CHILD_EVENTS 注释）。直播帧（SSE）照旧
+    // 到达即广播，与落盘时机无关。V3/V5 的「到达即落盘 + 前端锚点追逐」
+    // 方案已被实测证伪（par 交错下 head=最小seq/stream=最大seq 全部追着
+    // 到达序物理位置跑：名字连排、Deep diving 满屏跳，god 窗日志诊断实锤）。
     const isChunk = watchedEvent.type === 'assistant/chunk'
     if (!FORWARD_CHILD_EVENTS.has(watchedEvent.type) && !isChunk) return
     const chunkWrap = isChunk
@@ -564,11 +598,16 @@ export async function runAiSubagent(
     // 窗流（session 推送先于 SSE 帧到达），前端把直播块画进镜像流末尾锚。
     if (isChunk && chunk !== undefined) {
       const sid0 = String(session.id)
+      // 帧带 step：桶内块按 (index, step) 匹配——chunk index 每次 LLM 调用
+      // 独立编号，react 多步必然复用（V6 起块保留在桶里，不做 step 作用域
+      // 会把第2步的 delta 拼进第1步的旧块）。retain：块完成后保留在桶里
+      // （V6 缓冲下镜像行要等 turn 落地才接管，即删会文字闪空）；导演路径
+      // 无此标记，维持原「落地即移除」语义。
       if (chunk.type === 'text-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
         broadcastSse('ai_token', { node_name: nodeName, actor, token: chunk.text })
-        broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'text', index: chunk.index, text: chunk.text })
+        broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'text', index: chunk.index, step: mappedStep, text: chunk.text })
       } else if (chunk.type === 'reasoning-delta' && typeof chunk.text === 'string' && chunk.text.length > 0) {
-        broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'reasoning', index: chunk.index, text: chunk.text })
+        broadcastSse('fem_stream', { kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'reasoning', index: chunk.index, step: mappedStep, text: chunk.text })
       } else if (chunk.type === 'tool-call-delta') {
         // 工具调用参数流式：按源 chunk index 聚合（GLM 并行工具调用的多
         // tool-call 块 delta 交错，按「最后一个同类块」会拼参数）。
@@ -576,22 +615,54 @@ export async function runAiSubagent(
         const argsDelta = typeof chunk.argumentsDelta === 'string' ? chunk.argumentsDelta : ''
         if (name !== undefined || argsDelta.length > 0) {
           broadcastSse('fem_stream', {
-            kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'toolcall', index: chunk.index,
+            kind: 'delta', sid: sid0, node_name: nodeName, actor, blockKind: 'toolcall', index: chunk.index, step: mappedStep,
             ...name !== undefined ? { name } : {},
             text: argsDelta,
           })
         }
       } else if (chunk.type === 'block-start' && (chunk.blockType === 'text' || chunk.blockType === 'reasoning')) {
-        broadcastSse('fem_stream', { kind: 'start', sid: sid0, node_name: nodeName, actor, blockKind: chunk.blockType, index: chunk.index })
+        broadcastSse('fem_stream', { kind: 'start', sid: sid0, node_name: nodeName, actor, blockKind: chunk.blockType, index: chunk.index, step: mappedStep })
       } else if (chunk.type === 'block-end' && (chunk.block?.type === 'text' || chunk.block?.type === 'reasoning' || chunk.block?.type === 'tool-call')) {
         // 块类型字段是 block.type（llm StreamChunk 定义），旧代码读
         // chunk.block?.kind 恒 undefined → block_end 广播全丢 → 直播块只进
         // 不出，镜像落地后整轮双份。
         broadcastSse('fem_stream', {
-          kind: 'block_end', sid: sid0, node_name: nodeName, actor, index: chunk.index,
+          kind: 'block_end', sid: sid0, node_name: nodeName, actor, index: chunk.index, step: mappedStep, retain: true,
           blockKind: chunk.block?.type === 'tool-call' ? 'toolcall' : chunk.block?.type,
         })
       }
+    }
+    // 工具调用登记 + 结果直播帧（V6）：tool/call 记 callId→name 供结果帧取
+    // 名；tool/result 广播 ⚙ 结果行进桶（官方工具行等 turn 落地才出现）。
+    // 纯 SSE 零落盘，正文截断 300 字（桶是瞬态直播面，全文由落地区块承载）。
+    if (watchedEvent.type === 'tool/call') {
+      if (typeof raw.callId === 'string' && typeof raw.name === 'string') {
+        toolNamesByCallId.set(raw.callId, raw.name)
+      }
+    } else if (watchedEvent.type === 'tool/result') {
+      const msg = (watchedEvent.data as {
+        message?: {
+          source?: { callId?: unknown }
+          content?: Array<{ content?: Array<{ type?: unknown; text?: unknown }> }>
+        }
+      }).message
+      const callId = typeof msg?.source?.callId === 'string' ? msg.source.callId : undefined
+      let text = ''
+      for (const part of msg?.content ?? []) {
+        for (const inner of part?.content ?? []) {
+          if (inner?.type === 'text' && typeof inner.text === 'string' && inner.text.length > 0) {
+            text = inner.text
+            break
+          }
+        }
+        if (text.length > 0) break
+      }
+      const name = callId !== undefined ? toolNamesByCallId.get(callId) : undefined
+      broadcastSse('fem_stream', {
+        kind: 'tool_result', sid: sid0, node_name: nodeName, actor,
+        ...(name !== undefined ? { name } : {}),
+        text: text.length > 300 ? `${text.slice(0, 300)}…` : text,
+      })
     }
     // 镜像到投影窗：dsh 原生 assistant 节点渲染完整 turn（思考折叠/工具卡片/
     // 回答），零自绘 UI。上帝窗全量；角色窗按 scope 命中。主会话表面不再
@@ -624,9 +695,20 @@ export async function runAiSubagent(
     if ('turn' in data) data.turn = mappedTurn
     if ('step' in data && typeof data.step === 'number') data.step = data.step
     // surface-eligible 事件（assistant/message、tool/result）要求 surfaceOp。
-    const surface = SURFACE_OP_EVENTS.has(watchedEvent.type)
-    projectionAppend(windows, watchedEvent.type, data,
-      surface ? { surfaceOp: 'append' } : undefined, scopeInfo)
+    const surfaceOp = SURFACE_OP_EVENTS.has(watchedEvent.type)
+      ? ({ surfaceOp: 'append' } as Record<string, unknown>)
+      : undefined
+    // 【V6 turn 原子缓冲】内容事件排队；turn/end 到达=本 turn 完结，连同
+    // turn/end 自己（最后）一次性落盘成连续区块。骨架/名字行走上方即时路径，
+    // 不经过这里。
+    if (watchedEvent.type === 'turn/end') {
+      mirrorBuffer.push({ type: watchedEvent.type, data, surface: surfaceOp })
+      flushMirrorBuffer()
+    } else if (BUFFERED_CHILD_EVENTS.has(watchedEvent.type)) {
+      mirrorBuffer.push({ type: watchedEvent.type, data, surface: surfaceOp })
+    } else {
+      projectionAppend(windows, watchedEvent.type, data, surfaceOp, scopeInfo)
+    }
   }
   const disposeListener = ctx.on('session/event', onChildEvent)
   try {
@@ -671,6 +753,16 @@ export async function runAiSubagent(
     // 没发过）没有骨架事件触发 appendSpeakerLine，这里补写让错误行/无输出
     // 空档有归属；正常路径已在 ensureTurnStart 写过，幂等跳过。
     appendSpeakerLine()
+    // 【V6】缓冲兜底 flush：中断/超时/异常路径下 turn/end 可能永远不来，
+    // 这里把残余缓冲落盘（正常路径已在 turn/end 到达时清空，此为 no-op），
+    // 再补一条合成 turn/end 让 timeline 的 turn 必然闭合（前端直播节点据此
+    // 隐藏）。合成件结构键与子代理真实 turn/end 同款（turn/end:<turn>），
+    // 幂等由 projectionAppend 结构等价查重拦截。turnStarted=false 说明本回合
+    // 连骨架都没落过（与旧行为一致：什么都不写）。
+    flushMirrorBuffer()
+    if (turnStarted) {
+      projectionAppend(windows, 'turn/end', { turn: baseTurn }, undefined, scopeInfo)
+    }
     // 直播兜底收尾（2026-08-24 方案B）：无论正常完成/中断/超时，都清掉该
     // 演员的流式缓冲——前端防残影的最后防线（block_end 已逐块移除，这里
     // 覆盖"块没闭合就结束"的异常路径）。

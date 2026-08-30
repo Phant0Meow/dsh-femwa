@@ -94,7 +94,15 @@ export function FemStreamLive({ blocks, t }: { blocks: readonly FemStreamBlock[]
               ⚙ {block.name ?? 'tool'}（{block.text.length > 140 ? `${block.text.slice(0, 140)}…` : block.text}）
             </div>
           )
-          : <MarkdownText key={i} text={block.text} streaming codeLabels={codeLabels} />)}
+          : block.kind === 'toolresult'
+            ? (
+              // V6：工具结果行（宿主 tool_result 帧）——直播期占位，turn 落
+              // 地后由官方工具行接管。
+              <div key={i} className="fem-stream-toolline fem-stream-toolresult">
+                ⚙ {block.name ?? 'tool'} ✓（{block.text.length > 140 ? `${block.text.slice(0, 140)}…` : block.text}）
+              </div>
+            )
+            : <MarkdownText key={i} text={block.text} streaming codeLabels={codeLabels} />)}
     </div>
   )
 }
