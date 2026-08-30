@@ -27,6 +27,10 @@ import { ensureFemStreamStyles } from './client-ui/styles'
 import { femStreamAcquire } from './client-ui/stream-store'
 import { FemwaChatNodeView, femwaChatDefinition } from './client-ui/chat-node'
 import { FemDirectorNodeView, femDirectorDefinition } from './client-ui/director-node'
+import {
+  FemTurnHeadNodeView, FemTurnStreamNodeView,
+  femTurnHeadDefinition, femTurnStreamDefinition,
+} from './client-ui/turn-nodes'
 import { FemEditorView, type ScriptViewInjected } from './client-ui/editor-view'
 import { mountFemEditorPage } from './client-ui/editor-page'
 import { FemButton, type FemButtonInjected } from './client-ui/fem-button'
@@ -73,6 +77,10 @@ export function apply(ctx: any): void {
     conversationEvents.register(femwaChatDefinition)
     // 导演直播锚点（Step2）：user/message → 上帝窗主模型打字机落位锚。
     conversationEvents.register(femDirectorDefinition)
+    // 【V5】turn 级段落头名字 + 流尾直播（照官方 TurnTail 机制镜像，见
+    // turn-nodes.tsx 头注释——anchor 动态吸附，根治 par 名字连排/漂移）。
+    conversationEvents.register(femTurnHeadDefinition)
+    conversationEvents.register(femTurnStreamDefinition)
   } else {
     console.warn('[dsh-femwa] conversationEvents unavailable; femwa-role node not registered')
   }
@@ -175,6 +183,22 @@ export function apply(ctx: any): void {
       locale: 'conversation',
     },
     FemDirectorNodeView,
+  ))
+  slots.inject('conversation.chat.node', () => slots.register(
+    {
+      name: 'conversation.chat.node',
+      key: 'fem-turn-head',
+      locale: 'conversation',
+    },
+    FemTurnHeadNodeView,
+  ))
+  slots.inject('conversation.chat.node', () => slots.register(
+    {
+      name: 'conversation.chat.node',
+      key: 'fem-turn-stream',
+      locale: 'conversation',
+    },
+    FemTurnStreamNodeView,
   ))
   // FemViewButton：order -20 = preset 徽章(-10)之前、紧贴面包屑区——主窗口
   // 「name / 👁视角  Fem剧本模式 …」；投影窗「母名 / 👁@演员」（fork 让位后

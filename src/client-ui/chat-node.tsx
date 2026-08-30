@@ -39,7 +39,7 @@ declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
 }
 
 /** Stable color per actor name (simple string hash -> HSL). */
-function actorColor(actor: string): string {
+export function actorColor(actor: string): string {
   let hash = 0
   for (let i = 0; i < actor.length; i++) {
     hash = (hash * 31 + actor.charCodeAt(i)) >>> 0
@@ -53,6 +53,10 @@ export const femwaChatDefinition: ConversationNodeDefinition<FemwaChatData> = {
   target: 'chat',
   match: (event) => {
     if (event.type === 'dsh-femwa/chat') {
+      const d = event.data as FemwaChatData
+      // 【V5 让位】带 turn 的新版 speaker 由 fem-turn-head 节点接管渲染
+      // （head 动态吸附段落头，恒贴内容）；无 turn 的旧 speaker 保留本行渲染。
+      if (d.kind === 'speaker' && typeof (event.data as { turn?: unknown }).turn === 'number') return null
       return { id: String(event.seq), role: 'start' }
     }
     return null

@@ -463,6 +463,11 @@ export async function runAiSubagent(
       kind: 'speaker',
       actor,
       text: actor,
+      // 【V5】显式 turn 归属：speaker 事件不再由 femwaChat 独立渲染（无
+      // turn 的旧数据除外），而是作为 fem-turn-head 节点的 actor 数据源——
+      // 渲染位由 head 的动态 anchor 决定（恒贴自己段落头），与本事件物理
+      // seq 无关。
+      turn: baseTurn,
       ...scopeInfo === undefined ? {} : { visible: scopeInfo },
       seq: Date.now(),
     }, undefined, scopeInfo)
@@ -520,19 +525,8 @@ export async function runAiSubagent(
     currentStep = step
     ensureTurnStart()
     projectionAppend(windows, 'step/start', { turn: baseTurn, step }, undefined, scopeInfo)
-    // 【stream-host 锚（2026-08-29 V3）】本 step 的直播渲染位：前端在该节点
-    // 渲染演员当前直播桶（FemStreamLive）——直播块恒画在镜像流当前末尾（紧
-    // 跟已落地内容），修复"第二步直播画回第一步镜像上面"的劈叉。块落地后
-    // 直播块被 block_end 移除、镜像在同位置接管；桶空时前端不渲染本节点。
-    projectionAppend(windows, 'dsh-femwa/chat', {
-      kind: 'stream-host',
-      actor,
-      text: '',
-      turn: baseTurn,
-      step,
-      ...scopeInfo === undefined ? {} : { visible: scopeInfo },
-      seq: Date.now(),
-    }, undefined, scopeInfo)
+    // 【V5】stream-host 锚已废弃：直播渲染位由前端 turn 级 fem-turn-stream
+    // 节点接管（anchor 动态吸附流尾，官方打字机体验回归），不再逐 step 落锚。
   }
   const onChildEvent = (watched: Session, watchedEvent: SessionEvent): void => {
     if (String(watched.id) !== String(run.id)) return
