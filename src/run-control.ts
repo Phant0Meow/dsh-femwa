@@ -227,6 +227,7 @@ export async function handleSaveScript(
   }
   const name = typeof body.name === 'string' ? body.name.trim() : ''
   const content = typeof body.content === 'string' ? body.content : ''
+  const sessionId = typeof body.sessionId === 'string' && body.sessionId.trim().length > 0 ? body.sessionId.trim() : ''
   if (name.length === 0) {
     writeJson(res, 400, { ok: false, error: 'name is required' })
     return
@@ -234,6 +235,14 @@ export async function handleSaveScript(
   if (content.trim().length === 0) {
     writeJson(res, 400, { ok: false, error: 'content is required' })
     return
+  }
+  const saveRecord = async (savedPath: string): Promise<void> => {
+    // 导出/覆盖保存（2026-08-30 统一格式）：文件写成功 → 会话记录同步写
+    // {path, text}（mount 同款并存格式，text=刚保存的内容=最新版）。
+    // 显式保存动作，无条件写（不走乐观锁）；广播各端重载。
+    const result = await writeSessionScript(resolved.femwaRoot, sessionId, { path: savedPath, text: content })
+    broadcastSse('script_changed', { sessionId })
+    console.log(`[dsh-femwa] session record updated: ${sessionId} <- ${savedPath} (rev ${result.ok ? String(result.rev) : 'conflict'})`)
   }
   const { mkdirSync, writeFileSync } = await import('node:fs')
   const rawPath = typeof body.path === 'string' && body.path.trim().length > 0 ? body.path.trim() : ''
@@ -243,6 +252,7 @@ export async function handleSaveScript(
     const path = rawPath.toLowerCase().endsWith('.fems') ? rawPath : `${rawPath}.fems`
     writeFileSync(path, content, 'utf8')
     console.log(`[dsh-femwa] saved script to ${path}`)
+    if (sessionId.length > 0) await saveRecord(path)
     writeJson(res, 200, { ok: true, path })
     return
   }
@@ -253,6 +263,7 @@ export async function handleSaveScript(
   const path = `${projectsDir}\\${safe}.fems`
   writeFileSync(path, content, 'utf8')
   console.log(`[dsh-femwa] saved script to ${path}`)
+  if (sessionId.length > 0) await saveRecord(path)
   writeJson(res, 200, { ok: true, path })
 }
 

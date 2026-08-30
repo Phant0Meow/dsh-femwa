@@ -1,4 +1,4 @@
-﻿# MEOW 修改记录（dsh-femwa 仓库内留痕）
+# MEOW 修改记录（dsh-femwa 仓库内留痕）
 
 > 与 D:\myFiles\dsh\MEOW修改记录及指南.md 同步。条目只追加不改写。
 
@@ -1798,3 +1798,40 @@ settleThenTrigger 清零。mount 链路核验无帧等待（SSE→fetch→setSta
 
 ### 验证（scripts/probe-composer-refresh.mjs，新增探针）
 headless Edge CDP + Fetch 拦截延迟 session.list 15s 确定性复现：修复后 AFTER-REFRESH 缺（列表未到，数据确实不可得，预期）→ AFTER-LIST-LAND 自动恢复 ✓（修复前同点位永不恢复）→ 切窗回归 ✓。正常无延迟启动（小/大会话各一）不受影响。tsc client 检查 composer 零新增错误。纯前端改动，junction 装配刷新即生效，未重启 3081。
+
+## 2026-08-30 侧边栏「🎭 Fem 剧本」入口按钮移除（猫猫拍板：不再需要该入口）
+
+### 背景
+侧边栏底部 FemButton（sidebar.footer.action 槽位：剧本菜单 + 内联粘贴编辑器 + 空会话入口）退役，新建 Fem 会话不再走该入口。
+
+### 修改明细（2 文件）
+1. src/client.tsx：删 sidebar.footer.action 槽位注册与 FemButton import；injected() 去掉 FemButtonInjected 标注并删 createFemSession 字段；连带删除唯一为按钮服务的 currentCwd() 与 workspaces 服务解析，inject 依赖声明同步去掉 'workspaces'（grep 全库确认无其他消费者）。listScripts/saveScript 保留（编辑器页 scriptViewInjected 复用）。
+2. src/client-ui/fem-button.tsx → 移入 D:\myFiles\dsh\mytrashbin\fem-button.tsx（红线：文件不删除，移回收站留痕）。
+
+### 不动项（有意保留）
+- host 侧 POST /dsh-femwa/create-session 路由保留（编程式新建 Fem 会话入口；前端调用点已随按钮清零，lib/client.js 该字面量=0）。
+- host 侧 routes.ts/run-control.ts/index.ts 提及 sidebar button 的注释未动（host 零源码改动，注释清理留给 0.1.2 适配批次）。
+
+### 验证
+node build.mjs 双产物 exit 0；lib/client.js 字面量计数：删除面 sidebar.footer.action/FemButton/createFemSession/create-session/currentCwd/workspaces 全 0；保留面 conversation.view×2 / projection-windows×3 / save-script×3 / triggerAiRun×4 / fem-proj-×13 / FemViewButton×2 全在。tsc client（rc.2 快照 tsc）14 条错误与历史基线逐条一致，零新增。纯前端改动，junction 装配刷新即生效，未重启 3081。
+
+## 2026-08-30 V6 投影窗 turn 原子缓冲——「日志顺序即容器」根治 par+工具调用的段落撕裂
+
+### 背景（实测诊断，scripts/diag-god-log4.mjs / diag-god-log4b.mjs）
+V5 后猫猫实测：无工具 react 轮显示正确，一旦工具调用即乱套。god 窗日志实锤：par 下三演员骨架+speaker 在任何内容前连排落地（#76-84），三家首 chunk 又连排（#85/86/87）→ V5 head=min(seq)−0.5 把三个名字吸附成 @甲@丙@乙 连排（与截图一字不差）；stream=max(seq)+0.1 随每次新事件瞬移（Deep diving 满屏跳）；甲的 step2（#105-110）与丙整段（#97-104）物理交错。病根=架构级：官方节点位置=自身事件 seq=追加顺序，注册表叠加制无覆盖点（conversation-assembler.ts dispatchInput 遍历全部 definition），锚点公式追的是「到达序」这个本身错误的物理位置——锚点层无解。
+
+### 方案（与猫猫商定：「容器」目标以落盘顺序实现，渲染 100% 官方原生节点）
+宿主端 turn 原子缓冲：内容镜像事件（chunk 块边界/message/tool/call/tool/result/step/end）不在到达时落盘，攒进 mirrorBuffer，turn/end 到达时一次性按序落盘——同 turn 官方节点物理连续成块（隐形容器：落盘连续⇒anchorSeq 排序连续⇒名字下恒为该角色完整段落，段序=完成序）。flush 全同步无插队风险。骨架（turn/start、step/start）与 speaker 名字行即时落盘=直播期稳定锚（窗口内该 turn 零内容事件 → 前端回退 anchor start+0.5/+0.6 恒定，V5 的锚点公式在缓冲前提下自动正确）。
+
+### 修改明细（5 文件，+200/−32）
+1. src/subagent.ts：BUFFERED_CHILD_EVENTS 白名单 + mirrorBuffer/flushMirrorBuffer/toolNamesByCallId；onChildEvent 落盘决策（turn/end=push+flush；白名单=push；其余即时）；finally 兜底 flush+合成 turn/end（turnStarted 门控，幂等靠结构键）；演员 fem_stream 帧补 step: mappedStep（chunk index 跨步复用，桶内匹配需 step 作用域）+ block_end 带 retain:true；tool/call 登记 callId→name、tool/result 广播 tool_result 帧（正文截 300 字）。
+2. src/client-ui/stream-store.ts：块保留语义（retain 帧的 block_end 不再移除——缓冲下镜像行 turn 落地才接管，即删会文字闪空；导演路径无 retain 维持原移除语义）；块匹配 (index, step) 双键从后往前；新增 toolresult 块类型与 tool_result 帧处理；findLastFemBlock kind 放宽。
+3. src/client-ui/fem-stream-live.tsx：FemStreamLive 渲染 ⚙ 结果行（fem-stream-toolresult）。
+4. src/client-ui/turn-nodes.tsx：FemTurnStreamNodeView 隐藏条件改为「turn 关闭即隐藏」（防保留桶与落地区块双份）+「桶空且无 turn 隐藏」；头注释 V6 前提说明。
+5. src/client-ui/styles.ts：+.fem-stream-toolresult{opacity:.82}。
+
+### 不影响别处论证
+导演直播路径（engine-events）帧无 retain/step → store 走旧分支零行为变化；god-mirror 主会话镜像不经 subagent.ts 零涉及；历史数据（到达序旧场次）按旧布局渲染不清理（不删数据）；_srcSeq/结构键查重语义不变（缓冲只改落盘时机，data 组装照旧）；投影窗 search/stage 归档事件全量不减（只是延后到 turn 落地）；timeline turn 计时无损（turn/start 即时、turn/end≈真实结束）。
+
+### 验证
+node build.mjs 双产物 exit 0；lib 字面量：host tool_result/mirrorBuffer/BUFFERED_CHILD_EVENTS 全在、client kind:\"toolresult\"/fem-stream-toolresult/retain 全在；tsc host 0 错；tsc client 14 条=历史基线零新增。3081 已重启（node pid 15592 CreationDate 07:57:54，/ 200，/dsh-femwa/actors 200）。待猫猫跑带工具的 par 剧本实测：直播期名字+桶+Deep diving 稳定钉在骨架旁、turn 落地成官方节点连续区块、名字贴段头。

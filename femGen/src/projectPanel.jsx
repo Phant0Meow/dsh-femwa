@@ -163,6 +163,7 @@ function ProjPanel({ proj, actorNames, onChange }) {
                     soul: '',
                     source: '',
                     tools: [],
+                    thinking: '',
                   },
                 ],
               })
@@ -368,6 +369,33 @@ function ProjPanel({ proj, actorNames, onChange }) {
                       </>
                     );
                   })()}
+                </div>
+              )}
+              {a.type === 'ai' && (
+                <div style={{ marginTop: 5 }}>
+                  <div
+                    style={{
+                      fontSize: 10,
+                      fontWeight: 700,
+                      color: 'var(--fem-text-3)',
+                      marginBottom: 4,
+                    }}
+                  >
+                    Thinking
+                  </div>
+                  {/* 思考档位：Default=未声明（不发 reasoning_effort，服务器/部署默认自选，
+                      与 dsh 模型选择器 Default 项同语义）；其余档位按写的走，
+                      模型不支持时请求前报错（fail loud）。词汇与 Python 编译器对齐。 */}
+                  <select
+                    value={a.thinking || ''}
+                    onChange={(e) => upd({ thinking: e.target.value })}
+                    style={{ ...inp, width: '100%', padding: '4px 7px', fontSize: 11 }}
+                  >
+                    <option value="">Default</option>
+                    {['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'].map((lv) => (
+                      <option key={lv} value={lv}>{lv}</option>
+                    ))}
+                  </select>
                 </div>
               )}
             </div>

@@ -118,6 +118,9 @@ a.outVars.split('\n').forEach((v) => {
       // 数字兜底（'1'/'0'）会产出编译期「soul 不存在」的文本，已废除。
       if (a.soul) parts.push(`soul:${a.soul}`);
       if (a.source) parts.push(`source:${a.source}`);
+      // thinking 档位（仅 AI actor）：空串=未声明（Default 语义，不输出），
+      // 非空输出 thinking:<档位>，与 Python 编译器的 thinking: 解析对齐
+      if (a.type === 'ai' && a.thinking) parts.push(`thinking:${a.thinking}`);
       if (a.type === 'ai' && a.tools === false) {
         parts.push('tools: false');
       } else if (a.type === 'ai' && a.tools === true) {

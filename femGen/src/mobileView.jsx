@@ -1029,7 +1029,7 @@ function MobileProjPanel({ proj, actorNames, onChange }) {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
         <span style={sectionLabel}>Actors</span>
         <button
-          onClick={() => u({ actors: [...(proj.actors || []), { name: '', type: 'ai', soul: '', source: '', tools: [] }] })}
+          onClick={() => u({ actors: [...(proj.actors || []), { name: '', type: 'ai', soul: '', source: '', tools: [], thinking: '' }] })}
           style={{ ...mobBtnP, padding: '2px 8px', fontSize: 10 }}
         >
           +

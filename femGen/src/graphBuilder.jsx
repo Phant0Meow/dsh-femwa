@@ -25,6 +25,7 @@ function parsedToGraph(parsed, currentMode, currentModName) {
       soul: a.soul,
       source: a.source,
       tools: a.tools || [],
+      thinking: a.thinking || '',
     })),
   };
 

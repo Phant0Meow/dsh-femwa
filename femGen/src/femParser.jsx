@@ -4,6 +4,11 @@
 
 import { TYPES, SPECIAL_COLORS, actionId } from './common';
 
+// actor thinking 档位词汇全集（与 Python 编译器 FEM_parser.THINKING_LEVELS 对齐，
+// = pi-ai 的 ModelThinkingLevel；无 default 词——「默认」由不带 thinking 声明表达，
+// 与 dsh 模型选择器 Default 项同语义：不发 reasoning_effort 字段，服务器自选）。
+export const THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+
 function normalizeSymbols(str, context = 'global') {
   let s = str;
   // ═══ 全角符号标准化（注释剥离已由全局 stripComments 完成，此处不再处理注释）═══
@@ -578,11 +583,19 @@ function parseActorsBlock(cls) {
       const bpName = bpMatch[1];
       let source = null;
       let tools = null;
+      let thinking = null;
       i++;
       while (i < cls.length && cls[i].indent > cl.indent) {
         const al = normalizeSymbols(cls[i].text).trim();
         if (al.startsWith('source:')) {
           source = al.slice(7).trim();
+        } else if (al.startsWith('thinking')) {
+          const thStr = al.replace(/^thinking\s*[:=]\s*/, '').trim().toLowerCase();
+          // `default` 显式值 ≡ 未声明（归一化为空串，与不传字段完全等效）
+          if (thStr !== 'default' && !THINKING_LEVELS.includes(thStr)) {
+            throw new Error(`第 ${cl.lineNum + 1} 行: thinking 档位不合法: "${thStr}"（允许: default/${THINKING_LEVELS.join('/')}）`);
+          }
+          thinking = thStr === 'default' ? '' : thStr;
         } else if (al.startsWith('tools')) {
           const toolsStr = al.replace(/^tools\s*[:=]\s*/, '').trim();
           if (toolsStr.startsWith('[') && toolsStr.endsWith(']')) {
@@ -595,7 +608,7 @@ function parseActorsBlock(cls) {
         }
         i++;
       }
-      actors.push({ type: 'blueprint', name: bpName, soul: '', source: source ?? '', tools: tools ?? [] });
+      actors.push({ type: 'blueprint', name: bpName, soul: '', source: source ?? '', tools: tools ?? [], thinking: thinking ?? '' });
       continue;
     }
 
@@ -625,6 +638,7 @@ function parseActorsBlock(cls) {
     let soul = null;
     let source = null;
     let tools = null;
+    let thinking = null;
 
     // 分割属性部分：逗号或空格分隔均可，但 tools 中有逗号，所以用逗号分割再处理
     const parts = rest.split(',').map(p => p.trim()).filter(Boolean);
@@ -638,13 +652,26 @@ function parseActorsBlock(cls) {
         const val = part.slice(7).trim();
         if (!val) throw new Error(`第 ${cl.lineNum + 1} 行: source 字段缺少值，例如 source:01A`);
         source = val;
+      } else if (part.startsWith('thinking')) {
+        // thinking: <档位>（off/minimal/low/medium/high/xhigh/max，编译期词汇校验）；
+        // `default` 显式值 ≡ 未声明（归一化为空串，与不传字段完全等效）
+        const thStr = part.replace(/^thinking\s*[:=]\s*/, '').trim().toLowerCase();
+        if (thStr !== 'default' && !THINKING_LEVELS.includes(thStr)) {
+          throw new Error(`第 ${cl.lineNum + 1} 行: thinking 档位不合法: "${thStr}"（允许: default/${THINKING_LEVELS.join('/')}）`);
+        }
+        thinking = thStr === 'default' ? '' : thStr;
       } else if (part.startsWith('tools')) {
         // 允许 tools = [...] / tools:[...] / tools: true|false（布尔=全部/禁用）
         let toolsStr = part.replace(/^tools\s*[:=]\s*/, '').trim();
-        // tools 列表内部含逗号会被上面的 split 切碎成多段：拼接后续段直到方括号闭合
-        while (!toolsStr.endsWith(']') && pi + 1 < parts.length) {
-          pi += 1;
-          toolsStr += ',' + parts[pi];
+        // 列表内部含逗号会被上面的 split 切碎成多段：仅列表（[ 开头）才拼接
+        // 到方括号闭合——布尔值绝不拼接，否则 tools: false 后面的属性（如
+        // thinking: default）会被吞进 tools 造成「tools 格式错误」假警报
+        // （2026-08-30 实证：与 thinking 标签共存时必炸）。
+        if (toolsStr.startsWith('[')) {
+          while (!toolsStr.endsWith(']') && pi + 1 < parts.length) {
+            pi += 1;
+            toolsStr += ',' + parts[pi];
+          }
         }
         if (toolsStr.startsWith('[') && toolsStr.endsWith(']')) {
           toolsStr = toolsStr.slice(1, -1);
@@ -657,7 +684,7 @@ function parseActorsBlock(cls) {
       } else {
         // 其他字段直接报错
         throw new Error(
-          `第 ${cl.lineNum + 1} 行: 不支持的字段 "${part}"。合法字段: soul, source, tools`
+          `第 ${cl.lineNum + 1} 行: 不支持的字段 "${part}"。合法字段: soul, source, thinking, tools`
         );
       }
     }
@@ -667,8 +694,9 @@ function parseActorsBlock(cls) {
     if (soul === null) soul = '';
     if (source === null) source = '';
     if (tools === null) tools = [];
+    if (thinking === null) thinking = '';
 
-    actors.push({ type, name, soul, source, tools });
+    actors.push({ type, name, soul, source, tools, thinking });
     i++;
   }
   return actors;

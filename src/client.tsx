@@ -11,7 +11,6 @@
  *   client-ui/chat-node.tsx     dsh-femwa/chat 节点定义 + 行渲染视图
  *   client-ui/director-node.tsx 导演直播锚点节点定义 + 视图
  *   client-ui/editor-view.tsx   「Fem 编辑器」标签页（画布宿主壳+冲突弹窗）
- *   client-ui/fem-button.tsx    侧边栏「🎭 Fem 剧本」按钮
  *   client-ui/view-button.tsx   视角菜单按钮 + CSS 过滤 + 计数座位
  *   client-ui/composer.tsx      投影窗可输入 composer
  *
@@ -33,12 +32,12 @@ import {
 } from './client-ui/turn-nodes'
 import { FemEditorView, type ScriptViewInjected } from './client-ui/editor-view'
 import { mountFemEditorPage } from './client-ui/editor-page'
-import { FemButton, type FemButtonInjected } from './client-ui/fem-button'
 import { FemSubagentCount, FemViewButton, type FemViewInjected } from './client-ui/view-button'
 import { ProjectionComposer, type ProjectionComposerInjected } from './client-ui/composer'
 
-/** Peer packages this plugin needs injected. */
-export const inject: string[] = ['slots', 'conversationEvents', 'sessions', 'workspaces']
+/** Peer packages this plugin needs injected.
+ * （workspaces 原为侧边栏按钮 currentCwd 所需，2026-08-30 随按钮移除。） */
+export const inject: string[] = ['slots', 'conversationEvents', 'sessions']
 
 // ── plugin body ───────────────────────────────────────────────────────────
 
@@ -68,10 +67,6 @@ export function apply(ctx: any): void {
     /** 官方公开解析面（service.ts binding()）：按 id 取会话 outward face。 */
     binding?(id: string): { session?: unknown } | undefined
   } | undefined
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const workspaces = ctx?.get?.('workspaces') as {
-    list?: { getSnapshot?(): { items?: Array<{ workspaceId: string; path: string }>; recentWorkspaceId?: string } }
-  } | undefined
 
   if (conversationEvents !== undefined && typeof conversationEvents.register === 'function') {
     conversationEvents.register(femwaChatDefinition)
@@ -85,17 +80,10 @@ export function apply(ctx: any): void {
     console.warn('[dsh-femwa] conversationEvents unavailable; femwa-role node not registered')
   }
 
-  const currentCwd = (): string | undefined => {
-    try {
-      const state = workspaces?.list?.getSnapshot?.()
-      const recent = state?.items?.find(item => item.workspaceId === state.recentWorkspaceId)
-      return (recent ?? state?.items?.[0])?.path
-    } catch {
-      return undefined
-    }
-  }
-
-  const injected = (): FemButtonInjected => ({
+  // 剧本列表/保存注入面（编辑器页 ScriptView 复用）。原第三字段
+  // createFemSession 与 currentCwd/workspaces 解析链随侧边栏按钮一同移除
+  // （2026-08-30，唯一消费者就是该按钮）。
+  const injected = () => ({
     listScripts: async (): Promise<string[]> => {
       const response = await fetch('/dsh-femwa/scripts')
       if (!response.ok) throw new Error(`scripts HTTP ${response.status}`)
@@ -105,33 +93,19 @@ export function apply(ctx: any): void {
       }
       return data.scripts
     },
-    createFemSession: async (scriptPath?: string): Promise<void> => {
-      const cwd = currentCwd()
-      const body: { cwd?: string; scriptPath?: string } = {}
-      if (cwd !== undefined) body.cwd = cwd
-      if (scriptPath !== undefined) body.scriptPath = scriptPath
-      const response = await fetch('/dsh-femwa/create-session', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(body),
-      })
-      if (!response.ok) {
-        throw new Error(`create-session HTTP ${response.status}`)
-      }
-      const data = await response.json() as { ok?: boolean; sessionId?: string; error?: string }
-      if (data.ok !== true || data.sessionId === undefined) {
-        throw new Error(data.error ?? 'create-session failed')
-      }
-      sessions?.open?.(data.sessionId)
-    },
-    saveScript: async (name: string, content: string): Promise<string> => {
+    saveScript: async (name: string, content: string, sessionId?: string): Promise<string> => {
       // 绝对路径（导出流程选目录拼出的完整路径）→ path 直写；
-      // 否则按 name 存 user_data/projects/（导入/侧边栏保存）。
+      // 否则按 name 存 user_data/projects/。
+      // sessionId 带上则 host 顺写会话记录 {path, text}（导出/覆盖保存统一格式）。
       const isPath = /^[a-zA-Z]:[\\/]/.test(name) || name.startsWith('/') || name.startsWith('\\\\')
       const response = await fetch('/dsh-femwa/save-script', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(isPath ? { path: name, content } : { name, content }),
+        body: JSON.stringify({
+          ...(isPath ? { path: name } : { name }),
+          content,
+          ...(sessionId !== undefined ? { sessionId } : {}),
+        }),
       })
       if (!response.ok) {
         throw new Error(`save-script HTTP ${response.status}`)
@@ -156,15 +130,9 @@ export function apply(ctx: any): void {
     },
   })
 
-  slots.inject('sidebar.footer.action', () => slots.register(
-    {
-      name: 'sidebar.footer.action',
-      id: 'dsh-femwa',
-      order: 100,
-      inject: injected,
-    },
-    FemButton,
-  ))
+  // （侧边栏「🎭 Fem 剧本」入口按钮已于 2026-08-30 移除——sidebar.footer.action
+  // 槽位不再注册；新建 Fem 会话仍可用 host POST /dsh-femwa/create-session API。）
+
   slots.inject('conversation.chat.node', () => slots.register(
     {
       name: 'conversation.chat.node',
@@ -282,8 +250,7 @@ export function apply(ctx: any): void {
       return data.content
     },
     saveScript: injected().saveScript,
-    // The script panel plays on the CURRENT session (it is a per-session
-    // view); the sidebar button keeps create-session for new Fem sessions.
+    // The script panel plays on the CURRENT session (it is a per-session view).
     runScript: async (sid: string, scriptPath?: string): Promise<void> => {
       const body: { sessionId: string; scriptPath?: string } = { sessionId: sid }
       if (scriptPath !== undefined) body.scriptPath = scriptPath

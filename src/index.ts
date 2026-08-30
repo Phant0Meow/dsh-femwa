@@ -55,6 +55,7 @@ import { FEM_PRESET, presetOf, isFemAgent, registerPersonaHooks } from './person
 import { broadcastSse } from './http'
 import { readSessionScript, readSessionScriptText, writeSessionScript } from './state-files'
 import { createProjectionRegistry, awakenedDisposers } from './projection'
+import { installPersistenceListCache } from './list-cache'
 import { createGodMirror } from './god-mirror'
 import { type RunState, registerEngineEventHandlers } from './engine-events'
 import { startRunOnSession } from './run-control'
@@ -234,6 +235,10 @@ export async function apply(ctx: Context, config: unknown): Promise<void> {
       try { dispose() } catch { /* 已分离则忽略 */ }
     }
   }, 'dsh-femwa: awakened projection windows')
+
+  // persistence.list 指纹缓存（2026-08-30 会话列表卡死修复）：session.list /
+  // session.history 的全量 header 扫描从 3.5~10s 降到 ~50ms；卸载即恢复裸方法。
+  ctx.effect(() => installPersistenceListCache(ctx), 'dsh-femwa: persistence list cache')
 
   // ── 主模型专用工具：femwa-mount（挂载剧本到会话）/ femwa-run（控制运行）。
   //    执行体复用现有链路（writeSessionScript / startRunOnSession），只注入依赖。

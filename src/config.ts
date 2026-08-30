@@ -52,6 +52,19 @@ export const Config = z.object({
    * presumed hung and aborted.
    */
   subagentIdleTimeoutMs: z.number().default(120_000),
+  /**
+   * 子 agent 推理等级（'off'|'low'|'high'|'max'）。缺省跟随主会话请求头的
+   * 生效档位（跟随主模型 = 连推理档位一起跟随）。显式设置可覆盖——针对
+   * 强制思考的模型（如 glm-5.3-flash：不带 low/high/max 直接 400 1210），
+   * 子代理请求必须点名一个合法档位。schema 此前漏声明此字段（ResolvedConfig
+   * 有消费无入口，2026-08-29 补上）。
+   *
+   * 注意：这里不是 zod——`z` 实为 @deepseek-ai/schemastery 的 Schema，
+   * 没有 .optional() 方法（不加 .required() 就默认可选）。写成
+   * z.string().optional() 会在模块加载时 TypeError，炸掉整个插件树
+   * （2026-08-29 踩过：3081 启动即崩）。
+   */
+  subagentReasoning: z.string(),
 })
 
 export interface ResolvedConfig {

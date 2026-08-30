@@ -18,7 +18,8 @@ import { editorPageRegisterAnchor, editorPageUnregisterAnchor } from './editor-p
 export interface ScriptViewInjected {
   listScripts(): Promise<string[]>
   readScript(path: string): Promise<string>
-  saveScript(name: string, content: string): Promise<string>
+  /** sessionId 带上则 host 顺写会话记录 {path, text}（导出/覆盖保存统一格式）。 */
+  saveScript(name: string, content: string, sessionId?: string): Promise<string>
   /** Play a script on the CURRENT session (must be Fem mode). */
   runScript(sessionId: string, scriptPath?: string): Promise<void>
   /** Hard-stop the running workflow; the checkpoint stays for resume. */

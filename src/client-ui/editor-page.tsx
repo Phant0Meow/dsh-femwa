@@ -27,7 +27,8 @@ import FEMEditor from '../../femGen/src/FemWorAuto'
 export interface EditorPageInjected {
   listScripts(): Promise<string[]>
   readScript(path: string): Promise<string>
-  saveScript(name: string, content: string): Promise<string>
+  /** sessionId 带上则 host 顺写会话记录 {path, text}（导出/覆盖保存统一格式）。 */
+  saveScript(name: string, content: string, sessionId?: string): Promise<string>
   runScript(sessionId: string, scriptPath?: string): Promise<void>
   stopScript(): Promise<void>
   fetchErrors(sessionId: string): Promise<Array<{ ts: number; text: string }>>
@@ -450,9 +451,42 @@ function FemEditorPage({ sessionId, injected }: { sessionId: string; injected: E
     })
   }
 
-  /** 导出：系统目录选择器选保存目录 → 保存 <目录>/<文件名>.fems → 会话记录
-   *  替换为地址（不保留原文）→ 返回完整路径。 */
-  const onExport = async (fems: string, name: string): Promise<string> => {
+  /** 「未改动」提醒弹窗状态：onExport 挂起等待用户裁决（另存为/返回画布）。 */
+  const [saveReminder, setSaveReminder] = useState<{
+    path: string
+    resolve: (choice: 'saveas' | 'back') => void
+  } | null>(null)
+
+  /** 导出（2026-08-30 三态行为，猫猫拍板）：
+   *  无 path → 系统目录选择器选位置保存（首次导出）；
+   *  有 path 且文件内容与 Editor Text 一致 → 弹「未改动」提醒（另存为/返回画布）；
+   *  有 path 且不一致 → Editor Text 覆盖写入该文件 + 记录 {path, text} 同步更新
+   *  （save-script 带 sessionId 一步完成文件+记录）。
+   *  比对基准=path 文件内容（CRLF 归一）——它是「上次保存版本」的权威载体，
+   *  对旧记录（纯 {path}）与运行时比对逻辑剥离 text 的情况都正确。
+   *  返回 undefined = 用户选了「返回编辑画布」（未保存）。 */
+  const onExport = async (fems: string, name: string): Promise<string | undefined> => {
+    const norm = (s: string): string => s.replace(/\r\n/g, '\n')
+    const currentPath = state?.scriptPath
+    if (currentPath !== undefined && currentPath.length > 0) {
+      let fileText: string | undefined
+      try {
+        fileText = await injected.readScript(currentPath)
+      } catch {
+        fileText = undefined // 文件被外部删除：视为「有改动」→ 覆盖保存即重建该文件
+      }
+      if (fileText !== undefined && norm(fileText) === norm(fems)) {
+        const choice = await new Promise<'saveas' | 'back'>((resolve) => {
+          setSaveReminder({ path: currentPath, resolve })
+        })
+        if (choice === 'back') return undefined
+        // saveas → 落到下方另存为流程（新地址 + 记录跟随新地址）
+      } else {
+        const saved = await injected.saveScript(currentPath, fems, sessionId)
+        setState(prev => prev === null ? prev : { ...prev, scriptPath: saved, script: fems })
+        return saved
+      }
+    }
     const pickResp = await fetch('/dsh-femwa/pick-directory', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
     const pickData = await pickResp.json() as { ok?: boolean; directory?: string | null; error?: string; kind?: string }
     if (pickData.ok !== true || typeof pickData.directory !== 'string' || pickData.directory.length === 0) {
@@ -463,27 +497,30 @@ function FemEditorPage({ sessionId, injected }: { sessionId: string; injected: E
     }
     const safe = name.replace(/[\\/:*?"<>|]/g, '_').replace(/\.fems$/i, '')
     const fullPath = `${pickData.directory.replace(/[\\/]+$/, '')}\\${safe}.fems`
-    const saved = await injected.saveScript(fullPath, fems)
-    await fetch('/dsh-femwa/session-script', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ sessionId, scriptPath: saved }),
-    })
+    const saved = await injected.saveScript(fullPath, fems, sessionId)
     setState(prev => prev === null ? prev : { ...prev, scriptPath: saved, script: fems })
     return saved
   }
 
-  /** 导入：FileReader 已把本地文件读入画布（femGen 内部），这里把内容上传
-   *  保存到服务端 projects/（按文件名）→ 会话记录只存地址。 */
-  const onImport = async (content: string, filename: string): Promise<string> => {
-    const saved = await injected.saveScript(filename.replace(/\.fems$/i, ''), content)
+  /** 导入（2026-08-30 改引用式，猫猫拍板「从哪导入就指向哪」）：host 弹系统
+   *  文件选择器（浏览器 FileReader 拿不到完整路径，必须 host 侧选）→
+   *  {path, content}；记录写 {path, text}（mount 同款并存格式，不再复制到
+   *  projects/）。用户取消返回 null。 */
+  const onImport = async (): Promise<{ path: string; content: string } | null> => {
+    const resp = await fetch('/dsh-femwa/pick-script', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
+    const data = await resp.json() as { ok?: boolean; path?: string | null; content?: string; error?: string }
+    if (data.ok !== true) throw new Error(data.error ?? 'pick-script failed')
+    // 提取局部常量再守卫：属性窄化不保留进 setState 回调（TS2345 实测）。
+    const pickedPath = data.path
+    const pickedContent = data.content
+    if (typeof pickedPath !== 'string' || pickedPath.length === 0 || pickedContent === undefined) return null
     await fetch('/dsh-femwa/session-script', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ sessionId, scriptPath: saved }),
+      body: JSON.stringify({ sessionId, scriptPath: pickedPath, fems: pickedContent }),
     })
-    setState(prev => prev === null ? prev : { ...prev, scriptPath: saved, script: content })
-    return saved
+    setState(prev => prev === null ? prev : { ...prev, scriptPath: pickedPath, script: pickedContent })
+    return { path: pickedPath, content: pickedContent }
   }
 
   return (
@@ -526,6 +563,35 @@ function FemEditorPage({ sessionId, injected }: { sessionId: string; injected: E
                 onClick={resolveConflictByOverride}
                 style={{ ...conflictBtnStyle, color: '#fff', background: '#d96b2b', borderColor: '#d96b2b' }}
               >保留我的编辑</button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+      {saveReminder !== null && createPortal(
+        <div style={{
+          position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(0,0,0,0.35)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div style={{
+            maxWidth: 420, width: 'calc(100% - 48px)', padding: '18px 20px', borderRadius: 12,
+            background: 'color-mix(in srgb, var(--dsw-surface-2, #f5f5f5) 96%, transparent)',
+            border: '1px solid var(--dsw-border, #e0e0e0)', boxShadow: '0 8px 28px rgba(0,0,0,0.22)',
+            fontSize: 13, lineHeight: 1.6,
+          }}>
+            <div style={{ fontWeight: 700, marginBottom: 6 }}>📤 你并未改动文本</div>
+            <div style={{ color: 'var(--dsw-text-secondary, #666)', marginBottom: 14, wordBreak: 'break-all' }}>
+              当前编辑器文本和 {saveReminder.path} 里保存的版本一样。你是想要另存为？还是忘了把画布上的改动应用到文本（图到文本）？
+            </div>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => { const r = saveReminder; setSaveReminder(null); r.resolve('back') }}
+                style={conflictBtnStyle}
+              >返回编辑画布</button>
+              <button
+                onClick={() => { const r = saveReminder; setSaveReminder(null); r.resolve('saveas') }}
+                style={{ ...conflictBtnStyle, color: '#fff', background: '#d96b2b', borderColor: '#d96b2b' }}
+              >另存为</button>
             </div>
           </div>
         </div>,

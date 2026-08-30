@@ -22,6 +22,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { yieldToEventLoop } from './list-cache'
 
 /** 会话事件的动态 append 面：事件类型在运行时来自引擎事件流/镜像白名单
  * （超出静态 SessionEventMap 的字面量联合，如 subagent/descriptor、镜像的
@@ -337,7 +338,11 @@ async function ensureProjectionWindow(
   }
 }
 
-/** 上帝窗 + 戏内窗 + 该剧本全部角色窗的集合（创建/复用）。 */
+/** 上帝窗 + 戏内窗 + 该剧本全部角色窗的集合（创建/复用）。
+ *  唤醒错峰（2026-08-30）：每个窗的冷唤醒（persistence.prepare）内部同步解压+
+ *  解析整份日志，大会话一次可堵 event loop 秒级（diag 实锤 stall 2.5~10s）。
+ *  窗与窗之间 yield 把控制权还给事件循环，让前端心跳/其他请求能穿插呼吸——
+ *  不减少总耗时，但把「一次连堵 N 秒」摊平成 N 次短堵，UI 不再整段冻结。 */
 async function ensureProjectionWindows(
   ctx: Context,
   sid: string,
@@ -345,11 +350,14 @@ async function ensureProjectionWindows(
   cwd: string,
 ): Promise<ProjectionWindows> {
   const god = await ensureProjectionWindow(ctx, sid, GOD_ACTOR, cwd)
+  await yieldToEventLoop()
   const stage = await ensureProjectionWindow(ctx, sid, STAGE_ACTOR, cwd)
+  await yieldToEventLoop()
   const map = new Map<string, Session>()
   for (const actor of actors) {
     const win = await ensureProjectionWindow(ctx, sid, actor, cwd)
     if (win !== undefined) map.set(actor, win)
+    await yieldToEventLoop()
   }
   return { god, stage, actors: map }
 }
@@ -433,16 +441,23 @@ export function createProjectionRegistry(ctx: Context): ProjectionRegistry {
   const buildOnce = async (sid: string, actors: string[], cwd: string): Promise<void> => {
     const existing = windows.get(sid)
     if (existing !== undefined) {
-      // 补充新角色窗（多剧本/角色追加）
+      // 补充新角色窗（多剧本/角色追加）；补充唤醒同样逐窗错峰。
       for (const actor of actors) {
         if (!existing.actors.has(actor)) {
           const win = await ensureProjectionWindow(ctx, sid, actor, cwd)
           if (win !== undefined) existing.actors.set(actor, win)
+          await yieldToEventLoop()
         }
       }
-      if (existing.god === undefined) existing.god = await ensureProjectionWindow(ctx, sid, GOD_ACTOR, cwd)
+      if (existing.god === undefined) {
+        existing.god = await ensureProjectionWindow(ctx, sid, GOD_ACTOR, cwd)
+        await yieldToEventLoop()
+      }
       // 戏内窗同上帝窗兜底（旧 registry 条目/重启前建的窗可能没有 stage）。
-      if (existing.stage === undefined) existing.stage = await ensureProjectionWindow(ctx, sid, STAGE_ACTOR, cwd)
+      if (existing.stage === undefined) {
+        existing.stage = await ensureProjectionWindow(ctx, sid, STAGE_ACTOR, cwd)
+        await yieldToEventLoop()
+      }
     } else {
       const created = await ensureProjectionWindows(ctx, sid, actors, cwd)
       windows.set(sid, created)

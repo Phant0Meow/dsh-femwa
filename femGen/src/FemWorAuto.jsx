@@ -98,7 +98,8 @@ const FEMEditor = forwardRef(function FEMEditor({ plugin = false, onRun, onStop,
 // onPersistScript(fems)：定稿按钮（图生文本/文本生图）显式落盘会话记录；
 // 2026-08-22 起不再有画布防抖自动回写，原文以用户输入为准。
 // savedPath：会话剧本文件地址（导出/导入产生）——空=未保存（提示+绝对寻址）。
-// onExport(fems, name)：导出=用户选目录保存→地址存会话；onImport(content, filename)：导入=上传保存→地址存会话。
+// onExport(fems, name)：导出（三态行为在 host 侧 editor-page 实现，返回 undefined=用户选了返回画布）；
+// onImport()：导入=host 弹系统文件选择器→{path, content}（引用原始位置，2026-08-30），null=用户取消。
 // onBackToShell：插件模式手机端返回键回调（dsh-femwa 传 ctx.layout.toggleSidebar）。
 //console.log('✅ FEMEditor 已进入渲染');
   // ── 主题：auto=跟随 dsh 本体（body[data-ds-dark-theme] 白天→dsh / 黑夜→dsh-dark），
@@ -2150,22 +2151,16 @@ const submitHumanInput = useCallback(
     }
   }
 
-  // Import .fems file
+  // Import .fems file（独立模式专用：浏览器 input + FileReader 读入画布）。
+  // 插件模式不走这里——导入按钮直调 onImport()（host 弹系统文件选择器，
+  // 引用原始位置，2026-08-30）：浏览器 FileReader 拿不到完整路径。
   function handleImportFile(e) {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (event) => {
       try {
-        const text = event.target.result;
-        applyFEMText(text);
-        // 插件模式：同时上传保存到服务端（按文件名存 projects/）→ 会话只存地址。
-        // 独立模式：仅读入画布（原行为）。
-        if (plugin && typeof onImport === 'function') {
-          onImport(text, file.name).catch((err) => {
-            console.warn('[导入 .fems] 服务端保存失败（画布已加载）:', err);
-          });
-        }
+        applyFEMText(event.target.result);
       } catch (err) {
         setFemError(err.message);
       }
@@ -3060,7 +3055,21 @@ nodes={nodes}
               onChange={handleImportFile}
             />
             <button
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => {
+                // 插件模式：host 弹系统文件选择器（引用原始位置，2026-08-30）→ 画布载入；
+                // 独立模式：浏览器 file input + FileReader。
+                if (plugin && typeof onImport === 'function') {
+                  onImport().then((picked) => {
+                    if (picked === null) return; // 用户取消
+                    applyFEMText(picked.content);
+                  }).catch((err) => {
+                    console.warn('[导入 .fems] 失败:', err);
+                    alert(String(err?.message ?? err));
+                  });
+                  return;
+                }
+                fileInputRef.current?.click();
+              }}
               style={{ ...btnS, fontSize: 12, padding: '5px 14px' }}
             >
               导入 .fems

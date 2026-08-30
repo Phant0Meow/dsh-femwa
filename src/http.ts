@@ -24,6 +24,9 @@ export interface SaveScriptBody {
   content?: unknown
   /** 绝对路径直写（导出流程：用户经系统目录选择器选定目录 + 文件名）。 */
   path?: unknown
+  /** 带上则文件写成功后顺写会话剧本记录 {path, text}（导出/覆盖保存统一
+   *  为 mount 同款并存格式，2026-08-30 猫猫拍板）+ 广播 script_changed。 */
+  sessionId?: unknown
 }
 
 /** Read a JSON request body (empty body tolerated). */

@@ -86,6 +86,10 @@ class ActorDef:
     # tools: true/false 布尔开关（None = 剧本未声明，交由宿主默认决定）；
     # tools: [name, ...] 仍走 tools 列表（白名单）。
     tools_enabled: Optional[bool] = None
+    # thinking: <档位> 思考档位（off/minimal/low/medium/high/xhigh/max，解析期
+    # 校验）；None = 剧本未声明 → 请求不带 reasoning_effort（剥离继承后落到
+    # 部署默认档位/提供方默认，语义同 dsh 模型选择器的 Default 项）。
+    thinking: Optional[str] = None
     is_blueprint: bool = False
 
 @dataclass
@@ -470,6 +474,25 @@ def _parse_tools(s: str) -> List[str]:
     return []
 
 
+# pi-ai 的 ModelThinkingLevel 全集（dsh 档位词汇的唯一权威，无 default——
+# 「默认」由「不带 thinking 声明」表达，与 dsh 模型选择器 Default 项同语义）。
+# 另接受显式 `default` 值：解析期归一化为未声明，与不传字段完全等效。
+THINKING_LEVELS = ('off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max')
+
+
+def _parse_thinking(s: str) -> str:
+    """actor 的 thinking 档位：小写归一 + 词汇校验，非法直接编译报错
+    （fail loud，不静默透传给网关）。`default` 显式值 ≡ 未声明（返回空串，
+    上游按「无 thinking 声明」处理，效果与不传字段完全一致）。"""
+    v = s.strip().strip('"').strip("'").lower()
+    if v == 'default':
+        return ''
+    if v not in THINKING_LEVELS:
+        raise ValueError(
+            f"thinking 档位不合法: {v!r}（允许: default/{'/'.join(THINKING_LEVELS)}）")
+    return v
+
+
 def _parse_out_multi(s: str) -> List[OutDef]:
     s = s.strip().rstrip(',').strip()
     if not s:
@@ -738,6 +761,8 @@ def eval_actors(block: Block) -> Dict[str, ActorDef]:
                             attrs['tools_enabled'] = av_l == 'true'
                         else:
                             attrs['tools'] = _parse_tools(av)
+                    elif ak == 'thinking':
+                        attrs['thinking'] = _parse_thinking(av)
                     elif ak in ('soul', 'source'):
                         attrs[ak] = av  # 保持字符串，不转数字
                     else:
@@ -746,6 +771,7 @@ def eval_actors(block: Block) -> Dict[str, ActorDef]:
             actors[name] = ActorDef(type=ActorType.BLUEPRINT, ref=name, name=name,
                                     source=attrs.get('source'), tools=attrs.get('tools', []),
                                     tools_enabled=attrs.get('tools_enabled'),
+                                    thinking=attrs.get('thinking'),
                                     is_blueprint=True)
             i = j
             continue
@@ -756,7 +782,7 @@ def eval_actors(block: Block) -> Dict[str, ActorDef]:
                 ats = left_parts[0]
                 nm = left_parts[1]
                 at = ActorType.AI if ats == 'ai' else ActorType.HUMAN
-                soul, source, tools, tools_enabled = None, None, [], None
+                soul, source, tools, tools_enabled, thinking = None, None, [], None, None
                 for p in _split_br(rest):
                     p = p.strip()
                     if p.startswith('soul:'):
@@ -766,6 +792,10 @@ def eval_actors(block: Block) -> Dict[str, ActorDef]:
                     elif p.startswith('source:'):
                         source = p[7:].strip().strip('"').strip("'")
                         #print(f"[DEBUG eval_actors] source={source!r}")
+                    elif p.startswith('thinking:'):
+                        thinking = _parse_thinking(p[len('thinking:'):])
+                    elif p.startswith('thinking ='):
+                        thinking = _parse_thinking(p[len('thinking ='):])
                     elif p.startswith('tools:'):
                         raw_tools = p[6:].strip()
                         if raw_tools in ('true', 'false'):
@@ -779,7 +809,7 @@ def eval_actors(block: Block) -> Dict[str, ActorDef]:
                         else:
                             tools = _parse_tools(raw_tools)
                 actors[nm] = ActorDef(type=at, ref=nm, name=nm, soul=soul, source=source,
-                                      tools=tools, tools_enabled=tools_enabled)
+                                      tools=tools, tools_enabled=tools_enabled, thinking=thinking)
                 #print(f"[DEBUG eval_actors] 创建 human actor: {nm}, soul={soul!r}, source={source!r}")
         else:
             # 裸 actor：`ai @名`（无 `=`、无属性）→ soul/source 缺省（soul 非必须；

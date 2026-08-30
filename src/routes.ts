@@ -337,45 +337,44 @@ export function registerRoutes(ctx: Context, deps: RoutesDeps): void {
       path: '/dsh-femwa/session-script',
       handler: (req: IncomingMessage, res: ServerResponse): void => {
         void (async () => {
-          // 会话剧本记录写（两种形态）：
+          // 会话剧本记录写（2026-08-30 猫猫拍板统一为 mount 同款 {path,text}
+          // 并存格式——导入/导出不再清原文，text 恒为最新版）：
           //  - {sessionId, fems}：画布编辑防抖的原文快照（保留已有地址）
-          //  - {sessionId, scriptPath}：导出/导入获得地址 → 只存地址（清原文）
+          //  - {sessionId, fems, scriptPath}：导入/另存为 → 写 text + 地址覆盖为
+          //    scriptPath（指向原始位置/新位置；显式动作，跳过乐观锁无条件写）
           const raw = await readBody(req) as unknown as Record<string, unknown>
-          const sessionId = typeof raw.sessionId === 'string' && raw.sessionId.trim().length > 0 ? raw.sessionId : ''
+          const sessionId = typeof raw.sessionId === 'string' && raw.sessionId.trim().length > 0 ? raw.sessionId.trim() : ''
           if (sessionId.length === 0) {
             writeJson(res, 400, { ok: false, error: 'sessionId is required' })
             return
           }
-          const prev = await readSessionScript(resolved.femwaRoot, sessionId)
           const scriptPath = typeof raw.scriptPath === 'string' && raw.scriptPath.trim().length > 0 ? raw.scriptPath.trim() : ''
           const fems = typeof raw.fems === 'string' && raw.fems.trim().length > 0 ? raw.fems : ''
           const baseRev = typeof raw.baseRev === 'number' ? raw.baseRev : undefined
           const pageId = typeof raw.pageId === 'string' ? raw.pageId : ''
-          if (scriptPath.length > 0) {
-            // 保存动作：会话记录替换为地址，不保留原文（导出/导入=显式动作，无条件写）。
-            const result = await writeSessionScript(resolved.femwaRoot, sessionId, { path: scriptPath })
-            broadcastSse('script_changed', { sessionId })
-            writeJson(res, 200, { ok: true, rev: result.ok ? result.rev : undefined })
-          } else if (fems.length > 0) {
-            // 画布编辑防抖：写原文，保留已有地址。带 baseRev → 乐观锁：
-            // 多端并发编辑后写者输 → 409 + 服务端当前记录，前端弹窗让用户裁决。
-            const result = await writeSessionScript(
-              resolved.femwaRoot,
-              sessionId,
-              { ...prev?.path === undefined ? {} : { path: prev.path }, text: fems },
-              baseRev,
-            )
-            if (!result.ok) {
-              writeJson(res, 409, { ok: false, error: 'conflict', record: result.record })
-              return
-            }
-            // 广播其他端重载（pageId=写者自身，前端跳过自己的广播防回环）。
-            broadcastSse('script_changed', { sessionId, pageId })
-            writeJson(res, 200, { ok: true, rev: result.rev })
-          } else {
-            writeJson(res, 400, { ok: false, error: 'fems or scriptPath is required' })
+          if (fems.length === 0) {
+            writeJson(res, 400, { ok: false, error: 'fems is required' })
             return
           }
+          const prev = await readSessionScript(resolved.femwaRoot, sessionId)
+          const explicit = scriptPath.length > 0
+          const result = await writeSessionScript(
+            resolved.femwaRoot,
+            sessionId,
+            {
+              ...(explicit ? { path: scriptPath } : prev?.path === undefined ? {} : { path: prev.path }),
+              text: fems,
+            },
+            explicit ? undefined : baseRev,
+          )
+          if (!result.ok) {
+            writeJson(res, 409, { ok: false, error: 'conflict', record: result.record })
+            return
+          }
+          // 广播其他端重载（pageId=快照写者自身，前端跳过自己的广播防回环；
+          // 显式保存不带 pageId=全端重载，与旧导出/导入行为一致）。
+          broadcastSse('script_changed', explicit ? { sessionId } : { sessionId, pageId })
+          writeJson(res, 200, { ok: true, rev: result.rev })
         })().catch((error: unknown) => {
           // 防御：响应已发出后再出错，绝不能二次 writeJson（ERR_HTTP_HEADERS_SENT
           // 会作为 unhandledRejection 把整个 dsh 进程带崩——2026-08-21 实测教训）。
@@ -472,6 +471,65 @@ export function registerRoutes(ctx: Context, deps: RoutesDeps): void {
             // browse 后端无系统对话框：让前端填路径（此处仅声明能力不足）。
             writeJson(res, 501, { ok: false, error: 'directoryPicker backend is browse; path entry unsupported yet', kind: cap.kind })
           }
+        })().catch((error: unknown) => {
+          writeJson(res, 500, { ok: false, error: String(error) })
+        })
+      },
+    })
+    webServer.register({
+      kind: 'exact',
+      path: '/dsh-femwa/pick-script',
+      handler: (_req: IncomingMessage, res: ServerResponse): void => {
+        void (async () => {
+          // 导入流程（2026-08-30 猫猫拍板「导入=引用」）：host 弹系统打开文件
+          // 对话框，拿到用户所选剧本的**原始位置完整路径**——浏览器 FileReader
+          // 出于安全只给文件名不给路径，引用式导入必须由 host 侧选文件。
+          // 适用前提与 pick-directory 的 native 后端一致：操作者坐在宿主屏幕前。
+          // 实现说明：dsh 本体 directoryPicker seam 只有目录选择（native 后端
+          // 写死 FOS_PICKFOLDERS，无文件选择变体），插件内用 powershell
+          // WinForms OpenFileDialog 自包含实现（零新依赖、不碰本体）。
+          // PS 脚本 ASCII-only（PS5.1 无 BOM 按 ANSI 读的教训）；所选路径经
+          // UTF-8 OutputEncoding 写 stdout（用户目录可能含中文）。
+          // 约定：退出码 0=已选（stdout=路径）；2=用户取消；1/其他=出错。
+          const { spawn } = await import('node:child_process')
+          const ps = [
+            "$ErrorActionPreference='Stop'",
+            '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)',
+            'Add-Type -AssemblyName System.Windows.Forms | Out-Null',
+            '$d = New-Object System.Windows.Forms.OpenFileDialog',
+            "$d.Title = 'Import FEM Script'",
+            "$d.Filter = 'FEM Script (*.fems)|*.fems|All Files (*.*)|*.*'",
+            'if ($d.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($d.FileName) } else { exit 2 }',
+          ].join('; ')
+          const child = spawn('powershell.exe', ['-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-Command', ps], { windowsHide: true })
+          let out = ''
+          let err = ''
+          child.stdout.on('data', (c: Buffer) => { out += c.toString('utf8') })
+          child.stderr.on('data', (c: Buffer) => { err += c.toString('utf8') })
+          // 用户可能中途走开：10 分钟无裁决杀掉对话框，避免请求僵尸悬挂。
+          const timer = setTimeout(() => { try { child.kill() } catch { /* already gone */ } }, 600_000)
+          const code = await new Promise<number>((resolve) => {
+            child.on('close', (c) => { clearTimeout(timer); resolve(c ?? 1) })
+            child.on('error', () => { clearTimeout(timer); resolve(-1) })
+          })
+          const picked = out.trim()
+          if (code === 0 && picked.length > 0) {
+            const { readFileSync } = await import('node:fs')
+            let content: string
+            try {
+              content = readFileSync(picked, 'utf8')
+            } catch (error) {
+              writeJson(res, 500, { ok: false, error: `cannot read ${picked}: ${String(error)}` })
+              return
+            }
+            writeJson(res, 200, { ok: true, path: picked, content })
+            return
+          }
+          if (code === 2) {
+            writeJson(res, 200, { ok: true, path: null })
+            return
+          }
+          writeJson(res, 500, { ok: false, error: `pick-script failed (exit ${String(code)})${err.trim().length > 0 ? `: ${err.trim().slice(-400)}` : ''}` })
         })().catch((error: unknown) => {
           writeJson(res, 500, { ok: false, error: String(error) })
         })

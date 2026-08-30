@@ -2557,12 +2557,16 @@ class FEMRunner:
             # 由宿主按其默认决定（缺省应恢复"可用工具"）。
             actor_tools: Optional[bool] = None
             actor_tool_list: List[str] = []
+            actor_thinking = ''
             adef = self._resolve_actor_def(ad, eparam)
             actor_source = ''
             if adef is not None:
                 actor_tools = getattr(adef, 'tools_enabled', None)
                 actor_tool_list = list(getattr(adef, 'tools', None) or [])
                 actor_source = str(getattr(adef, 'source', None) or '').strip()
+                # actor 的 thinking 档位（None=剧本未声明 → 宿主剥离继承 effort，
+                # 落到部署默认档位；声明了就按写的走，宿主注入对应 effort）
+                actor_thinking = str(getattr(adef, 'thinking', None) or '').strip()
             self._emit_event('ai_request', {
                 'wait_key': dsh_wait_key,
                 'node_name': _current_node_id,
@@ -2575,6 +2579,7 @@ class FEMRunner:
                 'scope_info': scope_info,
                 'actor_tools': actor_tools,
                 'actor_tool_list': actor_tool_list,
+                'actor_thinking': actor_thinking,
             })
             dsh_result = await self.engine.human_input.wait_for_input(dsh_wait_key, timeout=3600)
             # host 负责：启动子 agent、组装完整轨迹（思考链[仅工具轮]+回复+工具结果）。
