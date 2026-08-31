@@ -36,6 +36,15 @@ dsh-femwa/                  ← 整个文件夹就是插件
 
 ## 安装
 
+> 本仓库目前为**私有**，公开后即可使用一键安装；当前请使用下方手动装配。
+
+```sh
+# 仓库公开后可用（安装时自动编译，包内含 prepare 脚本，装完重启 dsh web 生效）：
+dsh plugin --profile web add github:Phant0Meow/dsh-femwa
+```
+
+### 手动装配
+
 ```bash
 # 1. 把整个文件夹放进 profile 的 node_modules（或 junction 指过去）
 #    e.g. ~/.dsh/profiles/web/node_modules/dsh-femwa
